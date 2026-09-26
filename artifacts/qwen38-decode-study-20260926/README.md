@@ -90,8 +90,22 @@ affinity 的七项 smoke 与 control 一致（6/7，同一逆序题失败，工�
 grouped 停止发送 SIGTERM；日志显示 vLLM 的 abort-mode shutdown 内部以 0 秒超时
 强制结束 EngineCore。后续三个 worker 卡在驱动，芯片复位因引用仍在而返回
 `EBUSY`。worker 最终因设备超时退出，再次复位仍报 `Hotreset is executing`。
-无 NPU worker 的启动中 API 后续另发 SIGINT。已请求整机重启许可；服务尚未恢复，
-不能把准备好的启动脚本当成服务恢复证据。
+无 NPU worker 的启动中 API 后续另发 SIGINT。初次交付时尚未恢复服务。
+该内存错误出现在停滞后的 shutdown/recovery 阶段；尚未证明它就是首次停滞的
+原因，也未证明 grouped MTP 无法修复。
+
+## 服务恢复（23:16 UTC）
+
+用户随后要求启动约 19 tok/s 的 affinity 版本。设备仍无法完成简单计算，
+执行主机重启后，四张 NPU 均通过真实张量计算检查，再启动正常端口服务。
+[recovery.json](recovery.json) 保存恢复证据：
+
+- 地址：`http://192.168.53.187:8001`，model ID `qwen38-flash-next-w8a8`。
+- source root 为 `affinity`；四个 rank 的所有线程分别绑定到既定 CPU 池。
+- 语义 smoke 为 6/7，与基线相同；严格参数工具调用通过。
+- 512-token 持续生成的服务端解码速率 **19.22 tok/s**，MTP 接受率 89.26%。
+- 持久 tmux 会话：`qwen38-affinity`；上下文上限仍为 160000。
+- grouped draft 未启用。本次恢复没有重新运行完整 A/B 矩阵。
 
 ## 操作与证据
 
