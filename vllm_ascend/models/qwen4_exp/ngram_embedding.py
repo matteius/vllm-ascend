@@ -521,6 +521,7 @@ class AscendPLELazyShardEmbeddingMethod(AscendPLEEmbeddingMethod):
         embedding_dim: int,
         *,
         checkpoint_dir: str | Path | None,
+        index_filename: str = DEFAULT_SAFETENSORS_INDEX,
         shard_tensor_fmt: str = DEFAULT_SHARD_TENSOR_FMT,
         split_ngram_parts: int = DEFAULT_SPLIT_NGRAM_PARTS,
         dtype_policy: Qwen4ExpDtypePolicy = ASCEND_QWEN4EXP_DTYPE_POLICY,
@@ -534,6 +535,9 @@ class AscendPLELazyShardEmbeddingMethod(AscendPLEEmbeddingMethod):
         if split_ngram_parts <= 0:
             raise ValueError("split_ngram_parts must be positive")
         self._checkpoint_dir = Path(checkpoint_dir)
+        if Path(index_filename).name != index_filename:
+            raise ValueError("index_filename must be a basename")
+        self._index_filename = index_filename
         self._shard_tensor_fmt = shard_tensor_fmt
         self._split_ngram_parts = int(split_ngram_parts)
         self.shard_rows = -(-int(num_embeddings) // self._split_ngram_parts)  # ceil
@@ -578,7 +582,7 @@ class AscendPLELazyShardEmbeddingMethod(AscendPLEEmbeddingMethod):
 
     def _load_weight_map(self) -> dict[str, str]:
         if self._weight_map is None:
-            index = self._checkpoint_dir / DEFAULT_SAFETENSORS_INDEX
+            index = self._checkpoint_dir / self._index_filename
             with open(index) as handle:
                 data = json.load(handle)
             self._weight_map = dict(data.get("weight_map", data))
@@ -595,7 +599,7 @@ class AscendPLELazyShardEmbeddingMethod(AscendPLEEmbeddingMethod):
         if filename is None:
             raise PLETransportUnavailableError(
                 f"PLE shard tensor {name!r} not found in safetensors index "
-                f"{self._checkpoint_dir / DEFAULT_SAFETENSORS_INDEX}"
+                f"{self._checkpoint_dir / self._index_filename}"
             )
         path = self._checkpoint_dir / filename
         header, data_base = self._parse_st_header(path)

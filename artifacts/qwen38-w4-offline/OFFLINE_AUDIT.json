@@ -1,0 +1,340 @@
+{
+  "complete": true,
+  "header_inventory_valid": true,
+  "shards": 1610,
+  "tensor_counts": {
+    "other_float": 1434,
+    "routed_experts": 221184,
+    "ple": 128
+  },
+  "tensor_bytes": {
+    "other_float": 16007561208,
+    "routed_experts": 63229132800,
+    "ple": 102400491520
+  },
+  "tensor_gib": {
+    "other_float": 14.90820311754942,
+    "routed_experts": 58.88671875,
+    "ple": 95.36788940429688
+  },
+  "samples": [
+    {
+      "projection": "model.language_model.layers.0.mlp.experts.0.gate_proj",
+      "relative_weight_rmse": 0.10969970375299454,
+      "weight_cosine": 0.994003415107727,
+      "synthetic_projection_relative_rmse": 0.11039543151855469,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.0.mlp.experts.0.up_proj",
+      "relative_weight_rmse": 0.10752438753843307,
+      "weight_cosine": 0.9942322373390198,
+      "synthetic_projection_relative_rmse": 0.10790305584669113,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.0.mlp.experts.0.down_proj",
+      "relative_weight_rmse": 0.10368981212377548,
+      "weight_cosine": 0.9946277141571045,
+      "synthetic_projection_relative_rmse": 0.10382191836833954,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.0.mlp.experts.255.gate_proj",
+      "relative_weight_rmse": 0.11070161312818527,
+      "weight_cosine": 0.9939025640487671,
+      "synthetic_projection_relative_rmse": 0.10950448364019394,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.0.mlp.experts.255.up_proj",
+      "relative_weight_rmse": 0.10662157088518143,
+      "weight_cosine": 0.9943275451660156,
+      "synthetic_projection_relative_rmse": 0.1070670560002327,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.0.mlp.experts.255.down_proj",
+      "relative_weight_rmse": 0.10559692978858948,
+      "weight_cosine": 0.9944349527359009,
+      "synthetic_projection_relative_rmse": 0.10460088402032852,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.0.mlp.experts.511.gate_proj",
+      "relative_weight_rmse": 0.10754133015871048,
+      "weight_cosine": 0.9942262768745422,
+      "synthetic_projection_relative_rmse": 0.11020540446043015,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.0.mlp.experts.511.up_proj",
+      "relative_weight_rmse": 0.10719617456197739,
+      "weight_cosine": 0.9942601919174194,
+      "synthetic_projection_relative_rmse": 0.10717938095331192,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.0.mlp.experts.511.down_proj",
+      "relative_weight_rmse": 0.10054202377796173,
+      "weight_cosine": 0.9949290752410889,
+      "synthetic_projection_relative_rmse": 0.10018804669380188,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.12.mlp.experts.0.gate_proj",
+      "relative_weight_rmse": 0.10303851217031479,
+      "weight_cosine": 0.9947088956832886,
+      "synthetic_projection_relative_rmse": 0.10359098762273788,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.12.mlp.experts.0.up_proj",
+      "relative_weight_rmse": 0.10249058902263641,
+      "weight_cosine": 0.9947444200515747,
+      "synthetic_projection_relative_rmse": 0.10372820496559143,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.12.mlp.experts.0.down_proj",
+      "relative_weight_rmse": 0.10173235833644867,
+      "weight_cosine": 0.9948286414146423,
+      "synthetic_projection_relative_rmse": 0.10196695476770401,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.12.mlp.experts.255.gate_proj",
+      "relative_weight_rmse": 0.10295633226633072,
+      "weight_cosine": 0.9946931600570679,
+      "synthetic_projection_relative_rmse": 0.10417516529560089,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.12.mlp.experts.255.up_proj",
+      "relative_weight_rmse": 0.10282283276319504,
+      "weight_cosine": 0.9947009682655334,
+      "synthetic_projection_relative_rmse": 0.10341032594442368,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.12.mlp.experts.255.down_proj",
+      "relative_weight_rmse": 0.10198533535003662,
+      "weight_cosine": 0.9947908520698547,
+      "synthetic_projection_relative_rmse": 0.10165686905384064,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.12.mlp.experts.511.gate_proj",
+      "relative_weight_rmse": 0.1019909605383873,
+      "weight_cosine": 0.9947906136512756,
+      "synthetic_projection_relative_rmse": 0.10489397495985031,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.12.mlp.experts.511.up_proj",
+      "relative_weight_rmse": 0.10185468941926956,
+      "weight_cosine": 0.9948073625564575,
+      "synthetic_projection_relative_rmse": 0.10126703232526779,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.12.mlp.experts.511.down_proj",
+      "relative_weight_rmse": 0.10120689123868942,
+      "weight_cosine": 0.9948720932006836,
+      "synthetic_projection_relative_rmse": 0.10057100653648376,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.24.mlp.experts.0.gate_proj",
+      "relative_weight_rmse": 0.10167983919382095,
+      "weight_cosine": 0.9948276877403259,
+      "synthetic_projection_relative_rmse": 0.10369446873664856,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.24.mlp.experts.0.up_proj",
+      "relative_weight_rmse": 0.10152707248926163,
+      "weight_cosine": 0.9948506951332092,
+      "synthetic_projection_relative_rmse": 0.10094252973794937,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.24.mlp.experts.0.down_proj",
+      "relative_weight_rmse": 0.10094018280506134,
+      "weight_cosine": 0.9949069023132324,
+      "synthetic_projection_relative_rmse": 0.10052427649497986,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.24.mlp.experts.255.gate_proj",
+      "relative_weight_rmse": 0.10264722257852554,
+      "weight_cosine": 0.9947341680526733,
+      "synthetic_projection_relative_rmse": 0.10430852323770523,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.24.mlp.experts.255.up_proj",
+      "relative_weight_rmse": 0.10249907523393631,
+      "weight_cosine": 0.9947477579116821,
+      "synthetic_projection_relative_rmse": 0.10256152600049973,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.24.mlp.experts.255.down_proj",
+      "relative_weight_rmse": 0.10090434551239014,
+      "weight_cosine": 0.9949081540107727,
+      "synthetic_projection_relative_rmse": 0.09950676560401917,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.24.mlp.experts.511.gate_proj",
+      "relative_weight_rmse": 0.10339426249265671,
+      "weight_cosine": 0.9946603775024414,
+      "synthetic_projection_relative_rmse": 0.10289391130208969,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.24.mlp.experts.511.up_proj",
+      "relative_weight_rmse": 0.10309554636478424,
+      "weight_cosine": 0.9946929812431335,
+      "synthetic_projection_relative_rmse": 0.10184584558010101,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.24.mlp.experts.511.down_proj",
+      "relative_weight_rmse": 0.10145018994808197,
+      "weight_cosine": 0.9948551654815674,
+      "synthetic_projection_relative_rmse": 0.10085306316614151,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.36.mlp.experts.0.gate_proj",
+      "relative_weight_rmse": 0.10467781871557236,
+      "weight_cosine": 0.9945349097251892,
+      "synthetic_projection_relative_rmse": 0.10418917238712311,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.36.mlp.experts.0.up_proj",
+      "relative_weight_rmse": 0.10366985946893692,
+      "weight_cosine": 0.9946359395980835,
+      "synthetic_projection_relative_rmse": 0.1026628389954567,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.36.mlp.experts.0.down_proj",
+      "relative_weight_rmse": 0.10120918601751328,
+      "weight_cosine": 0.9948857426643372,
+      "synthetic_projection_relative_rmse": 0.1022113636136055,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.36.mlp.experts.255.gate_proj",
+      "relative_weight_rmse": 0.10275811702013016,
+      "weight_cosine": 0.9947267174720764,
+      "synthetic_projection_relative_rmse": 0.0999380424618721,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.36.mlp.experts.255.up_proj",
+      "relative_weight_rmse": 0.1020568311214447,
+      "weight_cosine": 0.9948029518127441,
+      "synthetic_projection_relative_rmse": 0.09965580701828003,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.36.mlp.experts.255.down_proj",
+      "relative_weight_rmse": 0.10127384960651398,
+      "weight_cosine": 0.9948753714561462,
+      "synthetic_projection_relative_rmse": 0.10103429853916168,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.36.mlp.experts.511.gate_proj",
+      "relative_weight_rmse": 0.1021210327744484,
+      "weight_cosine": 0.9947748780250549,
+      "synthetic_projection_relative_rmse": 0.1042722761631012,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.36.mlp.experts.511.up_proj",
+      "relative_weight_rmse": 0.10233045369386673,
+      "weight_cosine": 0.9947669506072998,
+      "synthetic_projection_relative_rmse": 0.1025974377989769,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.36.mlp.experts.511.down_proj",
+      "relative_weight_rmse": 0.10124339908361435,
+      "weight_cosine": 0.9948754906654358,
+      "synthetic_projection_relative_rmse": 0.0998883843421936,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.47.mlp.experts.0.gate_proj",
+      "relative_weight_rmse": 0.11855418235063553,
+      "weight_cosine": 0.9930090308189392,
+      "synthetic_projection_relative_rmse": 0.1165633276104927,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.47.mlp.experts.0.up_proj",
+      "relative_weight_rmse": 0.11030419170856476,
+      "weight_cosine": 0.9939317107200623,
+      "synthetic_projection_relative_rmse": 0.10837897658348083,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.47.mlp.experts.0.down_proj",
+      "relative_weight_rmse": 0.10467490553855896,
+      "weight_cosine": 0.9945152997970581,
+      "synthetic_projection_relative_rmse": 0.1028602197766304,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.47.mlp.experts.255.gate_proj",
+      "relative_weight_rmse": 0.10258791595697403,
+      "weight_cosine": 0.9947358965873718,
+      "synthetic_projection_relative_rmse": 0.10208043456077576,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.47.mlp.experts.255.up_proj",
+      "relative_weight_rmse": 0.1019774079322815,
+      "weight_cosine": 0.9948105812072754,
+      "synthetic_projection_relative_rmse": 0.10468002408742905,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.47.mlp.experts.255.down_proj",
+      "relative_weight_rmse": 0.10059512406587601,
+      "weight_cosine": 0.9949364066123962,
+      "synthetic_projection_relative_rmse": 0.09966012090444565,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.47.mlp.experts.511.gate_proj",
+      "relative_weight_rmse": 0.1020621657371521,
+      "weight_cosine": 0.9947986602783203,
+      "synthetic_projection_relative_rmse": 0.10178270936012268,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.47.mlp.experts.511.up_proj",
+      "relative_weight_rmse": 0.10284888744354248,
+      "weight_cosine": 0.994711697101593,
+      "synthetic_projection_relative_rmse": 0.1012851670384407,
+      "finite": true
+    },
+    {
+      "projection": "model.language_model.layers.47.mlp.experts.511.down_proj",
+      "relative_weight_rmse": 0.10084592550992966,
+      "weight_cosine": 0.9949046969413757,
+      "synthetic_projection_relative_rmse": 0.10075350850820541,
+      "finite": true
+    }
+  ],
+  "full_model_accuracy_validated": false,
+  "npu_execution_validated": false,
+  "note": "Weight reconstruction and Gaussian-input projection diagnostics only; not perplexity, task accuracy, or throughput."
+}

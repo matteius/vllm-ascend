@@ -76,6 +76,25 @@ def _ref_table(shards: list[torch.Tensor]) -> torch.Tensor:
     return torch.cat(shards, dim=0)
 
 
+def test_explicit_w4_index_preserves_lazy_ple(tmp_path):
+    shards = _make_shards()
+    _write_checkpoint(tmp_path, shards)
+    (tmp_path / _INDEX_NAME).rename(tmp_path / "model.safetensors.index.json")
+    method = AscendPLELazyShardEmbeddingMethod(
+        _NUM_EMBEDDINGS,
+        _DIM,
+        checkpoint_dir=tmp_path,
+        index_filename="model.safetensors.index.json",
+        shard_tensor_fmt=_SHARD_FMT,
+        split_ngram_parts=_SPLIT,
+    )
+    rows = torch.tensor([0, 5, 15])
+    torch.testing.assert_close(method.gather_rows(rows), _ref_table(shards)[rows])
+    assert method.physical_bytes == 0
+    with pytest.raises(ValueError, match="basename"):
+        AscendPLELazyShardEmbeddingMethod(16, 4, checkpoint_dir=tmp_path, index_filename="../config.json")
+
+
 # --------------------------------------------------------------------------- #
 # 1. synthetic multi-shard checkpoint
 # --------------------------------------------------------------------------- #

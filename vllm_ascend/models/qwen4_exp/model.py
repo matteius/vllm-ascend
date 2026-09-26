@@ -124,6 +124,7 @@ from .moe import (
     w8a8_grouped_experts,
 )
 from .ngram_embedding import (
+    DEFAULT_SAFETENSORS_INDEX,
     AscendPLELazyShardEmbeddingMethod,
     AscendPLEPinnedHostEmbeddingMethod,
     AscendQwen4ExpNGramEmbedding,
@@ -149,6 +150,8 @@ from .qwen4exp_gdn import (
     gdn_gating,
     gdn_short_conv,
 )
+from .w4_moe import EXPERT_NAME as W4_EXPERT_NAME
+from .w4_moe import W4SparseMoE, require_eager_w4, validate_w4_inventory, w4_config
 from .weight_mapping import (
     TensorDtypeError,
     TensorShapeError,
@@ -444,6 +447,7 @@ def _format_eager_linear_weights_npu(model: nn.Module) -> None:
         _QSAAttention,
         _EagerMLP,
         _EagerSparseMoE,
+        W4SparseMoE,
     )
     weights_to_format: list[nn.Parameter] = []
     for module in model.modules():
@@ -1911,6 +1915,7 @@ class _PLEInjection(nn.Module):
         self.dtype_policy = dtype_policy
         self.eos_token_id = _scalar_eos(config)
         self.checkpoint_dir = checkpoint_dir
+        self.ple_index_filename = "model.safetensors.index.json" if w4_config(config) else DEFAULT_SAFETENSORS_INDEX
         self.ple = AscendQwen4ExpPLELayer(config=config, layer_idx=layer_idx, dtype_policy=dtype_policy)
         self.num_ngram_heads = self.ple.num_ngram_heads
         self.per_head_dim = self.ple.per_head_dim
@@ -1956,6 +1961,7 @@ class _PLEInjection(nn.Module):
                 self.ngram.padded_vocab_size,
                 self.per_head_dim,
                 checkpoint_dir=self.checkpoint_dir,
+                index_filename=self.ple_index_filename,
                 split_ngram_parts=self.ngram.split_ngram_parts,
                 dtype_policy=self.dtype_policy,
             )
@@ -2179,7 +2185,8 @@ class AscendQwen4ExpDecoderLayer(nn.Module):
         mlp_only_layers = getattr(config, "mlp_only_layers", []) or []
         is_moe = layer_idx not in mlp_only_layers and num_experts > 0 and (layer_idx + 1) % decoder_sparse_step == 0
         if is_moe:
-            self.mlp: nn.Module = _EagerSparseMoE(
+            moe_class = W4SparseMoE if w4_config(config) is not None else _EagerSparseMoE
+            self.mlp: nn.Module = moe_class(
                 config=config,
                 dtype_policy=dtype_policy,
                 expert_sharding=expert_sharding,
@@ -2252,6 +2259,9 @@ class AscendQwen4ExpModel(nn.Module):
         self.config = config
         self.vllm_config = vllm_config
         self.quant_config = getattr(vllm_config, "quant_config", None)
+        require_eager_w4(vllm_config.model_config, config)
+        if w4_config(config) is not None and self.quant_config is not None:
+            raise ValueError("Qwen4Exp packed W4 selects its own backend; omit --quantization")
         self.dtype_policy = Qwen4ExpDtypePolicy.from_vllm_config(vllm_config)
 
         self.hc_count = int(getattr(config, "hc_count", 2))
@@ -3013,8 +3023,26 @@ class AscendQwen4ExpForCausalLM(
         # Metadata only (name -> {dtype, shape}); payloads are placed + released as
         # they stream, so this stays tiny even for the full 224 GB checkpoint.
         expert_index: dict[str, dict[str, object]] = {}
+        packed_w4 = w4_config(self.model.config) is not None
 
         for raw_name, weight in weights:
+            if packed_w4 and raw_name.startswith("model.language_model.layers.") and ".mlp.experts." in raw_name:
+                match = W4_EXPERT_NAME.fullmatch(raw_name)
+                if match is None:
+                    raise ValueError(f"unsupported W4 expert tensor: {raw_name}")
+                layer_id, expert_id, projection, kind = match.groups()
+                layer_id, expert_id = int(layer_id), int(expert_id)
+                if not 0 <= layer_id < len(self.model.layers) or not isinstance(
+                    self.model.layers[layer_id].mlp, W4SparseMoE
+                ):
+                    raise ValueError(f"invalid W4 expert layer: {layer_id}")
+                if raw_name in expert_index:
+                    raise ValueError(f"duplicate W4 expert tensor: {raw_name}")
+                target = self.model.layers[layer_id].mlp.load_projection(expert_id, projection, kind, weight)
+                if target is not None:
+                    expert_index[raw_name] = {}
+                    loaded.add(f"model.layers.{layer_id}.mlp.{target}")
+                continue
             if has_experts and is_expert_tensor_name(raw_name):
                 if not expert_tensor_is_local(raw_name, geometry, tp_size, tp_rank):
                     continue  # peer-owned expert: placed (and read) by its owner
@@ -3098,7 +3126,9 @@ class AscendQwen4ExpForCausalLM(
 
         # Reject an incomplete / malformed expert set -- only when the checkpoint
         # actually carried per-expert tensors (a by-name round-trip carries none).
-        if expert_index:
+        if packed_w4:
+            validate_w4_inventory(self.model.layers, set(expert_index))
+        elif expert_index:
             validate_expert_weight_map(expert_index, geometry, tp_size=tp_size, tp_rank=tp_rank)
         _format_eager_linear_weights_npu(self.model)
         return loaded
