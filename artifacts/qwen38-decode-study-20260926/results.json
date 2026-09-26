@@ -1,0 +1,1649 @@
+{
+  "comparisons": {
+    "affinity": {
+      "matched": 9,
+      "missing": 0,
+      "summary": [
+        {
+          "context": "long",
+          "length": 512,
+          "n": 3,
+          "baseline_median_tok_s": 17.879948914431672,
+          "candidate_median_tok_s": 18.673692750148913,
+          "median_paired_speedup": 1.050467798531534,
+          "identical_outputs": 0
+        },
+        {
+          "context": "short",
+          "length": 512,
+          "n": 3,
+          "baseline_median_tok_s": 17.90024205611078,
+          "candidate_median_tok_s": 19.01374124195823,
+          "median_paired_speedup": 1.046029982260171,
+          "identical_outputs": 0
+        },
+        {
+          "context": "short",
+          "length": 2048,
+          "n": 3,
+          "baseline_median_tok_s": 18.400926248871855,
+          "candidate_median_tok_s": 19.517246113712986,
+          "median_paired_speedup": 1.0548522584108209,
+          "identical_outputs": 0
+        }
+      ],
+      "pairs": [
+        {
+          "context": "long",
+          "length": 512,
+          "repeat": 0,
+          "prompt_tokens": 23407,
+          "baseline_tok_s": 18.139543139099413,
+          "candidate_tok_s": 19.055005947697552,
+          "speedup": 1.050467798531534,
+          "same_text": false,
+          "baseline_acceptance": 0.9138576779026217,
+          "candidate_acceptance": 0.9104477611940298,
+          "baseline_estimated_step_ms": 105.50749063670412,
+          "candidate_estimated_step_ms": 100.25962555130414
+        },
+        {
+          "context": "long",
+          "length": 512,
+          "repeat": 1,
+          "prompt_tokens": 23418,
+          "baseline_tok_s": 17.879948914431672,
+          "candidate_tok_s": 18.673692750148913,
+          "speedup": 1.0443929588118999,
+          "same_text": false,
+          "baseline_acceptance": 0.8856088560885609,
+          "candidate_acceptance": 0.8717948717948718,
+          "baseline_estimated_step_ms": 105.45940959409594,
+          "candidate_estimated_step_ms": 100.23699633699634
+        },
+        {
+          "context": "long",
+          "length": 512,
+          "repeat": 2,
+          "prompt_tokens": 23424,
+          "baseline_tok_s": 16.87855696595552,
+          "candidate_tok_s": 18.33762766362116,
+          "speedup": 1.0864452275516574,
+          "same_text": false,
+          "baseline_acceptance": 0.7804878048780488,
+          "candidate_acceptance": 0.8483754512635379,
+          "baseline_estimated_step_ms": 105.48815331010452,
+          "candidate_estimated_step_ms": 100.79686888454013
+        },
+        {
+          "context": "short",
+          "length": 512,
+          "repeat": 0,
+          "prompt_tokens": 32,
+          "baseline_tok_s": 19.04648310975769,
+          "candidate_tok_s": 19.923192389418485,
+          "speedup": 1.046029982260171,
+          "same_text": false,
+          "baseline_acceptance": 0.9176029962546817,
+          "candidate_acceptance": 0.924812030075188,
+          "baseline_estimated_step_ms": 100.68016153975826,
+          "candidate_estimated_step_ms": 96.61162691464473
+        },
+        {
+          "context": "short",
+          "length": 512,
+          "repeat": 1,
+          "prompt_tokens": 43,
+          "baseline_tok_s": 17.90024205611078,
+          "candidate_tok_s": 18.474865505871463,
+          "speedup": 1.0321014346040376,
+          "same_text": false,
+          "baseline_acceptance": 0.8120567375886525,
+          "candidate_acceptance": 0.7867132867132867,
+          "baseline_estimated_step_ms": 101.23085106382977,
+          "candidate_estimated_step_ms": 96.71048951048951
+        },
+        {
+          "context": "short",
+          "length": 512,
+          "repeat": 2,
+          "prompt_tokens": 49,
+          "baseline_tok_s": 17.56973741666409,
+          "candidate_tok_s": 19.01374124195823,
+          "speedup": 1.0821869895405818,
+          "same_text": false,
+          "baseline_acceptance": 0.7929824561403509,
+          "candidate_acceptance": 0.841726618705036,
+          "baseline_estimated_step_ms": 102.04947368421051,
+          "candidate_estimated_step_ms": 96.86292641033945
+        },
+        {
+          "context": "short",
+          "length": 2048,
+          "repeat": 0,
+          "prompt_tokens": 32,
+          "baseline_tok_s": 19.26493950413721,
+          "candidate_tok_s": 20.236191048624196,
+          "speedup": 1.050415499320847,
+          "same_text": false,
+          "baseline_acceptance": 0.9635666347075743,
+          "candidate_acceptance": 0.9644913627639156,
+          "baseline_estimated_step_ms": 101.9243602756132,
+          "candidate_estimated_step_ms": 97.07811900191939
+        },
+        {
+          "context": "short",
+          "length": 2048,
+          "repeat": 1,
+          "prompt_tokens": 43,
+          "baseline_tok_s": 18.400926248871855,
+          "candidate_tok_s": 19.517246113712986,
+          "speedup": 1.0606665039434942,
+          "same_text": false,
+          "baseline_acceptance": 0.8797061524334252,
+          "candidate_acceptance": 0.8953703703703704,
+          "baseline_estimated_step_ms": 102.1528007346189,
+          "candidate_estimated_step_ms": 97.1125925925926
+        },
+        {
+          "context": "short",
+          "length": 2048,
+          "repeat": 2,
+          "prompt_tokens": 49,
+          "baseline_tok_s": 17.897549425914463,
+          "candidate_tok_s": 18.879270431945162,
+          "speedup": 1.0548522584108209,
+          "same_text": false,
+          "baseline_acceptance": 0.830948121645796,
+          "candidate_acceptance": 0.8483754512635379,
+          "baseline_estimated_step_ms": 102.30161001788908,
+          "candidate_estimated_step_ms": 97.90502540479245
+        }
+      ]
+    }
+  },
+  "arms": {
+    "control": {
+      "files": {
+        "candidate-manifest.json": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/control/candidate-manifest.json",
+          "sha256": "be13f0e73113a17451ed6ed143e28f41e5ae32d72a5d392aebf1767e60b156ae",
+          "bytes": 2444
+        },
+        "serve.log": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/control/serve.log",
+          "sha256": "a25406da3c5bbdf4eb2bf8f4073ac4cd8e944e014539489696ddba313396c1ec",
+          "bytes": 120347
+        },
+        "smoke.json": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/control/smoke.json",
+          "sha256": "f184bd3308e0e31c5eaeee00c8c031e1755a38436904339581259cd680ba4074",
+          "bytes": 10123
+        },
+        "benchmark.jsonl": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/control/benchmark.jsonl",
+          "sha256": "165cb2249db64644143ed9236939d77c832def4d0ceddd6ff5a21342b1d73c94",
+          "bytes": 40616
+        },
+        "long-benchmark.jsonl": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/control/long-benchmark.jsonl",
+          "sha256": "e33d845f020a2c72b49c1e74ff3d4b07b2289e18bff26ed869ba173358c09d10",
+          "bytes": 404016
+        },
+        "npu-smi-after.txt": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/control/npu-smi-after.txt",
+          "sha256": "87628a10d4f49aac9a7f90c672cae5cdcd7821d832ec39ef54603629998daea9",
+          "bytes": 2889
+        }
+      },
+      "requests": [
+        {
+          "request_id": "chatcmpl-87a844f1c12c2a39",
+          "usage": {
+            "prompt_tokens": 32,
+            "total_tokens": 64,
+            "completion_tokens": 32,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.5382858949888032,
+          "decode_s": 1.8245326239994029,
+          "client_decode_tok_s": 16.990652615488745,
+          "e2e_s": 2.362908309994964,
+          "text_sha256": "d1f3d8b0248f2a6b717f375093e4149b7a173419efd6a5d691489b63753ee24d",
+          "length": 32,
+          "repeat": 0,
+          "warmup": true,
+          "drafted_delta": 18.0,
+          "accepted_delta": 14.0,
+          "acceptance": 0.7777777777777778,
+          "request_sha256": "26e2e1d1b745147aecba07ab9c677a1a740f5bdcd692e84f3ccf71e1e059999e",
+          "context": "short"
+        },
+        {
+          "request_id": "chatcmpl-8907440c5c49b022",
+          "usage": {
+            "prompt_tokens": 32,
+            "total_tokens": 544,
+            "completion_tokens": 512,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.49301416300295386,
+          "decode_s": 26.830072301992914,
+          "client_decode_tok_s": 19.045792879285063,
+          "e2e_s": 27.323209638998378,
+          "text_sha256": "29d4416728a0d4a750394f84ce91339948f6ae51b1ca47a77a5f845cdbe80ff7",
+          "length": 512,
+          "repeat": 0,
+          "warmup": false,
+          "drafted_delta": 267.0,
+          "accepted_delta": 245.0,
+          "acceptance": 0.9176029962546817,
+          "request_sha256": "06230ca1f0eb7dfb3da0fcf39dde042f396985734cf7d11a0753217966972df5",
+          "context": "short"
+        },
+        {
+          "request_id": "chatcmpl-a04d4d698f186783",
+          "usage": {
+            "prompt_tokens": 43,
+            "total_tokens": 555,
+            "completion_tokens": 512,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.5208243710076204,
+          "decode_s": 28.544151338996016,
+          "client_decode_tok_s": 17.902091182577557,
+          "e2e_s": 29.065073396006483,
+          "text_sha256": "64b8da2272d59330f715c20bb88cbb53a01ed391aaf5be444519bcbcd1d5237c",
+          "length": 512,
+          "repeat": 1,
+          "warmup": false,
+          "drafted_delta": 282.0,
+          "accepted_delta": 229.0,
+          "acceptance": 0.8120567375886525,
+          "request_sha256": "e9cb9ff9e64a14554af9bb988b2169414039c87ca1385b8297bf3e4271f9932b",
+          "context": "short"
+        },
+        {
+          "request_id": "chatcmpl-bfe0fd63a98838a4",
+          "usage": {
+            "prompt_tokens": 49,
+            "total_tokens": 561,
+            "completion_tokens": 512,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.7083154819993069,
+          "decode_s": 29.081581316000666,
+          "client_decode_tok_s": 17.571259088268633,
+          "e2e_s": 29.78999235999072,
+          "text_sha256": "fdf2e15041561f792b51f4efb53c12613ab9a6b205144cacea64f8aed78c45a4",
+          "length": 512,
+          "repeat": 2,
+          "warmup": false,
+          "drafted_delta": 285.0,
+          "accepted_delta": 226.0,
+          "acceptance": 0.7929824561403509,
+          "request_sha256": "9454c6f869dcede9ca25be55820e4bc12983732a25b784dff4afbff7325534fe",
+          "context": "short"
+        },
+        {
+          "request_id": "chatcmpl-950b16baead4fd75",
+          "usage": {
+            "prompt_tokens": 32,
+            "total_tokens": 2080,
+            "completion_tokens": 2048,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.5088754929893184,
+          "decode_s": 106.25805671200214,
+          "client_decode_tok_s": 19.26442157273883,
+          "e2e_s": 106.76705758400203,
+          "text_sha256": "162b69507c9a8194cd4d4941faf3f99c02a07130e2f10ef8046e36ed577062b8",
+          "length": 2048,
+          "repeat": 0,
+          "warmup": false,
+          "drafted_delta": 1043.0,
+          "accepted_delta": 1005.0,
+          "acceptance": 0.9635666347075743,
+          "request_sha256": "e43d9451ca18684e4b8838766dc2cfe6fd532c93b9508d56b1368dbdbaec6466",
+          "context": "short"
+        },
+        {
+          "request_id": "chatcmpl-839035e6a59be362",
+          "usage": {
+            "prompt_tokens": 43,
+            "total_tokens": 2091,
+            "completion_tokens": 2048,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.5110921589948703,
+          "decode_s": 111.24741460900987,
+          "client_decode_tok_s": 18.40042761617774,
+          "e2e_s": 111.75864330699551,
+          "text_sha256": "3bf1a17c1493ac7ba5b8d44c3b177418c8fd3c96f4c42b3b28dc55d3e4ec46c8",
+          "length": 2048,
+          "repeat": 1,
+          "warmup": false,
+          "drafted_delta": 1089.0,
+          "accepted_delta": 958.0,
+          "acceptance": 0.8797061524334252,
+          "request_sha256": "c991e2a884e635b032d0bcbda95a6c1c1c6fb0178b190d7279380236e5cc7d14",
+          "context": "short"
+        },
+        {
+          "request_id": "chatcmpl-ac12a8057726cc6e",
+          "usage": {
+            "prompt_tokens": 49,
+            "total_tokens": 2097,
+            "completion_tokens": 2048,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.5296482059929986,
+          "decode_s": 114.37608148300205,
+          "client_decode_tok_s": 17.897098531953237,
+          "e2e_s": 114.90584545899765,
+          "text_sha256": "8186529ddb7ab4c116dc32c56eecb331c45922f61ea5c254f925d650b84c079b",
+          "length": 2048,
+          "repeat": 2,
+          "warmup": false,
+          "drafted_delta": 1118.0,
+          "accepted_delta": 929.0,
+          "acceptance": 0.830948121645796,
+          "request_sha256": "1419e9477a974206bd5a68c80f70305151d51b388e7913e664329965629ef8be",
+          "context": "short"
+        },
+        {
+          "request_id": "chatcmpl-b115e3ec84bd0f3b",
+          "usage": {
+            "prompt_tokens": 23407,
+            "total_tokens": 23439,
+            "completion_tokens": 32,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "created_cache_tokens": 23168
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 45.64882525599387,
+          "decode_s": 1.8144292750075692,
+          "client_decode_tok_s": 17.08526225133282,
+          "e2e_s": 47.46333819099527,
+          "text_sha256": "0062dbcf29fa32bc642f80197b8d1a3d11682e732b6f2c476b8231a838716a26",
+          "length": 32,
+          "repeat": 0,
+          "warmup": true,
+          "drafted_delta": 17.0,
+          "accepted_delta": 15.0,
+          "acceptance": 0.8823529411764706,
+          "request_sha256": "307a05fd8621ec7332557ff5a485b17f2c58fc23ea97685fb87a68c68d96a56b",
+          "context": "long"
+        },
+        {
+          "request_id": "chatcmpl-b85de5814c879865",
+          "usage": {
+            "prompt_tokens": 23407,
+            "total_tokens": 23919,
+            "completion_tokens": 512,
+            "prompt_tokens_details": {
+              "cached_tokens": 23168,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.9951292470068438,
+          "decode_s": 28.164794295997126,
+          "client_decode_tok_s": 18.143217899256058,
+          "e2e_s": 29.160024255004828,
+          "text_sha256": "e9d6664bb66ae6f466a4c2372a9823d4575e5c7a30d69a32184627052de86a09",
+          "length": 512,
+          "repeat": 0,
+          "warmup": false,
+          "drafted_delta": 267.0,
+          "accepted_delta": 244.0,
+          "acceptance": 0.9138576779026217,
+          "request_sha256": "ab26eff79ff42b437d2abfd63dc1ab4581abb18f9c807ef6598a62d2351fe411",
+          "context": "long"
+        },
+        {
+          "request_id": "chatcmpl-8513f574e24bcd19",
+          "usage": {
+            "prompt_tokens": 23418,
+            "total_tokens": 23930,
+            "completion_tokens": 512,
+            "prompt_tokens_details": {
+              "cached_tokens": 23168,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 1.0019206260039937,
+          "decode_s": 28.57274403599149,
+          "client_decode_tok_s": 17.88417658998106,
+          "e2e_s": 29.574777065005037,
+          "text_sha256": "9b8d0ffb0c18f47da2f29ef0c8aa7c5cb78658a3e1898d9d88fb5c3151db6e86",
+          "length": 512,
+          "repeat": 1,
+          "warmup": false,
+          "drafted_delta": 271.0,
+          "accepted_delta": 240.0,
+          "acceptance": 0.8856088560885609,
+          "request_sha256": "cd6ed121f63816c3756f5e51c2140221b5f5f90df845d0be8a3695923b094c51",
+          "context": "long"
+        },
+        {
+          "request_id": "chatcmpl-b8cd5ddf7933d734",
+          "usage": {
+            "prompt_tokens": 23424,
+            "total_tokens": 23936,
+            "completion_tokens": 512,
+            "prompt_tokens_details": {
+              "cached_tokens": 23168,
+              "created_cache_tokens": 256
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 1.456539797000005,
+          "decode_s": 30.269576077000238,
+          "client_decode_tok_s": 16.881637149463536,
+          "e2e_s": 31.726241373005905,
+          "text_sha256": "455d7a390686d9b0999914921ed73db7fcc536d72affca9a71729619912cf583",
+          "length": 512,
+          "repeat": 2,
+          "warmup": false,
+          "drafted_delta": 287.0,
+          "accepted_delta": 224.0,
+          "acceptance": 0.7804878048780488,
+          "request_sha256": "8076d969c05bf2994ee2803290fcec87bf7b34d05977fc0a232aa90e09577cac",
+          "context": "long"
+        }
+      ],
+      "smoke": [
+        {
+          "prompt": "Reply with only the integer: 17 * 23",
+          "expected": "391",
+          "pass": true,
+          "response": {
+            "id": "chatcmpl-b7a1951529ad8059",
+            "object": "chat.completion",
+            "created": 1790447856,
+            "model": "qwen38-flash-next-w8a8",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "391",
+                  "refusal": null,
+                  "annotations": null,
+                  "audio": null,
+                  "function_call": null,
+                  "reasoning": null
+                },
+                "logprobs": null,
+                "finish_reason": "stop",
+                "stop_reason": null,
+                "token_ids": null,
+                "routed_experts": null
+              }
+            ],
+            "service_tier": null,
+            "system_fingerprint": "vllm-0.1.dev1+g3ab5dda29-tp4-8bde88c7",
+            "usage": {
+              "prompt_tokens": 25,
+              "total_tokens": 29,
+              "completion_tokens": 4,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "created_cache_tokens": 0,
+                "multimodal_tokens": null
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              }
+            },
+            "prompt_logprobs": null,
+            "prompt_token_ids": null,
+            "prompt_text": null,
+            "kv_transfer_params": null,
+            "ec_transfer_params": null,
+            "metrics": null
+          }
+        },
+        {
+          "prompt": "Reply with only the integer: 144 / 12 + 7",
+          "expected": "19",
+          "pass": true,
+          "response": {
+            "id": "chatcmpl-ade31c072d0f5d98",
+            "object": "chat.completion",
+            "created": 1790447857,
+            "model": "qwen38-flash-next-w8a8",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "19",
+                  "refusal": null,
+                  "annotations": null,
+                  "audio": null,
+                  "function_call": null,
+                  "reasoning": null
+                },
+                "logprobs": null,
+                "finish_reason": "stop",
+                "stop_reason": null,
+                "token_ids": null,
+                "routed_experts": null
+              }
+            ],
+            "service_tier": null,
+            "system_fingerprint": "vllm-0.1.dev1+g3ab5dda29-tp4-8bde88c7",
+            "usage": {
+              "prompt_tokens": 29,
+              "total_tokens": 32,
+              "completion_tokens": 3,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "created_cache_tokens": 0,
+                "multimodal_tokens": null
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              }
+            },
+            "prompt_logprobs": null,
+            "prompt_token_ids": null,
+            "prompt_text": null,
+            "kv_transfer_params": null,
+            "ec_transfer_params": null,
+            "metrics": null
+          }
+        },
+        {
+          "prompt": "Reverse ASCEND. Reply with only the reversed uppercase word.",
+          "expected": "DNECSA",
+          "pass": false,
+          "response": {
+            "id": "chatcmpl-aef76401fbd6713b",
+            "object": "chat.completion",
+            "created": 1790447857,
+            "model": "qwen38-flash-next-w8a8",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "DNESCA",
+                  "refusal": null,
+                  "annotations": null,
+                  "audio": null,
+                  "function_call": null,
+                  "reasoning": null
+                },
+                "logprobs": null,
+                "finish_reason": "stop",
+                "stop_reason": null,
+                "token_ids": null,
+                "routed_experts": null
+              }
+            ],
+            "service_tier": null,
+            "system_fingerprint": "vllm-0.1.dev1+g3ab5dda29-tp4-8bde88c7",
+            "usage": {
+              "prompt_tokens": 24,
+              "total_tokens": 28,
+              "completion_tokens": 4,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "created_cache_tokens": 0,
+                "multimodal_tokens": null
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              }
+            },
+            "prompt_logprobs": null,
+            "prompt_token_ids": null,
+            "prompt_text": null,
+            "kv_transfer_params": null,
+            "ec_transfer_params": null,
+            "metrics": null
+          }
+        },
+        {
+          "prompt": "What is the capital of Germany? Reply with only the city name.",
+          "expected": "Berlin",
+          "pass": true,
+          "response": {
+            "id": "chatcmpl-84e14a738002ef7a",
+            "object": "chat.completion",
+            "created": 1790447858,
+            "model": "qwen38-flash-next-w8a8",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Berlin",
+                  "refusal": null,
+                  "annotations": null,
+                  "audio": null,
+                  "function_call": null,
+                  "reasoning": null
+                },
+                "logprobs": null,
+                "finish_reason": "stop",
+                "stop_reason": null,
+                "token_ids": null,
+                "routed_experts": null
+              }
+            ],
+            "service_tier": null,
+            "system_fingerprint": "vllm-0.1.dev1+g3ab5dda29-tp4-8bde88c7",
+            "usage": {
+              "prompt_tokens": 26,
+              "total_tokens": 28,
+              "completion_tokens": 2,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "created_cache_tokens": 0,
+                "multimodal_tokens": null
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              }
+            },
+            "prompt_logprobs": null,
+            "prompt_token_ids": null,
+            "prompt_text": null,
+            "kv_transfer_params": null,
+            "ec_transfer_params": null,
+            "metrics": null
+          }
+        },
+        {
+          "prompt": "Reply with only the integer: how many distinct values are in [3, 1, 3, 2, 1]?",
+          "expected": "3",
+          "pass": true,
+          "response": {
+            "id": "chatcmpl-803645f27c59f6eb",
+            "object": "chat.completion",
+            "created": 1790447859,
+            "model": "qwen38-flash-next-w8a8",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "3",
+                  "refusal": null,
+                  "annotations": null,
+                  "audio": null,
+                  "function_call": null,
+                  "reasoning": null
+                },
+                "logprobs": null,
+                "finish_reason": "stop",
+                "stop_reason": null,
+                "token_ids": null,
+                "routed_experts": null
+              }
+            ],
+            "service_tier": null,
+            "system_fingerprint": "vllm-0.1.dev1+g3ab5dda29-tp4-8bde88c7",
+            "usage": {
+              "prompt_tokens": 39,
+              "total_tokens": 41,
+              "completion_tokens": 2,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "created_cache_tokens": 0,
+                "multimodal_tokens": null
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              }
+            },
+            "prompt_logprobs": null,
+            "prompt_token_ids": null,
+            "prompt_text": null,
+            "kv_transfer_params": null,
+            "ec_transfer_params": null,
+            "metrics": null
+          }
+        },
+        {
+          "prompt": "A list has 8 elements, indexed from zero. Reply with only the final valid index.",
+          "expected": "7",
+          "pass": true,
+          "response": {
+            "id": "chatcmpl-b2cf69fa257b1866",
+            "object": "chat.completion",
+            "created": 1790447859,
+            "model": "qwen38-flash-next-w8a8",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "7",
+                  "refusal": null,
+                  "annotations": null,
+                  "audio": null,
+                  "function_call": null,
+                  "reasoning": null
+                },
+                "logprobs": null,
+                "finish_reason": "stop",
+                "stop_reason": null,
+                "token_ids": null,
+                "routed_experts": null
+              }
+            ],
+            "service_tier": null,
+            "system_fingerprint": "vllm-0.1.dev1+g3ab5dda29-tp4-8bde88c7",
+            "usage": {
+              "prompt_tokens": 31,
+              "total_tokens": 33,
+              "completion_tokens": 2,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "created_cache_tokens": 0,
+                "multimodal_tokens": null
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              }
+            },
+            "prompt_logprobs": null,
+            "prompt_token_ids": null,
+            "prompt_text": null,
+            "kv_transfer_params": null,
+            "ec_transfer_params": null,
+            "metrics": null
+          }
+        },
+        {
+          "prompt": "Call record_result with task_id T-001 and value 391. Do not add prose.",
+          "pass": true,
+          "response": {
+            "id": "chatcmpl-991e16e9c532ad64",
+            "object": "chat.completion",
+            "created": 1790447860,
+            "model": "qwen38-flash-next-w8a8",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": null,
+                  "refusal": null,
+                  "annotations": null,
+                  "audio": null,
+                  "function_call": null,
+                  "tool_calls": [
+                    {
+                      "id": "chatcmpl-tool-9ee05acc7a0712ff",
+                      "type": "function",
+                      "function": {
+                        "name": "record_result",
+                        "arguments": "{\"task_id\": \"T-001\", \"value\": 391}"
+                      }
+                    }
+                  ],
+                  "reasoning": null
+                },
+                "logprobs": null,
+                "finish_reason": "tool_calls",
+                "stop_reason": null,
+                "token_ids": null,
+                "routed_experts": null
+              }
+            ],
+            "service_tier": null,
+            "system_fingerprint": "vllm-0.1.dev1+g3ab5dda29-tp4-8bde88c7",
+            "usage": {
+              "prompt_tokens": 310,
+              "total_tokens": 355,
+              "completion_tokens": 45,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "created_cache_tokens": 128,
+                "multimodal_tokens": null
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              }
+            },
+            "prompt_logprobs": null,
+            "prompt_token_ids": null,
+            "prompt_text": null,
+            "kv_transfer_params": null,
+            "ec_transfer_params": null,
+            "metrics": null
+          }
+        }
+      ]
+    },
+    "affinity": {
+      "files": {
+        "candidate-manifest.json": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/affinity/candidate-manifest.json",
+          "sha256": "0df076a204b508123cf3437a410a40446e18f18c11855da40a1c4960c47b3aa1",
+          "bytes": 2950
+        },
+        "serve.log": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/affinity/serve.log",
+          "sha256": "6b0f8adccd5572dfaa28bb50cf3c5a704fd1b2c6c162d092d5b6d50140c832da",
+          "bytes": 113525
+        },
+        "smoke.json": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/affinity/smoke.json",
+          "sha256": "2e89be693435b1366bb9358d079c140d02f121dba1c246d4778822656baea6f5",
+          "bytes": 10123
+        },
+        "benchmark.jsonl": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/affinity/benchmark.jsonl",
+          "sha256": "ccf8b0833bffcf169193cef8df00bfdc327cafd5e66bd93939ede61418bd46c2",
+          "bytes": 41160
+        },
+        "long-benchmark.jsonl": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/affinity/long-benchmark.jsonl",
+          "sha256": "dc32deafec60cad8a6c64fecf686ab34f6163566ea9058cb27fdc37367aec8e6",
+          "bytes": 403639
+        },
+        "npu-smi-after.txt": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/affinity/npu-smi-after.txt",
+          "sha256": "eb5426c02a87b3b4f4f9c03b1a5f795597449fd733e51ff197fea8bff65be7f4",
+          "bytes": 2889
+        },
+        "thread-affinity.json": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/affinity/thread-affinity.json",
+          "sha256": "91573905a7d9ec16d082d60d569e3c65f8a9a50c91be9965ee98417d43ce850f",
+          "bytes": 143
+        }
+      },
+      "requests": [
+        {
+          "request_id": "chatcmpl-b66776e1c7651672",
+          "usage": {
+            "prompt_tokens": 32,
+            "total_tokens": 64,
+            "completion_tokens": 32,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.47835933799797203,
+          "decode_s": 1.7439508370007388,
+          "client_decode_tok_s": 17.775730451962772,
+          "e2e_s": 2.2224009679921437,
+          "text_sha256": "d1f3d8b0248f2a6b717f375093e4149b7a173419efd6a5d691489b63753ee24d",
+          "length": 32,
+          "repeat": 0,
+          "warmup": true,
+          "drafted_delta": 18.0,
+          "accepted_delta": 14.0,
+          "acceptance": 0.7777777777777778,
+          "request_sha256": "26e2e1d1b745147aecba07ab9c677a1a740f5bdcd692e84f3ccf71e1e059999e",
+          "context": "short"
+        },
+        {
+          "request_id": "chatcmpl-8f2ea886e959d997",
+          "usage": {
+            "prompt_tokens": 32,
+            "total_tokens": 544,
+            "completion_tokens": 512,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.4388796030107187,
+          "decode_s": 25.64967985099065,
+          "client_decode_tok_s": 19.922275949197235,
+          "e2e_s": 26.08865709901147,
+          "text_sha256": "5f6945f983e973aa10f24e3f7bd0f0df7cc761c32270bcb1a4c246dbcf5c4c0c",
+          "length": 512,
+          "repeat": 0,
+          "warmup": false,
+          "drafted_delta": 266.0,
+          "accepted_delta": 246.0,
+          "acceptance": 0.924812030075188,
+          "request_sha256": "06230ca1f0eb7dfb3da0fcf39dde042f396985734cf7d11a0753217966972df5",
+          "context": "short"
+        },
+        {
+          "request_id": "chatcmpl-be6773ff5cf092ee",
+          "usage": {
+            "prompt_tokens": 43,
+            "total_tokens": 555,
+            "completion_tokens": 512,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.491932064993307,
+          "decode_s": 27.656413414006238,
+          "client_decode_tok_s": 18.47672698373863,
+          "e2e_s": 28.14845366499503,
+          "text_sha256": "beb298e84a94a05f9d73e3f0234fbc4d7fd1f2df9e0103645eeb54783b971c50",
+          "length": 512,
+          "repeat": 1,
+          "warmup": false,
+          "drafted_delta": 286.0,
+          "accepted_delta": 225.0,
+          "acceptance": 0.7867132867132867,
+          "request_sha256": "e9cb9ff9e64a14554af9bb988b2169414039c87ca1385b8297bf3e4271f9932b",
+          "context": "short"
+        },
+        {
+          "request_id": "chatcmpl-864fbdd869231ae9",
+          "usage": {
+            "prompt_tokens": 49,
+            "total_tokens": 561,
+            "completion_tokens": 512,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.5110436670074705,
+          "decode_s": 26.873423961005756,
+          "client_decode_tok_s": 19.01506859496126,
+          "e2e_s": 27.384565033004037,
+          "text_sha256": "1ee4823ea85e9440cb6f53268805544886dd74fa6b917d9052372a6f077a3933",
+          "length": 512,
+          "repeat": 2,
+          "warmup": false,
+          "drafted_delta": 278.0,
+          "accepted_delta": 234.0,
+          "acceptance": 0.841726618705036,
+          "request_sha256": "9454c6f869dcede9ca25be55820e4bc12983732a25b784dff4afbff7325534fe",
+          "context": "short"
+        },
+        {
+          "request_id": "chatcmpl-b530921d32c2bd85",
+          "usage": {
+            "prompt_tokens": 32,
+            "total_tokens": 2080,
+            "completion_tokens": 2048,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.4667573360056849,
+          "decode_s": 101.1586839829979,
+          "client_decode_tok_s": 20.23553410742321,
+          "e2e_s": 101.62555316199723,
+          "text_sha256": "5d123c5c063e4d5489197b2bb4f82921dd38f42c14a598568bdf8d4226a0f807",
+          "length": 2048,
+          "repeat": 0,
+          "warmup": false,
+          "drafted_delta": 1042.0,
+          "accepted_delta": 1005.0,
+          "acceptance": 0.9644913627639156,
+          "request_sha256": "e43d9451ca18684e4b8838766dc2cfe6fd532c93b9508d56b1368dbdbaec6466",
+          "context": "short"
+        },
+        {
+          "request_id": "chatcmpl-ae2ec51a1610d942",
+          "usage": {
+            "prompt_tokens": 43,
+            "total_tokens": 2091,
+            "completion_tokens": 2048,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.4702355420013191,
+          "decode_s": 104.88505060999887,
+          "client_decode_tok_s": 19.516604016443655,
+          "e2e_s": 105.35540755299735,
+          "text_sha256": "0a4bd772d07591dbda28286ce0f4e4a6a9df0f99914dd070b8e91e3ce4e2cf0c",
+          "length": 2048,
+          "repeat": 1,
+          "warmup": false,
+          "drafted_delta": 1080.0,
+          "accepted_delta": 967.0,
+          "acceptance": 0.8953703703703704,
+          "request_sha256": "c991e2a884e635b032d0bcbda95a6c1c1c6fb0178b190d7279380236e5cc7d14",
+          "context": "short"
+        },
+        {
+          "request_id": "chatcmpl-a8b996d2b273ee73",
+          "usage": {
+            "prompt_tokens": 49,
+            "total_tokens": 2097,
+            "completion_tokens": 2048,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.4492986590048531,
+          "decode_s": 108.42897783899389,
+          "client_decode_tok_s": 18.878717117850073,
+          "e2e_s": 108.87840252800379,
+          "text_sha256": "252cbcedc99aefea7865231fe3144a83c3f12d055794b86f9cdefc5e04d4427e",
+          "length": 2048,
+          "repeat": 2,
+          "warmup": false,
+          "drafted_delta": 1108.0,
+          "accepted_delta": 940.0,
+          "acceptance": 0.8483754512635379,
+          "request_sha256": "1419e9477a974206bd5a68c80f70305151d51b388e7913e664329965629ef8be",
+          "context": "short"
+        },
+        {
+          "request_id": "chatcmpl-91ea2c5589dd1b2b",
+          "usage": {
+            "prompt_tokens": 23407,
+            "total_tokens": 23439,
+            "completion_tokens": 32,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "created_cache_tokens": 23168
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 45.35280424299708,
+          "decode_s": 1.8057939620048273,
+          "client_decode_tok_s": 17.166964034802287,
+          "e2e_s": 47.158691553006065,
+          "text_sha256": "620e0d2042b4067f6c1b5b91ee2e574093da774a9fbfd83511c739782e0fefde",
+          "length": 32,
+          "repeat": 0,
+          "warmup": true,
+          "drafted_delta": 18.0,
+          "accepted_delta": 14.0,
+          "acceptance": 0.7777777777777778,
+          "request_sha256": "307a05fd8621ec7332557ff5a485b17f2c58fc23ea97685fb87a68c68d96a56b",
+          "context": "long"
+        },
+        {
+          "request_id": "chatcmpl-8ff891fc98601b74",
+          "usage": {
+            "prompt_tokens": 23407,
+            "total_tokens": 23919,
+            "completion_tokens": 512,
+            "prompt_tokens_details": {
+              "cached_tokens": 23168,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.9158016410074197,
+          "decode_s": 26.812222872002167,
+          "client_decode_tok_s": 19.058472042375715,
+          "e2e_s": 27.72812297999917,
+          "text_sha256": "b744af326c8c75158c3216c38082971eddd58eab55e7e215538753bfc107bb55",
+          "length": 512,
+          "repeat": 0,
+          "warmup": false,
+          "drafted_delta": 268.0,
+          "accepted_delta": 244.0,
+          "acceptance": 0.9104477611940298,
+          "request_sha256": "ab26eff79ff42b437d2abfd63dc1ab4581abb18f9c807ef6598a62d2351fe411",
+          "context": "long"
+        },
+        {
+          "request_id": "chatcmpl-9b9ec3b9582dd22a",
+          "usage": {
+            "prompt_tokens": 23418,
+            "total_tokens": 23930,
+            "completion_tokens": 512,
+            "prompt_tokens_details": {
+              "cached_tokens": 23168,
+              "created_cache_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 0.9422310810041381,
+          "decode_s": 27.35904753798968,
+          "client_decode_tok_s": 18.677550791578025,
+          "e2e_s": 28.301371084002312,
+          "text_sha256": "160752ded30ebdb93f4dd787d174225c742cd96d3888ff79d4437a9bcd642983",
+          "length": 512,
+          "repeat": 1,
+          "warmup": false,
+          "drafted_delta": 273.0,
+          "accepted_delta": 238.0,
+          "acceptance": 0.8717948717948718,
+          "request_sha256": "cd6ed121f63816c3756f5e51c2140221b5f5f90df845d0be8a3695923b094c51",
+          "context": "long"
+        },
+        {
+          "request_id": "chatcmpl-befe547392020741",
+          "usage": {
+            "prompt_tokens": 23424,
+            "total_tokens": 23936,
+            "completion_tokens": 512,
+            "prompt_tokens_details": {
+              "cached_tokens": 23168,
+              "created_cache_tokens": 256
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "finish_reason": "length",
+          "ttft_s": 1.2876363810064504,
+          "decode_s": 27.86181959399255,
+          "client_decode_tok_s": 18.340510686178575,
+          "e2e_s": 29.14956055401126,
+          "text_sha256": "7f6ede6fcba1850b972670dbf466aa7808e9593a16a7d95bf63c9cf7eb259ae4",
+          "length": 512,
+          "repeat": 2,
+          "warmup": false,
+          "drafted_delta": 277.0,
+          "accepted_delta": 235.0,
+          "acceptance": 0.8483754512635379,
+          "request_sha256": "8076d969c05bf2994ee2803290fcec87bf7b34d05977fc0a232aa90e09577cac",
+          "context": "long"
+        }
+      ],
+      "smoke": [
+        {
+          "prompt": "Reply with only the integer: 17 * 23",
+          "expected": "391",
+          "pass": true,
+          "response": {
+            "id": "chatcmpl-9b70773703bb0515",
+            "object": "chat.completion",
+            "created": 1790448728,
+            "model": "qwen38-flash-next-w8a8",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "391",
+                  "refusal": null,
+                  "annotations": null,
+                  "audio": null,
+                  "function_call": null,
+                  "reasoning": null
+                },
+                "logprobs": null,
+                "finish_reason": "stop",
+                "stop_reason": null,
+                "token_ids": null,
+                "routed_experts": null
+              }
+            ],
+            "service_tier": null,
+            "system_fingerprint": "vllm-0.1.dev1+g3ab5dda29-tp4-8bde88c7",
+            "usage": {
+              "prompt_tokens": 25,
+              "total_tokens": 29,
+              "completion_tokens": 4,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "created_cache_tokens": 0,
+                "multimodal_tokens": null
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              }
+            },
+            "prompt_logprobs": null,
+            "prompt_token_ids": null,
+            "prompt_text": null,
+            "kv_transfer_params": null,
+            "ec_transfer_params": null,
+            "metrics": null
+          }
+        },
+        {
+          "prompt": "Reply with only the integer: 144 / 12 + 7",
+          "expected": "19",
+          "pass": true,
+          "response": {
+            "id": "chatcmpl-8f4d4d66d4dbbd5a",
+            "object": "chat.completion",
+            "created": 1790448729,
+            "model": "qwen38-flash-next-w8a8",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "19",
+                  "refusal": null,
+                  "annotations": null,
+                  "audio": null,
+                  "function_call": null,
+                  "reasoning": null
+                },
+                "logprobs": null,
+                "finish_reason": "stop",
+                "stop_reason": null,
+                "token_ids": null,
+                "routed_experts": null
+              }
+            ],
+            "service_tier": null,
+            "system_fingerprint": "vllm-0.1.dev1+g3ab5dda29-tp4-8bde88c7",
+            "usage": {
+              "prompt_tokens": 29,
+              "total_tokens": 32,
+              "completion_tokens": 3,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "created_cache_tokens": 0,
+                "multimodal_tokens": null
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              }
+            },
+            "prompt_logprobs": null,
+            "prompt_token_ids": null,
+            "prompt_text": null,
+            "kv_transfer_params": null,
+            "ec_transfer_params": null,
+            "metrics": null
+          }
+        },
+        {
+          "prompt": "Reverse ASCEND. Reply with only the reversed uppercase word.",
+          "expected": "DNECSA",
+          "pass": false,
+          "response": {
+            "id": "chatcmpl-a9e4a7e52e28232a",
+            "object": "chat.completion",
+            "created": 1790448729,
+            "model": "qwen38-flash-next-w8a8",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "DNESCA",
+                  "refusal": null,
+                  "annotations": null,
+                  "audio": null,
+                  "function_call": null,
+                  "reasoning": null
+                },
+                "logprobs": null,
+                "finish_reason": "stop",
+                "stop_reason": null,
+                "token_ids": null,
+                "routed_experts": null
+              }
+            ],
+            "service_tier": null,
+            "system_fingerprint": "vllm-0.1.dev1+g3ab5dda29-tp4-8bde88c7",
+            "usage": {
+              "prompt_tokens": 24,
+              "total_tokens": 28,
+              "completion_tokens": 4,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "created_cache_tokens": 0,
+                "multimodal_tokens": null
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              }
+            },
+            "prompt_logprobs": null,
+            "prompt_token_ids": null,
+            "prompt_text": null,
+            "kv_transfer_params": null,
+            "ec_transfer_params": null,
+            "metrics": null
+          }
+        },
+        {
+          "prompt": "What is the capital of Germany? Reply with only the city name.",
+          "expected": "Berlin",
+          "pass": true,
+          "response": {
+            "id": "chatcmpl-b93a5752e6ecb4d3",
+            "object": "chat.completion",
+            "created": 1790448730,
+            "model": "qwen38-flash-next-w8a8",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Berlin",
+                  "refusal": null,
+                  "annotations": null,
+                  "audio": null,
+                  "function_call": null,
+                  "reasoning": null
+                },
+                "logprobs": null,
+                "finish_reason": "stop",
+                "stop_reason": null,
+                "token_ids": null,
+                "routed_experts": null
+              }
+            ],
+            "service_tier": null,
+            "system_fingerprint": "vllm-0.1.dev1+g3ab5dda29-tp4-8bde88c7",
+            "usage": {
+              "prompt_tokens": 26,
+              "total_tokens": 28,
+              "completion_tokens": 2,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "created_cache_tokens": 0,
+                "multimodal_tokens": null
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              }
+            },
+            "prompt_logprobs": null,
+            "prompt_token_ids": null,
+            "prompt_text": null,
+            "kv_transfer_params": null,
+            "ec_transfer_params": null,
+            "metrics": null
+          }
+        },
+        {
+          "prompt": "Reply with only the integer: how many distinct values are in [3, 1, 3, 2, 1]?",
+          "expected": "3",
+          "pass": true,
+          "response": {
+            "id": "chatcmpl-9ef1e5a1dbd373bc",
+            "object": "chat.completion",
+            "created": 1790448730,
+            "model": "qwen38-flash-next-w8a8",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "3",
+                  "refusal": null,
+                  "annotations": null,
+                  "audio": null,
+                  "function_call": null,
+                  "reasoning": null
+                },
+                "logprobs": null,
+                "finish_reason": "stop",
+                "stop_reason": null,
+                "token_ids": null,
+                "routed_experts": null
+              }
+            ],
+            "service_tier": null,
+            "system_fingerprint": "vllm-0.1.dev1+g3ab5dda29-tp4-8bde88c7",
+            "usage": {
+              "prompt_tokens": 39,
+              "total_tokens": 41,
+              "completion_tokens": 2,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "created_cache_tokens": 0,
+                "multimodal_tokens": null
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              }
+            },
+            "prompt_logprobs": null,
+            "prompt_token_ids": null,
+            "prompt_text": null,
+            "kv_transfer_params": null,
+            "ec_transfer_params": null,
+            "metrics": null
+          }
+        },
+        {
+          "prompt": "A list has 8 elements, indexed from zero. Reply with only the final valid index.",
+          "expected": "7",
+          "pass": true,
+          "response": {
+            "id": "chatcmpl-9df478ba5c870350",
+            "object": "chat.completion",
+            "created": 1790448731,
+            "model": "qwen38-flash-next-w8a8",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "7",
+                  "refusal": null,
+                  "annotations": null,
+                  "audio": null,
+                  "function_call": null,
+                  "reasoning": null
+                },
+                "logprobs": null,
+                "finish_reason": "stop",
+                "stop_reason": null,
+                "token_ids": null,
+                "routed_experts": null
+              }
+            ],
+            "service_tier": null,
+            "system_fingerprint": "vllm-0.1.dev1+g3ab5dda29-tp4-8bde88c7",
+            "usage": {
+              "prompt_tokens": 31,
+              "total_tokens": 33,
+              "completion_tokens": 2,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "created_cache_tokens": 0,
+                "multimodal_tokens": null
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              }
+            },
+            "prompt_logprobs": null,
+            "prompt_token_ids": null,
+            "prompt_text": null,
+            "kv_transfer_params": null,
+            "ec_transfer_params": null,
+            "metrics": null
+          }
+        },
+        {
+          "prompt": "Call record_result with task_id T-001 and value 391. Do not add prose.",
+          "pass": true,
+          "response": {
+            "id": "chatcmpl-95026f48a6ee14c9",
+            "object": "chat.completion",
+            "created": 1790448732,
+            "model": "qwen38-flash-next-w8a8",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": null,
+                  "refusal": null,
+                  "annotations": null,
+                  "audio": null,
+                  "function_call": null,
+                  "tool_calls": [
+                    {
+                      "id": "chatcmpl-tool-bcb0a70c672af0f9",
+                      "type": "function",
+                      "function": {
+                        "name": "record_result",
+                        "arguments": "{\"task_id\": \"T-001\", \"value\": 391}"
+                      }
+                    }
+                  ],
+                  "reasoning": null
+                },
+                "logprobs": null,
+                "finish_reason": "tool_calls",
+                "stop_reason": null,
+                "token_ids": null,
+                "routed_experts": null
+              }
+            ],
+            "service_tier": null,
+            "system_fingerprint": "vllm-0.1.dev1+g3ab5dda29-tp4-8bde88c7",
+            "usage": {
+              "prompt_tokens": 310,
+              "total_tokens": 355,
+              "completion_tokens": 45,
+              "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "created_cache_tokens": 128,
+                "multimodal_tokens": null
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              }
+            },
+            "prompt_logprobs": null,
+            "prompt_token_ids": null,
+            "prompt_text": null,
+            "kv_transfer_params": null,
+            "ec_transfer_params": null,
+            "metrics": null
+          }
+        }
+      ]
+    },
+    "grouped": {
+      "files": {
+        "candidate-manifest.json": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/grouped/candidate-manifest.json",
+          "sha256": "c82a036e9a0b4f2c8d6e9da270a2a31cfe25fe81a22ba4233468885825e80102",
+          "bytes": 2676
+        },
+        "serve.log": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/grouped/serve.log",
+          "sha256": "60fae738de0071afe9d1b11c5bdf5660eea7c03cd813a3d87403331cbbcc6687",
+          "bytes": 79288
+        }
+      },
+      "requests": []
+    },
+    "combined-eager": {
+      "files": {
+        "candidate-manifest.json": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/combined-eager/candidate-manifest.json",
+          "sha256": "3d7bc9d8c77a520e3056f88856e9082e9ccd8601d4bbdd351ccaf505834029b8",
+          "bytes": 3488
+        },
+        "serve.log": {
+          "path": "/srv/ai/src/qwen38-decode-study-20260926/combined-eager/serve.log",
+          "sha256": "ad7caf7538360e83803b968e8aa79ad232923b6b00be124e4a0d0ff72bde7894",
+          "bytes": 41214
+        }
+      },
+      "requests": []
+    }
+  },
+  "long_prefix_sha256": "804bfae0b86d5238706bc8823f23b5d74039d952b170efc8a3336af2577e57f4"
+}

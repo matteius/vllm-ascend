@@ -1,0 +1,30 @@
+{
+  "grouped": {
+    "status": "REJECTED",
+    "first_six_text_requests": "HTTP 200; response bodies not saved before the subsequent request stalled",
+    "failure": "Tool-call generation stopped making progress; no trustworthy sustained benchmark result",
+    "last_progress_utc": "2026-09-26 19:06:17",
+    "api_sigterm_utc": "2026-09-26 19:07:35",
+    "shutdown_detail": "Operator sent SIGTERM. vLLM abort-mode shutdown internally force-killed EngineCore (logged timeout=0s).",
+    "kernel_evidence": "devmm_dev_page_fault_get_vaflgs: Va error don\u2019t allow fault by device; hostpid=1531125, devid=0, ret=-22",
+    "root_cause": "Not isolated; graph/route/storage lifetime are hypotheses, not established causes",
+    "evidence_directory": "/srv/ai/src/qwen38-decode-study-20260926/grouped/failure"
+  },
+  "combined": {
+    "status": "NOT_RUN",
+    "reason": "Grouped draft failed stability gate"
+  },
+  "combined-eager": {
+    "status": "NOT_EVALUATED",
+    "reason": "Startup blocked on devices after grouped failure; aborted for recovery before readiness"
+  },
+  "recovery": {
+    "status": "HOST_REBOOT_APPROVAL_PENDING",
+    "service_restored": false,
+    "worker_cleanup": "Three remaining workers exited after rtDeviceSynchronizeWithTimeout reported aicore timeout",
+    "chip_reset": "Failed initially with business_ref_cnt=1 / EBUSY, and after workers exited with Hotreset is executing / EBUSY",
+    "operator_sigkill_sent": false,
+    "selected_restart_arm": "affinity",
+    "production_port": 8001
+  }
+}
