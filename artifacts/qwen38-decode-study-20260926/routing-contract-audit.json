@@ -1,0 +1,187 @@
+{
+  "scope": "CPU interception of the unchanged candidate and host model of installed full-load count writes; no NPU execution; selected failure tiling unknown",
+  "cases": [
+    {
+      "case": "all_local_rank0",
+      "expert_offset": 0,
+      "global_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ],
+      "local_ids": [
+        [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9
+        ]
+      ],
+      "kwargs": {
+        "active_num": 10,
+        "expert_num": 128,
+        "drop_pad_mode": 0,
+        "active_expert_range": [
+          0,
+          128
+        ],
+        "quant_mode": -1,
+        "row_idx_type": 0
+      },
+      "contract_valid": true,
+      "full_load_count_buffer_int32_capacity": 128,
+      "full_load_out_of_bounds_write_indices": []
+    },
+    {
+      "case": "mixed_rank0",
+      "expert_offset": 0,
+      "global_ids": [
+        0,
+        127,
+        128,
+        255,
+        256,
+        383,
+        384,
+        509,
+        510,
+        511
+      ],
+      "local_ids": [
+        [
+          0,
+          127,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128
+        ]
+      ],
+      "kwargs": {
+        "active_num": 10,
+        "expert_num": 128,
+        "drop_pad_mode": 0,
+        "active_expert_range": [
+          0,
+          128
+        ],
+        "quant_mode": -1,
+        "row_idx_type": 0
+      },
+      "contract_valid": false,
+      "full_load_count_buffer_int32_capacity": 128,
+      "full_load_out_of_bounds_write_indices": [
+        128
+      ]
+    },
+    {
+      "case": "all_peer_rank0",
+      "expert_offset": 0,
+      "global_ids": [
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        136,
+        137
+      ],
+      "local_ids": [
+        [
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128
+        ]
+      ],
+      "kwargs": {
+        "active_num": 10,
+        "expert_num": 128,
+        "drop_pad_mode": 0,
+        "active_expert_range": [
+          0,
+          128
+        ],
+        "quant_mode": -1,
+        "row_idx_type": 0
+      },
+      "contract_valid": false,
+      "full_load_count_buffer_int32_capacity": 128,
+      "full_load_out_of_bounds_write_indices": [
+        128
+      ]
+    },
+    {
+      "case": "all_peer_rank1",
+      "expert_offset": 128,
+      "global_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ],
+      "local_ids": [
+        [
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128
+        ]
+      ],
+      "kwargs": {
+        "active_num": 10,
+        "expert_num": 128,
+        "drop_pad_mode": 0,
+        "active_expert_range": [
+          0,
+          128
+        ],
+        "quant_mode": -1,
+        "row_idx_type": 0
+      },
+      "contract_valid": false,
+      "full_load_count_buffer_int32_capacity": 128,
+      "full_load_out_of_bounds_write_indices": [
+        128
+      ]
+    }
+  ]
+}

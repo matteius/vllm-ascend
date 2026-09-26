@@ -94,6 +94,9 @@ grouped 停止发送 SIGTERM；日志显示 vLLM 的 abort-mode shutdown 内部�
 该内存错误出现在停滞后的 shutdown/recovery 阶段；尚未证明它就是首次停滞的
 原因，也未证明 grouped MTP 无法修复。
 
+后续只读代码审计发现了 310P 路由的非法专家 ID 契约问题，并区分了确定缺陷
+与尚未隔离的 graph/collective 风险，详见 [failure-audit.md](failure-audit.md)。
+
 ## 服务恢复（23:16 UTC）
 
 用户随后要求启动约 19 tok/s 的 affinity 版本。设备仍无法完成简单计算，
