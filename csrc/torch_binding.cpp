@@ -47,6 +47,8 @@
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "moe/gdn_gating_v310/gdn_gating_310_torch_adpt.h"
 #include "gmm/w2_blocked_dequant_matmul_v310/w2_blocked_dequant_matmul_310_torch_adpt.h"
+#include "gmm/qwen_w4_group_matmul_v310/qwen_w4_group_matmul_310_torch_adpt.h"
+#include "gmm/qwen_w4_routed_matmul_v310/qwen_w4_routed_matmul_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_kda/recurrent_kda_torch_adpt.h"
 #include "attention/chunk_kda_fwd/chunk_kda_fwd_torch_adpt.h"
@@ -2816,6 +2818,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
         "npu_w2_blocked_dequant_matmul_310(Tensor x, Tensor codes, Tensor block_scale) -> Tensor");
     ops.impl("npu_w2_blocked_dequant_matmul_310", torch::kPrivateUse1, &vllm_ascend::npu_w2_blocked_dequant_matmul_310);
+
+    ops.def("npu_qwen_w4_group_matmul_310(Tensor x, Tensor codes, Tensor scale, Tensor offset, bool tiled=False) -> Tensor");
+    ops.impl("npu_qwen_w4_group_matmul_310", torch::kPrivateUse1, &vllm_ascend::npu_qwen_w4_group_matmul_310);
+    ops.def("npu_qwen_w4_routed_matmul_310(Tensor x, Tensor codes, Tensor scale, Tensor offset, Tensor expert_ids) -> Tensor");
+    ops.impl("npu_qwen_w4_routed_matmul_310", torch::kPrivateUse1, &vllm_ascend::npu_qwen_w4_routed_matmul_310);
 
     ops.def(
         "npu_recurrent_gated_delta_rule_310(Tensor query, "

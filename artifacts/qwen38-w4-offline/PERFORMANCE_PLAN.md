@@ -8,8 +8,40 @@ The first gate is complete: three W4 real-weight smoke answers, seven 310P
 regressions, and restoration of unchanged W8. Fresh W8 sustained medians are
 19.073 tok/s at short context and 18.091 tok/s around 23.4k context (three
 distinct 512-token prompts each). See [HARDWARE_SMOKE.md](HARDWARE_SMOKE.md)
-and [HARDWARE_RESULTS.json](HARDWARE_RESULTS.json). W4 remains approximately
-0.23 tok/s on its short smoke; the accelerated backend is not implemented yet.
+and [HARDWARE_RESULTS.json](HARDWARE_RESULTS.json). The first accelerated Cube
+backend now completes all three real-weight smokes at approximately 3 tok/s,
+up from the 0.23 tok/s reference path. The second, load-time-NZ-encoded backend
+passes the same three smokes at 4.24–4.28 tok/s (+42% on counting). It still
+uses host routing and eager execution; it does not yet match W8.
+See [CUBE_KERNEL.md](CUBE_KERNEL.md).
+
+The first profile-guided priority was packed-weight unpacking. A real layer-0 TP
+partial with synthetic one-token input spends 91% of its profiled device time
+inside the six Cube projections for two local experts. Shared-expert casts
+are not the dominant cost in that diagnostic. Lossless load-time NZ nibble
+encoding, exact arithmetic unpacking and vector metadata broadcast now reduce
+M=2 gate/up/down projections to approximately 0.079/0.079/0.081 ms, from
+0.320/0.319/0.291 ms. All 51 operator tests pass, including changing-weight
+graph replay and K-batch boundaries. This is not a whole-model throughput
+claim. The explicit `cube_310_routed` backend now keeps bounded decode routing
+on device. All 82 NPU projection/layer tests pass, including graph replays that
+change expert IDs and clear formerly local rows, and the production NZ weight
+post-load layout. A real layer-0 TP4 partial passes parity against host routing:
+its latest M=1 sample drops from 1.219 ms to 0.638 ms under replay (no collective;
+not whole-model throughput). Full-model W4 + MTP k=1 + decode graphs now passes
+the three correct smokes. Counting reaches 11.592 tok/s, versus 4.280 eager.
+Two-token verification batches execute in FULL graph mode, and draft acceptance
+counters increase. The completed matched short-context 512-token benchmark is
+11.210/10.367/10.722 tok/s (median 10.722), versus W8's median 19.073. Acceptance
+is 92.83/78.40/83.81%, close to W8 on the same prompts. In particular both queue
+runs draft 287 and accept 225 tokens, but W4 takes 49.291 seconds to decode versus
+27.599 for W8: MTP acceptance alone is not the remaining bottleneck. The completed
+23.4k benchmark is 10.923/10.660/10.198 tok/s (median 10.660 versus W8 18.091).
+Its cold warmup TTFT is 368.799 seconds; prefill remains a serious limitation.
+All six 512-token samples completed without worker errors; maximum observed
+temperature was 80°C. Production W8 parity is not yet achieved. Next collect a
+full-model replay profile before deciding between projection fusion, route/expert
+reuse, attention/GDN or communication changes.
 
 ## Acceptance criteria
 

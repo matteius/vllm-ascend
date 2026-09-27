@@ -16,8 +16,10 @@ from vllm_ascend.models.qwen4_exp.model import AscendQwen4ExpForCausalLM, _Eager
 from vllm_ascend.models.qwen4_exp.moe import route_topk
 from vllm_ascend.models.qwen4_exp.w4_moe import (
     FORMAT,
+    PackedExpertBank,
     W4SparseMoE,
     dequantize,
+    pack_cube_tiles,
     require_eager_w4,
     unpack_signed_int4,
     w4_config,
@@ -112,6 +114,130 @@ def test_real_loader_chooses_w4_and_preserves_w8_default():
         expert, projection, kind = name.split(".")[-3:]
         torch.testing.assert_close(getattr(layer.projections[projection], kind)[int(expert)], tensor)
     assert isinstance(build(_tiny_moe_config(num_layers=1)).model.layers[0].mlp, _EagerSparseMoE)
+
+
+@pytest.mark.parametrize("backend", ["cube_310", "cube_310_tiled"])
+def test_cube_backend_is_explicit_and_keeps_full_model_eager_gate(backend):
+    cfg = config()
+    cfg.hidden_size = 2560
+    cfg.moe_intermediate_size = 640
+    cfg.ascend_expert_quantization.update(group_size=128, backend=backend)
+    assert w4_config(cfg)["backend"] == backend
+    with pytest.raises(ValueError, match="enforce-eager"):
+        require_eager_w4(SimpleNamespace(enforce_eager=False), cfg)
+    cfg.ascend_expert_quantization["group_size"] = 64
+    with pytest.raises(ValueError, match="group_size=128"):
+        w4_config(cfg)
+    cfg.ascend_expert_quantization["group_size"] = 128
+    cfg.hidden_size = 4096
+    with pytest.raises(ValueError, match="hidden_size"):
+        w4_config(cfg)
+
+
+def test_cube_backend_cannot_silently_use_cpu_reference():
+    bank = PackedExpertBank(1, 256, 256, 128, backend="cube_310")
+    with pytest.raises(ValueError, match="requires NPU"):
+        bank.linear(torch.zeros(1, 256, dtype=torch.float16), 0)
+    with pytest.raises(ValueError, match="unsupported"):
+        PackedExpertBank(1, 256, 256, 128, backend="auto")
+
+
+def test_only_device_routed_backend_allows_decode_graphs():
+    cfg = config()
+    cfg.hidden_size, cfg.moe_intermediate_size = 2560, 640
+    cfg.ascend_expert_quantization.update(group_size=128, backend="cube_310_routed")
+    require_eager_w4(SimpleNamespace(enforce_eager=False), cfg)
+    bank = PackedExpertBank(1, 256, 256, 128, backend="cube_310_routed")
+    with pytest.raises(ValueError, match="NPU"):
+        bank.routed_linear(torch.zeros(1, 256).half(), torch.zeros(1, dtype=torch.int32))
+
+
+def test_routed_slots_keep_token_order_and_nonzero_tp_expert_offset():
+    cfg = config(num_layers=1, num_experts=7, top_k=3, shared_inter=0)
+    cfg.hidden_size = cfg.moe_intermediate_size = 256
+    cfg.ascend_expert_quantization.update(group_size=128, backend="cube_310_routed")
+    layer = W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy(), expert_sharding=(1, 2))
+    x = (torch.arange(512).reshape(2, 256) / 512).half()
+    ids = torch.tensor([[0, 3, 6], [1, 4, 5]])
+    weights = torch.tensor([[0.2, 0.3, 0.5], [0.5, 0.3, 0.2]])
+    local_ids = (ids - layer.expert_offset).flatten().to(torch.int32)
+
+    def projection(inputs, selected):
+        torch.testing.assert_close(selected, local_ids)
+        owned = (selected >= 0) & (selected < layer.num_local_experts)
+        factor = torch.where(owned, selected + 1, 0).to(inputs.dtype)
+        return inputs * factor[:, None]
+
+    expected = torch.zeros_like(x).float()
+    for token in range(2):
+        for slot in range(3):
+            expert = int(ids[token, slot]) - layer.expert_offset
+            if 0 <= expert < layer.num_local_experts:
+                projected = (x[token] * (expert + 1)).float()
+                activated = (F.silu(projected) * projected).half()
+                expected[token] += (activated * (expert + 1)).float() * weights[token, slot]
+    with (
+        patch.object(layer.projections["gate_proj"], "routed_linear", side_effect=projection),
+        patch.object(layer.projections["up_proj"], "routed_linear", side_effect=projection),
+        patch.object(layer.projections["down_proj"], "routed_linear", side_effect=projection),
+    ):
+        torch.testing.assert_close(layer._forward_routed(x, weights, ids), expected)
+
+
+def test_oversized_graph_fails_before_host_route_readback():
+    cfg = config(num_layers=1, num_experts=7, top_k=3, shared_inter=0)
+    cfg.hidden_size = cfg.moe_intermediate_size = 256
+    cfg.ascend_expert_quantization.update(group_size=128, backend="cube_310_routed")
+    layer = W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy())
+    with (
+        patch.object(torch, "npu", SimpleNamespace(is_current_stream_capturing=lambda: True), create=True),
+        patch.object(layer, "_forward_host_routed") as host,
+    ):
+        with pytest.raises(RuntimeError, match="exceeds 80 routes"):
+            layer(torch.zeros(27, 256).half())
+        host.assert_not_called()
+
+
+@pytest.mark.parametrize("outputs,inputs", [(640, 2560), (2560, 640)])
+def test_tile_permutation_is_lossless_and_keeps_bytes(outputs, inputs):
+    generator = torch.Generator().manual_seed(3132)
+    weight = torch.randint(-128, 128, (outputs, inputs // 2), dtype=torch.int8, generator=generator)
+    scale = torch.rand(outputs, inputs // 128, generator=generator).half()
+    offset = torch.randint(-8, 8, scale.shape, dtype=torch.int8, generator=generator)
+    for kind, tensor in [("weight", weight), ("weight_scale", scale), ("weight_offset", offset)]:
+        packed = pack_cube_tiles(tensor, kind)
+        assert packed.shape == tensor.shape and packed.dtype == tensor.dtype
+        assert packed.numel() * packed.element_size() == tensor.numel() * tensor.element_size()
+        assert packed.is_contiguous()
+        if kind == "weight":
+            encoded = packed.reshape(outputs // 32, inputs // 16, 16, 16)
+            planes = torch.stack((encoded & 15, (encoded >> 4) & 15), -2)
+            codes = planes.permute(0, 3, 4, 1, 2).reshape(outputs, inputs) - 8
+            restored = (codes[:, 0::2] & 15) | ((codes[:, 1::2] & 15) << 4)
+        else:
+            restored = packed.reshape(outputs // 32, inputs // 128, 32).transpose(1, 2).reshape_as(tensor)
+            if kind == "weight_offset":
+                restored = restored - 8
+        torch.testing.assert_close(restored, tensor, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("backend", ["cube_310_tiled", "cube_310_routed"])
+def test_tiled_loader_permutes_each_expert_without_fp16_shadow(backend):
+    cfg = config(num_layers=1, num_experts=3, top_k=1, shared_inter=0)
+    cfg.hidden_size = cfg.moe_intermediate_size = 256
+    cfg.ascend_expert_quantization.update(group_size=128, backend=backend)
+    layer = W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy())
+    values = {
+        "weight": torch.arange(256 * 128).reshape(256, 128).to(torch.int8),
+        "weight_scale": torch.full((256, 2), 0.25, dtype=torch.float16),
+        "weight_offset": (torch.arange(512) % 16 - 8).reshape(256, 2).to(torch.int8),
+    }
+    for kind, tensor in values.items():
+        layer.load_projection(2, "gate_proj", kind, tensor)
+        bank = layer.projections["gate_proj"]
+        torch.testing.assert_close(getattr(bank, kind)[2], pack_cube_tiles(tensor, kind), rtol=0, atol=0)
+        assert not getattr(bank, kind)[0].any()
+    assert len(list(layer.projections["gate_proj"].parameters())) == 3
 
 
 @pytest.mark.parametrize(

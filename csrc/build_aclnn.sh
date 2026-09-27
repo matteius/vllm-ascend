@@ -118,10 +118,17 @@ invalidate_stale_kernel_cache() {
             # Per-SoC kernel compiler options live beside the host sources.
             # Recompile device objects when those options change.
             stale_kernel_cache=1
-        elif [[ "${op_name}" == "w2_blocked_dequant_matmul_v310" ]] &&
+        elif [[ "${op_name}" == "w2_blocked_dequant_matmul_v310" ||
+                "${op_name}" == "qwen_w4_group_matmul_v310" ||
+                "${op_name}" == "qwen_w4_routed_matmul_v310" ]] &&
              find "${ROOT_DIR}/csrc/moe/common/kernel_utils" -type f -newer "${source_stamp}" -print -quit |
                  grep -q .; then
             # The 310P W2 kernel includes the shared CATLASS block helpers.
+            stale_kernel_cache=1
+        elif [[ "${op_name}" == "qwen_w4_routed_matmul_v310" ]] &&
+             find "${ROOT_DIR}/csrc/gmm/qwen_w4_group_matmul_v310/op_kernel" -type f -newer "${source_stamp}" -print -quit |
+                 grep -q .; then
+            # Routed projections share the group-W4 Cube implementation.
             stale_kernel_cache=1
         fi
         if [[ "${stale_kernel_cache}" -eq 0 ]]; then
@@ -258,6 +265,8 @@ if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
         "kda_gate_cumsum"
         "kda_layout_swap12"
         "w2_blocked_dequant_matmul_v310"
+        "qwen_w4_group_matmul_v310"
+        "qwen_w4_routed_matmul_v310"
         "rms_norm_dynamic_quant"
         "add_rms_norm_dynamic_quant"
     )
@@ -466,6 +475,12 @@ remove_stale_kernel_locks
   log "custom_ops_install_dir=${custom_ops_install_dir}"
 
   mkdir -p -- "$custom_ops_install_dir"
+
+  # Older/copied vendor packages can predate the post-install permission fix.
+  # Make that package-owned directory removable before replacing its contents.
+  if [[ -d "${custom_ops_install_dir}/vendors/custom_transformer/scripts" ]]; then
+    chmod u+w "${custom_ops_install_dir}/vendors/custom_transformer/scripts"
+  fi
 
   # Remove all top-level entries under custom_ops_install_dir except .gitkeep, including hidden files and directories.
   find "$custom_ops_install_dir" -mindepth 1 -maxdepth 1 \

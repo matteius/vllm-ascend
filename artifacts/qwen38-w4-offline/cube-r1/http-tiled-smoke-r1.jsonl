@@ -1,0 +1,209 @@
+{"event": "start", "case": "arithmetic", "payload": {"model": "qwen38-w4-experimental", "messages": [{"role": "user", "content": "What is 17 * 19? Reply with just the integer."}], "temperature": 0, "seed": 1024, "max_tokens": 16, "chat_template_kwargs": {"enable_thinking": false}, "stream": true, "stream_options": {"include_usage": true}}}
+{"event": "delta", "case": "arithmetic", "elapsed_s": 1.897268755999903, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "arithmetic", "elapsed_s": 2.139122069000223, "text": "2", "reasoning": ""}
+{"event": "delta", "case": "arithmetic", "elapsed_s": 2.3698112620004395, "text": "3", "reasoning": ""}
+{"event": "result", "case": "arithmetic", "content": "323", "reasoning": "", "finish_reason": "stop", "done": true, "correct": true, "usage": {"prompt_tokens": 28, "total_tokens": 32, "completion_tokens": 4, "completion_tokens_details": {"reasoning_tokens": 0}}, "elapsed_s": 2.6036807720010984, "ttft_s": 1.897268755999903, "e2e_tokens_per_second": 1.536286645818619, "decode_tokens_per_second": 4.246813378093676}
+{"event": "start", "case": "count_1_50", "payload": {"model": "qwen38-w4-experimental", "messages": [{"role": "user", "content": "Return the integers 1 through 50 in order, comma-separated. No other text."}], "temperature": 0, "seed": 1024, "max_tokens": 192, "chat_template_kwargs": {"enable_thinking": false}, "stream": true, "stream_options": {"include_usage": true}}}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 0.9985428159998264, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 1.239653096999973, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 1.4746446919998561, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 1.708793093001077, "text": "2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 1.9276117400004296, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 2.1729952080004296, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 2.3996126870006265, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 2.622655818000567, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 2.8536896460009302, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 3.089198965999458, "text": "4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 3.309309169999324, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 3.5474488910003856, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 3.775274077001086, "text": "5", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 4.007694301000811, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 4.233535314000619, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 4.469467807999536, "text": "6", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 4.706961981999484, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 4.937385077999352, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 5.164559115999509, "text": "7", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 5.3890599999995175, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 5.61311809200015, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 5.843730378001055, "text": "8", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 6.083211761000712, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 6.302674724000099, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 6.530120839001029, "text": "9", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 6.7694084539998585, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 7.007054526000502, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 7.244758159000412, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 7.47123631300019, "text": "0", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 7.710853614000371, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 7.9413198130005185, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 8.171567925999625, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 8.402071816000898, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 8.638875397000447, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 8.872789352000837, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 9.103684436000549, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 9.321938510000109, "text": "2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 9.552263460000177, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 9.786927862000084, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 10.01892514300016, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 10.249614045000271, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 10.477409102999445, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 10.705472081001062, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 10.930948310000531, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 11.155034506000447, "text": "4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 11.395990782999434, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 11.625722254999346, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 11.856551363000108, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 12.092263167000056, "text": "5", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 12.334032221000598, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 12.561330705000728, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 12.795173205000538, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 13.024155381001037, "text": "6", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 13.246120783000151, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 13.481840192000163, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 13.716452365000805, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 13.944775828000274, "text": "7", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 14.181849873000829, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 14.406018143999972, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 14.643228648999866, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 14.881112253000538, "text": "8", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 15.113966413000526, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 15.350589951000075, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 15.574197526999342, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 15.806170621001002, "text": "9", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 16.034655932000533, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 16.275939172001017, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 16.499567707000097, "text": "2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 16.73408833599933, "text": "0", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 16.963307432000875, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 17.205684501999713, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 17.431999426000402, "text": "2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 17.66066506000061, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 17.898207837000882, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 18.138021912000113, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 18.36481383300088, "text": "2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 18.593686170999717, "text": "2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 18.829399096999623, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 19.061877742000433, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 19.280797613000686, "text": "2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 19.504723042000478, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 19.738909145000434, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 19.965871689999403, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 20.20231348299967, "text": "2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 20.426757970000835, "text": "4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 20.650238673000786, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 20.883924183999625, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 21.11529151600007, "text": "2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 21.33663088799949, "text": "5", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 21.562571931001003, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 21.799033840999982, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 22.033453227999416, "text": "2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 22.262597072000062, "text": "6", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 22.4932467790004, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 22.73129284300012, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 22.953798943000947, "text": "2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 23.193857002001096, "text": "7", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 23.426629135999974, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 23.674881229000675, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 23.899704655999813, "text": "2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 24.12238471800083, "text": "8", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 24.353567809001106, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 24.593134644999736, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 24.821962096999414, "text": "2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 25.066263345999687, "text": "9", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 25.309979543000736, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 25.550138714999775, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 25.772006790999512, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 26.002019327001108, "text": "0", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 26.24127331800082, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 26.471374843000376, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 26.694658762000472, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 26.9407959830005, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 27.176952772999357, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 27.41290201999982, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 27.64955661699969, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 27.901224666000417, "text": "2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 28.13909541599969, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 28.368925533999573, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 28.601530249999996, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 28.838793274000636, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 29.08570096999938, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 29.31415908999952, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 29.53945515600026, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 29.778536617999634, "text": "4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 30.02962118799951, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 30.2841803350002, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 30.53565323300063, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 30.779909586999565, "text": "5", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 31.03891637200104, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 31.287197821000518, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 31.530134795000777, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 31.78239947899965, "text": "6", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 32.0283560959997, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 32.2801751019997, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 32.52426283600107, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 32.76395042100012, "text": "7", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 33.01423833499939, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 33.259712966000734, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 33.50146959599988, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 33.739340516000084, "text": "8", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 33.968807082999774, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 34.217550941999434, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 34.447915926999485, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 34.68312060700009, "text": "9", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 34.92257060100019, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 35.168397481000284, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 35.390164135000305, "text": "4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 35.62856724800076, "text": "0", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 35.8541753669997, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 36.09969826999986, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 36.33332600100039, "text": "4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 36.56107461099964, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 36.79241648500101, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 37.02638398199997, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 37.257503953000196, "text": "4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 37.48619914399933, "text": "2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 37.72208323599989, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 37.95451697600038, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 38.189126884999496, "text": "4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 38.42152980600076, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 38.656258410999726, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 38.89406285500081, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 39.121437302999766, "text": "4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 39.3530250950007, "text": "4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 39.59442224099985, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 39.82644933799929, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 40.05707412800075, "text": "4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 40.28335409600004, "text": "5", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 40.5136612919996, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 40.758577599999626, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 40.98667583600036, "text": "4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 41.213943111000845, "text": "6", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 41.45372596699963, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 41.70013634700081, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 41.93531101000008, "text": "4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 42.17867526699956, "text": "7", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 42.41698220699982, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 42.65673718000107, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 42.88429153099969, "text": "4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 43.11555920399951, "text": "8", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 43.34640916200078, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 43.57859171400014, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 43.80520251100097, "text": "4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 44.03137060500012, "text": "9", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 44.2637771640002, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 44.48842894500012, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 44.71016085300107, "text": "5", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 44.93465819999983, "text": "0", "reasoning": ""}
+{"event": "result", "case": "count_1_50", "content": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50", "reasoning": "", "finish_reason": "stop", "done": true, "correct": true, "usage": {"prompt_tokens": 31, "total_tokens": 221, "completion_tokens": 190, "completion_tokens_details": {"reasoning_tokens": 0}}, "elapsed_s": 45.15750002899949, "ttft_s": 0.9985428159998264, "e2e_tokens_per_second": 4.2074959835682835, "decode_tokens_per_second": 4.279992371386014}
+{"event": "start", "case": "python_output", "payload": {"model": "qwen38-w4-experimental", "messages": [{"role": "user", "content": "What does this Python code print? Reply with only the output.\nprint([x*x for x in range(6) if x % 2 == 0])"}], "temperature": 0, "seed": 1024, "max_tokens": 48, "chat_template_kwargs": {"enable_thinking": false}, "stream": true, "stream_options": {"include_usage": true}}}
+{"event": "delta", "case": "python_output", "elapsed_s": 1.181522455999584, "text": "[", "reasoning": ""}
+{"event": "delta", "case": "python_output", "elapsed_s": 1.4212091699992015, "text": "0", "reasoning": ""}
+{"event": "delta", "case": "python_output", "elapsed_s": 1.6599445239990018, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "python_output", "elapsed_s": 1.8920252629995957, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "python_output", "elapsed_s": 2.123023373000251, "text": "4", "reasoning": ""}
+{"event": "delta", "case": "python_output", "elapsed_s": 2.3556888839993917, "text": ",", "reasoning": ""}
+{"event": "delta", "case": "python_output", "elapsed_s": 2.5957980410003074, "text": " ", "reasoning": ""}
+{"event": "delta", "case": "python_output", "elapsed_s": 2.832166865000545, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "python_output", "elapsed_s": 3.0696322439998767, "text": "6", "reasoning": ""}
+{"event": "delta", "case": "python_output", "elapsed_s": 3.3035092089994578, "text": "]", "reasoning": ""}
+{"event": "result", "case": "python_output", "content": "[0, 4, 16]", "reasoning": "", "finish_reason": "stop", "done": true, "correct": true, "usage": {"prompt_tokens": 46, "total_tokens": 57, "completion_tokens": 11, "completion_tokens_details": {"reasoning_tokens": 0}}, "elapsed_s": 3.5396361429993703, "ttft_s": 1.181522455999584, "e2e_tokens_per_second": 3.10766405235058, "decode_tokens_per_second": 4.240677646344922}
+HTTP_SMOKE_PASS qwen38-w4-experimental

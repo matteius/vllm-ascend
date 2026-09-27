@@ -29,8 +29,10 @@ speed or broad model quality; see the hardware results below.
 | PLE disk-backed lazy lookup | Preserved; W4 explicitly selects the standard HF index |
 | W8 runtime, MTP and graph defaults | Unchanged unless W4 checkpoint metadata is present |
 | W4 NPU inference | Full checkpoint loaded on TP4/310P; three completed correct answers and seven operator regressions passed |
-| W4 ACLGraph | Unsupported by the initial eager backend; initialization rejects graph mode |
-| W4 MTP / multimodal / flashcomm1 / EPLB | Not validated; leave disabled for the first W4 smoke |
+| Experimental W4 Cube projection | Separate group/routed 310P operators; 82 NPU regressions and real-weight TP4 smokes passed |
+| W4 ACLGraph | FULL_DECODE_ONLY verified with cube_310_routed; older backends still require eager |
+| W4 MTP | k=1 verified with real weights, three correct completed answers and increasing acceptance counters |
+| W4 multimodal / flashcomm1 / EPLB | Not validated; language-model-only with existing collectives |
 | Long context / concurrent sessions | Not validated for W4 |
 
 Uneven expert ownership is not proof of whole-model TP3/TP6 support: attention,
@@ -93,8 +95,8 @@ on disk/host and is not counted as NPU expert memory.
 
 ## Deployment
 
-**Do not use the W8 production launcher for this checkpoint.** Its quantization
-and graph flags are intentionally incompatible. The following is the experimental
+**Do not use the W8 production launcher for this checkpoint.** Its generic
+quantization flags are incompatible. The following is the experimental
 hardware-smoke configuration, not a production serving profile. It does not
 stop another process and uses port 8002 instead of the production port.
 
@@ -105,21 +107,47 @@ setup, from the isolated plugin worktree (or its installed test environment):
 export SOC_VERSION=ascend310p1
 export VLLM_ASCEND_ENABLE_310P=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-vllm serve /path/to/separate/Qwen3.8-Flash-Next-W4A16-G128-300i \
+export TASK_QUEUE_ENABLE=1
+export VLLM_USE_BREAKABLE_CUDAGRAPH=1
+export VLLM_ASCEND_KV_CACHE_FRACTION=0.65
+python -m vllm.entrypoints.cli.main serve /path/to/separate/Qwen3.8-Flash-Next-W4A16-G128-300i \
   --served-model-name qwen38-w4-experimental \
   --host 127.0.0.1 --port 8002 \
   --dtype float16 --tensor-parallel-size 4 \
-  --enforce-eager --no-async-scheduling --disable-custom-all-reduce \
-  --max-model-len 8192 --max-num-batched-tokens 512 --max-num-seqs 1 \
+  --no-async-scheduling --disable-custom-all-reduce \
+  --max-model-len 32768 --max-num-batched-tokens 512 --max-num-seqs 1 \
   --gpu-memory-utilization 0.90 --language-model-only \
   --enable-expert-parallel --enable-ep-weight-filter \
-  --reasoning-parser qwen3 --mamba-cache-mode align
+  --reasoning-parser qwen3 --mamba-cache-mode align --enable-chunked-prefill \
+  --enable-prefix-caching --enable-prompt-tokens-details \
+  --cudagraph-metrics --enable-logging-iteration-details \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":1}' \
+  --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2]}' \
+  --hf-overrides '{"text_config":{"ascend_expert_quantization":{"backend":"cube_310_routed","bits":4,"format":"qwen4exp_w4a16_group_v1","group_size":128,"offset_dtype":"int8","packing":"signed_int4_low_nibble_first_in_axis","scale_dtype":"float16","symmetric":false}}}' \
+  --limit-mm-per-prompt '{"image":0,"video":0}'
 ```
 
-Omit `--quantization ascend` and all speculative/graph flags in this first smoke:
+Omit `--quantization ascend`:
 the model-specific metadata selects W4, and generic quantization is rejected.
 Never raise memory utilization above the established 0.965 cap. The model config
 advertises 262,144 positions; W4's usable maximum has **not** been measured.
+
+The command requires an isolated installation rebuilt with both
+`QwenW4GroupMatmulV310` and `QwenW4RoutedMatmulV310` plus matching Torch bindings.
+It leaves the checkpoint's default and the W8 runtime unchanged. Detailed
+commands and build provenance are in `artifacts/qwen38-w4-offline/CUBE_KERNEL.md`.
+The `cube_310_tiled` variant losslessly re-encodes nibbles in Cube NZ order at
+load time and biases codes/offsets equally. It preserves parameter shapes,
+dtypes, byte counts, and the quantization formula; the checkpoint is unchanged.
+The matching operator is mandatory because the in-memory byte layout differs.
+Neither group-only variant makes full-model graph capture safe while routing
+uses the CPU. The new `cube_310_routed` variant reads expert IDs on device and
+supports bounded decode graphs up to 80 routes (8 tokens for this top-k=10 model).
+Larger prefill uses the existing grouped host route; oversized capture fails
+explicitly. Workspace is bounded by `routes*N*K*2 + CANN reserve`, not a
+persistent expanded expert bank. For eager isolation, select `cube_310_tiled`
+or remove the overrides, add `--enforce-eager`, and remove speculative and
+compilation configuration. Do not use `TORCHDYNAMO_DISABLE=1` as graph evidence.
 
 ## Functional Verification
 
@@ -140,13 +168,15 @@ For an explicitly authorized NPU test:
 curl --fail http://127.0.0.1:8002/v1/models
 curl --fail http://127.0.0.1:8002/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"qwen38-w4-experimental","messages":[{"role":"user","content":"Return the integers 1 through 50 in order."}],"temperature":0,"seed":1024,"max_tokens":512}'
+  -d '{"model":"qwen38-w4-experimental","messages":[{"role":"user","content":"Return the integers 1 through 50 in order."}],"temperature":0,"seed":1024,"max_tokens":512,"chat_template_kwargs":{"enable_thinking":false}}'
 ```
 
 Require a completed correct response and clean worker logs; startup alone is not
 a pass. Next compare W8 and W4 on identical held-out coding prompts, prompts that
-cross cache-block boundaries, and perplexity/answer accuracy. Only then evaluate
-MTP, longer context and concurrency separately. No accuracy-threshold CI YAML is
+cross cache-block boundaries, and perplexity/answer accuracy. Longer context and
+concurrency require separate gates. Check actual FULL runtime-mode statistics
+for two-token verification batches and increasing drafted/accepted counters;
+configuration or startup alone is not graph/MTP evidence. No accuracy-threshold CI YAML is
 provided yet: there are no real W4 accuracy results from which to set thresholds.
 
 ## Accuracy Evaluation
@@ -160,17 +190,47 @@ transferred to this RTN artifact.
 
 ## Performance
 
-The three TP4 hardware requests decoded at approximately **0.23 tok/s**, not
+The original three TP4 hardware requests decoded at approximately **0.23 tok/s**, not
 15 tok/s. The reference backend keeps only packed weights resident and
 dequantizes selected experts one at a time, with host routing synchronization.
 Each rank reported **18.6917 GiB** model-load memory with MTP and graphs disabled.
 That is not a measured maximum context or concurrency capacity.
 
+The first accelerated `cube_310` implementation completed the same three
+correct smokes at approximately **3 tok/s**, with the same 18.6917 GiB/rank
+model memory. This is not production parity: the refreshed W8 + MTP + graph
+baseline is 19.073 tok/s at short context and 18.091 tok/s near 23.4k context.
+Whole-model graphs/MTP were not enabled in that first run. See
+`artifacts/qwen38-w4-offline/CUBE_KERNEL.md` for measurements
+and the distinction between raw smoke timing and corrected decode throughput.
+
+The subsequent `cube_310_tiled` backend passes the same three correct smokes
+at **4.24–4.28 tok/s**, retaining 18.6917 GiB/rank. Its 51 operator tests pass,
+including changed-weight replay and K-batch boundaries. Load-time re-encoding
+adds startup work (about 233 seconds for model loading in this run). These
+smokes remain eager/no-MTP and do not establish production parity.
+
 Detailed provenance, timings and limitations are in
 `artifacts/qwen38-w4-offline/HARDWARE_SMOKE.md`. Hardware regression coverage is
 `tests/e2e/nightly/310p/single_node/ops/test_qwen4exp_w4_310.py`.
 
-The next performance gate is a 310P-compatible packed groupwise W4 matmul with
-device-side routing and bounded scratch space, followed by graph-replay and
-MTP acceptance tests. Do not obtain apparent W4 speed by permanently expanding
-all experts to INT8/FP16: that would erase the intended memory saving.
+### 最新 MTP + graph 验证
+
+`cube_310_routed` 已完成 TP4 真实整模型 MTP k=1 + FULL_DECODE_ONLY
+验证。三个 smoke 均完整正确，1–50 为 **11.592 tok/s**，Python 输出题为
+11.653 tok/s；这些短 smoke 不能代替 sustained coding throughput。
+model-load 为 19.3821 GiB/rank，graph capture 报告 0.30 GiB。
+82 项 NPU operator/layer 回归与 33 项 CPU/build tests 通过。
+
+首次完整 graph 启动因 NZ shared weights 的 FP32 Cast 失败；修正仅限
+routed NPU 后端，改为 resident FP16 operand policy，与 W8 一致。
+增加真实 NZ post-load 和改变输入/route 的 replay 回归后，实际服务的
+两-token verification batch 显示 `Runtime Mode = FULL`，MTP 接受计数
+也递增；不是只验证 capture。最新速度证据与 runbook 在上述 CUBE_KERNEL。
+
+同协议三条 512-token prompts 的 sustained 中位数为：短上下文 **10.722**、
+约 23.4k 上下文 **10.660 tok/s**。六题都正常完成，最高温度 80°C。
+长前缀冷 TTFT 为 368.799 秒，prefill 仍有明显性能缺陷。下一步是完整
+replay 的瓶颈 profile；仍未达到 W8 的 19.073/18.091 tok/s。
+不能靠常驻 INT8/FP16 全专家展开
+制造 W4 提速；必须保留量化内存收益与动态 replay 正确性。
