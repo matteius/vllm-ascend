@@ -1,0 +1,82 @@
+{
+  "operator_package": "ops-pass2-vector",
+  "base_commit": "a5a65d677",
+  "variants": {
+    "metadata": {
+      "operator_sha256": {
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_3a644bf0930547c10e04e17d2ef17784.o": "2cce68eec06dd836899afd836613413994f629fadd30464facfcef1974754b80",
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_f445ca91b09a2d95f71de7992df42bfd.o": "0f88a741d6ceb63286b3381ca70d4437dfd4705275f5bb03f7dc3f66fae8539c",
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_pack_v310/QwenW4A8PackV310_27bb22b665b89060a6ab8d99f12c3b1f.o": "530aa41c47d00ba0ba9211a746d0ffa815d140fb7926315ece233190f6679cd8"
+      },
+      "source_sha256": {
+        "native_int4_schedule.h": "b49ba38b1fade55f09eab1d6064b784eb1bdc67635e3141c24f0de60552d048e",
+        "qwen_w4_a8_int4_matmul_v310.cpp": "93fc1d44b0890c03f657143510da637814176c716828230ebb13e26dc7d8ad2f",
+        "qwen_w4_a8_int4_matmul_v310_tiling_data.h": "05231bf596326b534894e9ebef972fb4a44c41ed32a8cc8cc31384adeac6021d"
+      }
+    },
+    "balanced": {
+      "operator_sha256": {
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_3a644bf0930547c10e04e17d2ef17784.o": "4207a21cd49cf8e8439bfb1de58d01c5c1c48ca479536321d56a930d9cdb6570",
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_f445ca91b09a2d95f71de7992df42bfd.o": "4106d80c5c183542341897179a6c9a4657123d174a417a979d1220ebd9e0117e",
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_pack_v310/QwenW4A8PackV310_27bb22b665b89060a6ab8d99f12c3b1f.o": "530aa41c47d00ba0ba9211a746d0ffa815d140fb7926315ece233190f6679cd8"
+      },
+      "source_sha256": {
+        "native_int4_schedule.h": "ba7ad40ee6759ee90f8f989f4050584a23908c6c532b0aab381903ce6ef110fe",
+        "qwen_w4_a8_int4_matmul_v310.cpp": "19b1cf9617c525aa7efc1deb2c7f7c85d6aeae3c71170106934673c4da171ef8",
+        "qwen_w4_a8_int4_matmul_v310_tiling_data.h": "05231bf596326b534894e9ebef972fb4a44c41ed32a8cc8cc31384adeac6021d"
+      }
+    },
+    "strided": {
+      "operator_sha256": {
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_3a644bf0930547c10e04e17d2ef17784.o": "1f4624e49993d7f3f6bd29abae48ca28d73a7a11b8dff3cce4a914417539d5e7",
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_f445ca91b09a2d95f71de7992df42bfd.o": "e817efff3c758b235e0478f5493788c6dc4a9278f8e361671498fa9b45f01c67",
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_pack_v310/QwenW4A8PackV310_27bb22b665b89060a6ab8d99f12c3b1f.o": "530aa41c47d00ba0ba9211a746d0ffa815d140fb7926315ece233190f6679cd8"
+      },
+      "source_sha256": {
+        "native_int4_schedule.h": "0d6793bad9e346a76f86ac518819032400fdf615c7c3811778cc9ea2d39a927b",
+        "qwen_w4_a8_int4_matmul_v310.cpp": "19b1cf9617c525aa7efc1deb2c7f7c85d6aeae3c71170106934673c4da171ef8",
+        "qwen_w4_a8_int4_matmul_v310_tiling_data.h": "05231bf596326b534894e9ebef972fb4a44c41ed32a8cc8cc31384adeac6021d"
+      }
+    },
+    "vector": {
+      "operator_sha256": {
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_3a644bf0930547c10e04e17d2ef17784.o": "da7a67b4e72475b7665a3cf977a43a7eb61b34f56092348ee17e499d11eb7586",
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_f445ca91b09a2d95f71de7992df42bfd.o": "a9118fade2cd508348a2fc86dfca723392ed5d774373cb130bfddb5cebfd1586",
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_pack_v310/QwenW4A8PackV310_27bb22b665b89060a6ab8d99f12c3b1f.o": "530aa41c47d00ba0ba9211a746d0ffa815d140fb7926315ece233190f6679cd8"
+      },
+      "source_sha256": {
+        "native_int4_schedule.h": "45dc3866e493ff81f098782a263780cde70f23235082429977c3edde0d1c43ea",
+        "qwen_w4_a8_int4_matmul_v310.cpp": "19b1cf9617c525aa7efc1deb2c7f7c85d6aeae3c71170106934673c4da171ef8",
+        "qwen_w4_a8_int4_matmul_v310_tiling_data.h": "05231bf596326b534894e9ebef972fb4a44c41ed32a8cc8cc31384adeac6021d"
+      }
+    }
+  },
+  "runtime_source_sha256": {
+    "vllm_ascend/models/qwen4_exp/dtype_policy.py": "7430b25bb2d351bc8606b76e8a84ac5089e83cde0cd562e4820fb1e3a8c1cf0c",
+    "vllm_ascend/models/qwen4_exp/w4_moe.py": "d6d8d8ceec303ed3c858b7406c4f3e1f26d70418393e0f4c87d179aad109814d",
+    "vllm_ascend/models/qwen4_exp/model.py": "23b4d592aa2cfe5914397b9a4ba1fa670c41707e0d763c578b631ce8588a0ba5",
+    "vllm_ascend/models/qwen4_exp/qsa.py": "010cf3db4c9b3d33ea937372e20ad3e9ceb83c2538a1c5214f481650c45d075a",
+    "vllm_ascend/models/qwen4_exp/w4_backend_policy.py": "356a4553d93bca46b3fd94d77953b54d7e395b6e5aa4ecc1465d63ae89d01034",
+    "vllm_ascend/models/qwen4_exp/qwen4exp_gdn.py": "8c63ccb27330cadf90f1377155b88b687cb9fb751783c3e924028a7dabe70f27",
+    "vllm_ascend/models/qwen4_exp/context_budget.py": "a4ca7c867d8e2b426b3273c3133f8d91a97042c98e991fdfffd8cf144620439c",
+    "vllm_ascend/models/qwen4_exp/kv_cache.py": "602c702e3dd2537253a4ecea72ccf493c0c13e7c7bd12403be1ca9f5449dba61",
+    "vllm_ascend/models/qwen4_exp/w4a8_int4.py": "9b306faaceaf9b1e595d41cbdcde021b9b1fdc6e5a24c00dab92c348b3d8d51c",
+    "vllm_ascend/models/qwen4_exp/qsa_head_sharding.py": "322cf8b9c5882ccdd9b249f6c093df452516d66e4c61b360fa931820d51104bc",
+    "vllm_ascend/models/qwen4_exp/qsa_c8.py": "13f60b5c7b3f0e6a6d6ece31a292fc37b730ffc5fdce198b2dec77815b528704",
+    "vllm_ascend/models/qwen4_exp/chunk_config.py": "3848ad927c0077656d7ec5496f2cf612c156cbec61544643249e090d41cc8eb7",
+    "vllm_ascend/models/qwen4_exp/ple_prefetch.py": "11a90a2f2c11d06aec199c5945d730b93ea34b57328a3a163de05609c5bebdfe",
+    "vllm_ascend/models/qwen4_exp/moe.py": "c45d6a893b3b6a533faa8f367abd4f8fe8477e67dc47cfeae5b2eefb178ba53d",
+    "vllm_ascend/models/qwen4_exp/weight_mapping.py": "e807cdd7e07f03b606c7d9d9921ef1bde9c9fa1ea695aca939cbac6ce82530d6",
+    "vllm_ascend/models/qwen4_exp/ple_layer.py": "db525f291c84053da0007b326ed0286a90ad44c249d7b35f2a01bb5367bee69c",
+    "vllm_ascend/models/qwen4_exp/grouped_expert_dispatch.py": "18fdf28a295b64d2915b121c39167b89f94879995f0995a074ac18f1b00f6295",
+    "vllm_ascend/models/qwen4_exp/indexer_qsa.py": "e3b4d8b905eddd378725ce2a2e5ac2dca2d516490673a964434f010b20ea0245",
+    "vllm_ascend/models/qwen4_exp/mtp.py": "efdd1351230f2929487c8c8be5cc62ac0a2a18d2ecd7d1a268d3c55b99193eb1",
+    "vllm_ascend/models/qwen4_exp/ngram_embedding.py": "b534788f4639f643ad96758a6d03229b37e9d84f8bb2bbfb33aaa682641faf36",
+    "vllm_ascend/models/qwen4_exp/__init__.py": "82a0405f2fafeea37dbb164bd021c57a03571e043f562b2abfd3feb01b59dd9c"
+  },
+  "binding_sha256": {
+    "vllm_ascend/vllm_ascend_C.cpython-312-x86_64-linux-gnu.so": "848af754470e3f2314b6abc8d208aca34f93cefdc2476b92b0c21cda13791be9"
+  },
+  "local_final_source_matches_built_source": true,
+  "previous_model_code_and_quantizer_unchanged": true
+}

@@ -1,0 +1,10 @@
+{
+  "label": "vector",
+  "dataset_sha256": "de4f0a3b2a14bab908865733f639b66428116eee33f2958495814920745cd27b",
+  "samples": 228,
+  "correct": 204,
+  "invalid": 0,
+  "accuracy": 0.8947368421052632,
+  "elapsed_seconds": 211.5018452630029,
+  "scope": "fixed sampled zero-shot MMLU; not the official full-dataset score"
+}

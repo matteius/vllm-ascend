@@ -203,6 +203,25 @@ class NativeInt4 {
   GlobalTensor<int64_t> ends_;
   int64_t rows_, experts_, n_, k_, groups_;
 };
+template <uint32_t N>
+__aicore__ inline void RunSchedule(GM_ADDR low, GM_ADDR high, GM_ADDR xs, GM_ADDR sums, GM_ADDR codes, GM_ADDR scale,
+                                   GM_ADDR offset, GM_ADDR weight_sum, GM_ADDR ends, GM_ADDR y,
+                                   __gm__ const QwenW4A8Int4KernelTilingData* td) {
+  constexpr int64_t DECODE_ROUTE_LIMIT = 80;
+  if (td->numRows <= DECODE_ROUTE_LIMIT) {
+    native_int4::Schedule<16, N> op;
+    op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
+    op.Process();
+  } else if (td->numRows > td->numExperts * 64) {
+    native_int4::Schedule<128> op;
+    op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
+    op.Process();
+  } else {
+    native_int4::Schedule<32, N> op;
+    op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
+    op.Process();
+  }
+}
 }  // namespace
 
 extern "C" __global__ __aicore__ void qwen_w4_a8_int4_matmul_v310(GM_ADDR low, GM_ADDR high, GM_ADDR xs, GM_ADDR sums,
@@ -212,19 +231,15 @@ extern "C" __global__ __aicore__ void qwen_w4_a8_int4_matmul_v310(GM_ADDR low, G
   KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC);
   auto td = reinterpret_cast<__gm__ QwenW4A8Int4KernelTilingData*>(tiling);
   if (td->metadataLanes == 8) {
-    constexpr int64_t DECODE_ROUTE_LIMIT = 80;
-    if (td->numRows <= DECODE_ROUTE_LIMIT) {
-      native_int4::Schedule<16> op;
-      op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
-      op.Process();
-    } else if (td->numRows > td->numExperts * 64) {
-      native_int4::Schedule<128> op;
-      op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
-      op.Process();
+    // Keep every core equally occupied at the model's projection widths.
+    // Dense prefill retains N=64 to fit the M=128 accumulator in UB.
+    constexpr uint32_t WIDE_COLUMNS = 160, MEDIUM_COLUMNS = 80;
+    if (td->nDim % (GetBlockNum() * WIDE_COLUMNS) == 0) {
+      RunSchedule<WIDE_COLUMNS>(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
+    } else if (td->nDim % (GetBlockNum() * MEDIUM_COLUMNS) == 0) {
+      RunSchedule<MEDIUM_COLUMNS>(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
     } else {
-      native_int4::Schedule<32> op;
-      op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
-      op.Process();
+      RunSchedule<64>(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
     }
     return;
   }

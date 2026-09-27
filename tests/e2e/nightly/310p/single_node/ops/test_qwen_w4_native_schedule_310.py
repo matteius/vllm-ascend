@@ -62,7 +62,7 @@ def payload(rows, width, outputs):
 
 
 @pytest.mark.parametrize("rows", [1, 3, 15, 16, 17, 79, 80, 81, 127, 128, 129, 513])
-@pytest.mark.parametrize("width,outputs", [(256, 128), (640, 2560), (2560, 1280)])
+@pytest.mark.parametrize("width,outputs", [(256, 128), (256, 640), (640, 2560), (2560, 1280)])
 def test_wide_schedule_matches_native_reference(rows, width, outputs):
     x, banks = payload(rows, width, outputs)
     ends = torch.tensor([0, max(1, rows - 5), max(1, rows - 3)], dtype=torch.int64, device="npu")
@@ -104,8 +104,9 @@ def test_pack_meta_shapes_and_invalid_inputs():
 
 
 @pytest.mark.parametrize("rows", [3, 81, 129])
-def test_pack_and_matmul_changing_input_graph(rows):
-    x, banks = payload(rows, 640, 128)
+@pytest.mark.parametrize("outputs", [128, 640, 1280])
+def test_pack_and_matmul_changing_input_graph(rows, outputs):
+    x, banks = payload(rows, 640, outputs)
     device_x = x.npu()
     ends = torch.tensor([0, rows, rows], dtype=torch.int64, device="npu")
     op = torch.ops._C_ascend.npu_qwen_w4_a8_int4_matmul_310
@@ -145,7 +146,7 @@ def routed_reference(x, banks, ids):
 
 
 @pytest.mark.parametrize("rows", [1, 3, 16, 30, 60, 80])
-@pytest.mark.parametrize("width,outputs", [(640, 2560), (2560, 1280)])
+@pytest.mark.parametrize("width,outputs", [(256, 640), (640, 2560), (2560, 1280)])
 def test_native_routed_decode_matches_sorted_reference(rows, width, outputs):
     x, banks = payload(rows, width, outputs)
     ids = (torch.arange(rows, dtype=torch.int32) * 7 + 1) % 5 - 1
@@ -157,8 +158,9 @@ def test_native_routed_decode_matches_sorted_reference(rows, width, outputs):
 
 
 @pytest.mark.parametrize("rows", [3, 60, 80])
-def test_native_routed_changing_input_and_ids_graph(rows):
-    x, banks = payload(rows, 640, 128)
+@pytest.mark.parametrize("outputs", [128, 640, 1280])
+def test_native_routed_changing_input_and_ids_graph(rows, outputs):
+    x, banks = payload(rows, 640, outputs)
     device_x = x.npu()
     ids = torch.zeros(rows, dtype=torch.int32, device="npu")
     op = torch.ops._C_ascend.npu_qwen_w4_a8_int4_matmul_310

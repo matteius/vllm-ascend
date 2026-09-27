@@ -1,0 +1,117 @@
+{
+  "accuracy_vs_w4a16": {
+    "scope": "fixed stratified zero-shot MMLU sample, not the official full-dataset score",
+    "samples": 228,
+    "baseline_invalid": 0,
+    "native_invalid": 0,
+    "baseline_correct": 206,
+    "native_correct": 204,
+    "regressions": [
+      "college_medicine:4",
+      "college_physics:41",
+      "global_facts:49"
+    ],
+    "improvements": [
+      "high_school_mathematics:9"
+    ],
+    "changed_predictions": 5
+  },
+  "accuracy_vs_previous_native": {
+    "scope": "fixed stratified zero-shot MMLU sample, not the official full-dataset score",
+    "samples": 228,
+    "baseline_invalid": 0,
+    "native_invalid": 0,
+    "baseline_correct": 203,
+    "native_correct": 204,
+    "regressions": [
+      "college_physics:41"
+    ],
+    "improvements": [
+      "high_school_mathematics:9",
+      "machine_learning:2"
+    ],
+    "changed_predictions": 4
+  },
+  "performance": {
+    "short": {
+      "w4a16": {
+        "requests": 3,
+        "completion_tokens": 1536,
+        "median_decode_tok_s": 15.176561102844984,
+        "median_e2e_seconds": 34.308439535991056,
+        "aggregate_e2e_tok_s": 15.026357575782946,
+        "median_ttft_seconds": 0.6191941220022272,
+        "drafted_tokens": 1262.0,
+        "accepted_tokens": 906.0,
+        "acceptance": 0.7179080824088748,
+        "scope": "serial batch-one; long-prefix cache warmed by excluded 32-token request"
+      },
+      "previous_native": {
+        "requests": 3,
+        "completion_tokens": 1536,
+        "median_decode_tok_s": 17.17621447499929,
+        "median_e2e_seconds": 30.36408600100549,
+        "aggregate_e2e_tok_s": 17.22835492909103,
+        "median_ttft_seconds": 0.5922834030061495,
+        "drafted_tokens": 1252.0,
+        "accepted_tokens": 910.0,
+        "acceptance": 0.7268370607028753,
+        "scope": "serial batch-one; long-prefix cache warmed by excluded 32-token request"
+      },
+      "candidate": {
+        "requests": 3,
+        "completion_tokens": 1536,
+        "median_decode_tok_s": 19.277931790560917,
+        "median_e2e_seconds": 27.030111625994323,
+        "aggregate_e2e_tok_s": 19.424748391869993,
+        "median_ttft_seconds": 0.499482977000298,
+        "drafted_tokens": 1238.0,
+        "accepted_tokens": 918.0,
+        "acceptance": 0.7415185783521809,
+        "scope": "serial batch-one; long-prefix cache warmed by excluded 32-token request"
+      },
+      "decode_speedup_vs_previous_native": 1.1223620791776188,
+      "decode_speedup_vs_w4a16": 1.2702437436203577
+    },
+    "long": {
+      "w4a16": {
+        "requests": 3,
+        "completion_tokens": 1536,
+        "median_decode_tok_s": 14.435111983246967,
+        "median_e2e_seconds": 37.33703965500172,
+        "aggregate_e2e_tok_s": 14.415077476459887,
+        "median_ttft_seconds": 1.6622552769986214,
+        "drafted_tokens": 1222.0,
+        "accepted_tokens": 927.0,
+        "acceptance": 0.7585924713584288,
+        "scope": "serial batch-one; long-prefix cache warmed by excluded 32-token request"
+      },
+      "previous_native": {
+        "requests": 3,
+        "completion_tokens": 1536,
+        "median_decode_tok_s": 16.685999428603147,
+        "median_e2e_seconds": 32.230804819002515,
+        "aggregate_e2e_tok_s": 16.240959075088224,
+        "median_ttft_seconds": 1.6062355460016988,
+        "drafted_tokens": 1226.0,
+        "accepted_tokens": 922.0,
+        "acceptance": 0.7520391517128875,
+        "scope": "serial batch-one; long-prefix cache warmed by excluded 32-token request"
+      },
+      "candidate": {
+        "requests": 3,
+        "completion_tokens": 1536,
+        "median_decode_tok_s": 18.341862688092014,
+        "median_e2e_seconds": 29.205975350007066,
+        "aggregate_e2e_tok_s": 17.73310429064074,
+        "median_ttft_seconds": 1.346091671002796,
+        "drafted_tokens": 1244.0,
+        "accepted_tokens": 915.0,
+        "acceptance": 0.7355305466237942,
+        "scope": "serial batch-one; long-prefix cache warmed by excluded 32-token request"
+      },
+      "decode_speedup_vs_previous_native": 1.0992366844176193,
+      "decode_speedup_vs_w4a16": 1.2706422166574893
+    }
+  }
+}

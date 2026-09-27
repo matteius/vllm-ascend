@@ -1,0 +1,62 @@
+[
+  {
+    "tokens": 1,
+    "all_eager_and_graph_outputs_bit_identical": true,
+    "graph_median_ms": {
+      "baseline": 0.3562693998295193,
+      "metadata": 0.35601090009246644,
+      "balanced": 0.2798621329323699,
+      "strided": 0.29342556663323194,
+      "vector": 0.2661106002051383
+    },
+    "latency_reduction": 0.2530635515357855
+  },
+  {
+    "tokens": 3,
+    "all_eager_and_graph_outputs_bit_identical": true,
+    "graph_median_ms": {
+      "baseline": 0.5174013999445984,
+      "metadata": 0.5178866670272934,
+      "balanced": 0.4121699666332764,
+      "strided": 0.4174800997134298,
+      "vector": 0.3793950003455393
+    },
+    "latency_reduction": 0.2667298534828788
+  },
+  {
+    "tokens": 6,
+    "all_eager_and_graph_outputs_bit_identical": true,
+    "graph_median_ms": {
+      "baseline": 1.9302563334349543,
+      "metadata": 1.943017966793074,
+      "balanced": 1.470233699850117,
+      "strided": 1.4585157332476228,
+      "vector": 1.3346996332984418
+    },
+    "latency_reduction": 0.3085376226051283
+  },
+  {
+    "tokens": 32,
+    "all_eager_and_graph_outputs_bit_identical": true,
+    "graph_median_ms": {
+      "baseline": 7.987182033442271,
+      "metadata": 8.003047899789332,
+      "balanced": 6.201418100196558,
+      "strided": 6.113027699757367,
+      "vector": 5.7159433999913745
+    },
+    "latency_reduction": 0.28436044451487863
+  },
+  {
+    "tokens": 512,
+    "all_eager_and_graph_outputs_bit_identical": true,
+    "graph_median_ms": {
+      "baseline": 28.01212416670751,
+      "metadata": 28.02360533338894,
+      "balanced": 21.594100900013775,
+      "strided": 21.552290099983413,
+      "vector": 20.435585199932877
+    },
+    "latency_reduction": 0.27047356072265916
+  }
+]

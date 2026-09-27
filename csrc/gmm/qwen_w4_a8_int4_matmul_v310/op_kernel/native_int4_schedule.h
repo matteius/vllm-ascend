@@ -8,10 +8,10 @@
 namespace native_int4 {
 using namespace AscendC;
 // Separate bounded decode/MTP and prefill schedules. A packed activation tile
-// feeds 64 outputs; the full packed K weight tile stays in L1 across M tiles.
-template <uint32_t M>
+// feeds N outputs; the full packed K weight tile stays in L1 across M tiles.
+template <uint32_t M, uint32_t N = 64>
 class Schedule {
-  static constexpr uint32_t N = 64, GROUP = 128, BLOCK = 16, K0 = 64, LANES = 8;
+  static constexpr uint32_t GROUP = 128, BLOCK = 16, K0 = 64, LANES = 8;
   static constexpr uint32_t A_BYTES = M * GROUP / 2, B_BYTES = N * GROUP / 2;
   static constexpr uint32_t ELEMENTS = M * N, COLUMN_ELEMENTS = M * BLOCK;
   static constexpr uint32_t MAX_K = 2560;
@@ -81,7 +81,7 @@ class Schedule {
       if (begin == end && expert + 1 != experts_) continue;
       for (int64_t tile = GetBlockIdx(); tile < n_ / N; tile += GetBlockNum()) {
         if (begin < end) {
-          // Four contiguous packed N=16 strips, each containing every K group.
+          // Contiguous packed N=16 strips, each containing every K group.
           DataCopy(b1_.Get<int8_t>(), codes_[(expert * n_ + tile * N) * k_ / 2], N * k_ / 2);
           SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
           WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
@@ -176,17 +176,13 @@ class Schedule {
   __aicore__ inline void LoadWeight(int64_t group) {
     const uint32_t buffer = group % 2;
     LoadData2DParams load;
-    load.repeatTimes = 1;
-    load.srcStride = 1;
+    // Consecutive output strips in L0B come from K-wide strips in L1.
+    load.repeatTimes = N / BLOCK;
+    load.srcStride = k_ / K0;
     load.ifTranspose = false;
-    for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
-      for (uint32_t kb = 0; kb < GROUP / K0; ++kb) {
-        LoadData(b2_.Get<int8_t>()[buffer * B_BYTES + (kb * N / BLOCK + nb) * BLOCK * K0 / 2]
-                     .template ReinterpretCast<int4b_t>(),
-                 b1_.Get<int8_t>()[nb * BLOCK * k_ / 2 + (group * GROUP + kb * K0) * BLOCK / 2]
-                     .template ReinterpretCast<int4b_t>(),
-                 load);
-      }
+    for (uint32_t kb = 0; kb < GROUP / K0; ++kb) {
+      LoadData(b2_.Get<int8_t>()[buffer * B_BYTES + kb * N * K0 / 2].template ReinterpretCast<int4b_t>(),
+               b1_.Get<int8_t>()[(group * GROUP + kb * K0) * BLOCK / 2].template ReinterpretCast<int4b_t>(), load);
     }
   }
 
@@ -231,17 +227,13 @@ class Schedule {
     SetFlag<HardEvent::MTE3_MTE1>(EVENT_ID0);
     WaitFlag<HardEvent::MTE3_MTE1>(EVENT_ID0);
     LoadData2DParams load;
-    load.repeatTimes = 1;
-    load.srcStride = 1;
+    load.repeatTimes = GROUP / K0;
+    load.srcStride = M / BLOCK;
     load.ifTranspose = false;
     for (uint32_t limb = 0; limb < 2; ++limb) {
       for (uint32_t mb = 0; mb < M / BLOCK; ++mb) {
-        for (uint32_t kb = 0; kb < GROUP / K0; ++kb) {
-          LoadData(
-              a2_.Get<int8_t>()[limb * A_BYTES + (mb * 2 + kb) * BLOCK * K0 / 2].template ReinterpretCast<int4b_t>(),
-              a1_.Get<int8_t>()[limb * A_BYTES + (kb * M + mb * BLOCK) * K0 / 2].template ReinterpretCast<int4b_t>(),
-              load);
-        }
+        LoadData(a2_.Get<int8_t>()[limb * A_BYTES + mb * BLOCK * GROUP / 2].template ReinterpretCast<int4b_t>(),
+                 a1_.Get<int8_t>()[limb * A_BYTES + mb * BLOCK * K0 / 2].template ReinterpretCast<int4b_t>(), load);
       }
     }
   }
@@ -283,12 +275,13 @@ class Schedule {
     Duplicate(accumulator, 0.0f, ELEMENTS);
     LoadWeight(0);
     for (int64_t group = 0; group < groups_; ++group) {
-      for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
-        const int64_t index = ((expert * n_ / BLOCK + tile * N / BLOCK + nb) * groups_ + group) * BLOCK;
-        DataCopy(metadata[nb * BLOCK], sw_[index], BLOCK);
-        DataCopy(metadata[N + nb * BLOCK], zw_[index], BLOCK);
-        DataCopy(metadata[2 * N + nb * BLOCK], ws_[index], BLOCK);
-      }
+      // One strided DMA per metadata bank spans every N=16 strip in this
+      // output tile. The existing packed layout and arithmetic stay unchanged.
+      const int64_t index = ((expert * n_ / BLOCK + tile * N / BLOCK) * groups_ + group) * BLOCK;
+      DataCopyParams metadataCopy{N / BLOCK, 1, static_cast<uint16_t>(groups_ - 1), 0};
+      DataCopy(metadata, sw_[index], metadataCopy);
+      DataCopy(metadata[N], zw_[index], metadataCopy);
+      DataCopy(metadata[2 * N], ws_[index], metadataCopy);
       LoadActivation(row, group, count);
       // Alternate L0B buffers let next-group weight loads overlap integer GEMM.
       Product(0, group % 2, low, group + 1 < groups_ ? group + 1 : -1);
@@ -304,20 +297,24 @@ class Schedule {
       PipeBarrier<PIPE_V>();
       Add(low, low, high, ELEMENTS);
       PipeBarrier<PIPE_V>();
+      // Each output strip is independent. Issue one correction stage across
+      // all strips before synchronizing, instead of fencing every strip.
       for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
-        auto value = low[nb * COLUMN_ELEMENTS];
-        auto correction = high[nb * COLUMN_ELEMENTS];
-        // One vector repeat per row, with GM metadata already broadcast to a
-        // 32-byte block. No per-row scale/sum reads by the scalar processor.
-        Mul(correction, zw[nb * BLOCK], sums, BLOCK, M, {1, 1, 0, 2, 0, 1});
-        PipeBarrier<PIPE_V>();
-        Sub(value, value, correction, COLUMN_ELEMENTS);
-        PipeBarrier<PIPE_V>();
-        Add(value, value, ws[nb * BLOCK], BLOCK, M, {1, 1, 1, 2, 2, 0});
-        PipeBarrier<PIPE_V>();
-        Mul(value, value, sw[nb * BLOCK], BLOCK, M, {1, 1, 1, 2, 2, 0});
-        PipeBarrier<PIPE_V>();
-        Mul(value, value, xs, BLOCK, M, {1, 1, 0, 2, 2, 1});
+        Mul(high[nb * COLUMN_ELEMENTS], zw[nb * BLOCK], sums, BLOCK, M, {1, 1, 0, 2, 0, 1});
+      }
+      PipeBarrier<PIPE_V>();
+      Sub(low, low, high, ELEMENTS);
+      PipeBarrier<PIPE_V>();
+      for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
+        Add(low[nb * COLUMN_ELEMENTS], low[nb * COLUMN_ELEMENTS], ws[nb * BLOCK], BLOCK, M, {1, 1, 1, 2, 2, 0});
+      }
+      PipeBarrier<PIPE_V>();
+      for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
+        Mul(low[nb * COLUMN_ELEMENTS], low[nb * COLUMN_ELEMENTS], sw[nb * BLOCK], BLOCK, M, {1, 1, 1, 2, 2, 0});
+      }
+      PipeBarrier<PIPE_V>();
+      for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
+        Mul(low[nb * COLUMN_ELEMENTS], low[nb * COLUMN_ELEMENTS], xs, BLOCK, M, {1, 1, 0, 2, 2, 1});
       }
       PipeBarrier<PIPE_V>();
       Add(accumulator, accumulator, low, ELEMENTS);
