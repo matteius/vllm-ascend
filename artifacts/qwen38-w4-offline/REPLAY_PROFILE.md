@@ -96,11 +96,57 @@ TP partial 也通过：M=1/2/5 replay 为 0.638/0.564/3.484 ms。
 **11.310 tok/s**：比专家复用版本高 0.95%，比原 routed 基线高 5.48%。
 样本少且 acceptance 有波动，不能将这点中位数差异过度推广。
 第一题仍是 drafted/accepted=265/246，decode 从 43.442 降到 42.330 s。
-约 23.4k 的 warm-prefix 三题 benchmark 仍在运行，结果尚待收集；
-不使用未完成样本宣告长上下文收益。所有 speed claim 都仍低于生产 W8。
+约 23.4k 的 warm-prefix 三题为 **11.589 / 11.239 / 10.787 tok/s**，
+中位数 **11.239 tok/s**，比专家复用版本高 1.71%，比原 routed 基线高
+5.43%。全部完成 512 tokens，cached_tokens=23168；acceptance 分别为
+91.76% / 86.18% / 79.65%。冷 warmup TTFT=364.452 s，仍明显慢于 W8。
+所有 speed claim 都仍低于生产 W8。原始记录为 `w4-wide-mtp-long-r1.jsonl`。
 
 - group SHA256：`5e8da07bbb170fffb51ff6080cce77a44e6a0a6027811ff30ea0c436b46e0151`
 - routed SHA256：`42d7464b7fe0a4aa0d6b4952455b6cdac99d1c16b2ddb9b50ff84dec0d69f38d`
+
+## 第三个候选：persistent N-tile route 调度
+
+R≤20 时仅启动 N/32 个 logical blocks，每个 block 顺序处理该 N tile 的
+local/peer routes，复用同一个 CATLASS resource。重复专家仍由首个 owner
+批量计算；peer rows 仍在每次 replay 清零。为隔离变量，解包 workspace
+仍按 `route*(N/32)+tile` 独立分配，不复用 physical-core workspace，
+也不保留 FP16 expert bank。R>20 仍使用逐 route/tile 调度与小型 zero-only
+peer task。没有新增环境变量，W8 路径不变。
+
+首版 `persistent-r1` 通过 107 NPU tests，但创建完整 resource 的 peer 路径
+使五-token layer replay 增至 3.755 ms，因此第二版恢复大 batch 的轻量
+peer task。`persistent-r2` 再次 **107 passed / 50.45 s**，37 CPU tests
+也通过（4.80 s）。新增六项测试覆盖 10/20/21 routes、多达 21 个不同
+expert，以及八轮 local↔peer 动态 graph replay。
+
+真实 layer0 权重、synthetic activations、无 collective 的 graph replay：
+
+| tokens | wide (ms) | persistent-r2 (ms) |
+| --- | ---: | ---: |
+| 1 | 0.637756 | 0.592170 |
+| 2 | 0.564023 | 0.423398 |
+| 5 | 3.484067 | 3.569738 |
+
+两-token diagnostic 减少 24.93%，但五-token 仍慢 2.46%；不声称所有
+batch 都提速，也不把单层结果当整模型 tok/s。
+构建日志 `build-persistent-r2.log`，独立 vendor `ops-persistent-r2`；
+旧 vendor 均保留。group binary SHA 与 wide 相同，routed SHA256：
+`a64d35f3f393287254a24b91df1ccf041b6dc12756eae43430c028a66abcbb19`。
+
+完整模型 `server-routed-mtp-persistent-r1.log` 已通过三个真实 smoke：
+323、1–50 和 `[0,4,16]` 都正确终止；计数 decode **12.608 tok/s**。
+两-token verification runtime 表再次确认 FULL；MTP drafted/accepted
+计数递增。model-load 仍为 **19.3821 GiB/rank**，没有增加常驻权重内存。
+三题短 coding 为 **12.287 / 11.265 / 11.830 tok/s**，中位数
+**11.830 tok/s**，比 wide 高 4.60%，比原 routed 基线高 10.33%。
+全部完成 512 tokens；acceptance=92.11% / 77.43% / 86.50%。第三题的
+acceptance 也上升，不能把全部中位数差异归因于 kernel。第一题输出 SHA
+与 wide 相同，accepted 少一个，decode 从 42.330 降到 41.589 s；第二题
+drafted/accepted 同为 288/223，decode 从 46.442 降到 45.361 s。
+当前仍明显低于 W8 的 19.073 tok/s，约 23.4k 长上下文 benchmark 在执行。
+
+## 复现与交接
 
 简短 runbook（仅已授权的隔离 host 环境，不替换 W8）：
 
@@ -111,6 +157,11 @@ bash qwen38-w4-server-routed-check-r1.sh wide-r1 \
 # 首次运行后用新 label 保留旧日志；脚本先执行三个 real-weight smoke。
 # 确认 HTTP_SMOKE_PASS 后，在另一终端运行：
 bash qwen38-w4-wide-benchmark-r1.sh
+
+# persistent 候选使用独立 vendor；同样需要新的 label/output 路径重跑：
+bash qwen38-w4-server-routed-check-r1.sh persistent-r1 \
+  /srv/ai/src/qwen38-w4-operator-build-r1/ops-persistent-r2/vendors/qwen_w4_probe_transformer
+bash qwen38-w4-persistent-benchmark-r1.sh
 ```
 
 服务配置见本页开头和 tutorial，仍为 :8002 / TP4 / EP / MTP k=1 /
@@ -140,15 +191,16 @@ imports 等。自动格式修改只留在临时快照，没有污染任务 workt
   cache/position 算术未经范围证明就改为 INT32。
 
 这些时间可能重叠，也受 profiler 扰动；不把它们直接相加为可获得的 tok/s。
-投影仍是首要瓶颈。下一次 kernel 实验可隔离检查 route/peer logical-block
-调度开销，复用 workspace 必须重新验证 Cube pipeline 生命周期；不能重复
+投影仍是首要瓶颈。persistent 候选隔离检查 route/peer logical-block
+调度开销，未来复用 workspace 必须重新验证 Cube pipeline 生命周期；不能重复
 旧 wide + physical-workspace 实验曾出现的数值错误。
 
 ## 边界
 
 已验证的基线及专家复用版本为真实权重、MTP、decode ACLGraph、EP；
-没有用 dummy 代替真实权重。更宽 unpack 也已通过真实 smoke 与短请求，
-其长上下文 benchmark 尚未结束。
+没有用 dummy 代替真实权重。更宽 unpack 也已通过真实 smoke 与短/长请求。
+persistent 候选已完成算子、真实权重单层和整模型 smoke，coding benchmark
+已完成短请求，长请求仍在执行。
 本轮只隔离 batch-one decode，不声称 W4 已验证 128k×16、双 160k 或
 完整任务质量。flashcomm1 和多模态未在本轮验证；容量和量化质量仍需后续
 独立评测，不能伪造 accuracy YAML 分数。

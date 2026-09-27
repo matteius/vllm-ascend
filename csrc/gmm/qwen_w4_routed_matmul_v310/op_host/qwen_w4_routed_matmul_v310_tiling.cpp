@@ -51,7 +51,7 @@ static ge::graphStatus TileQwenW4Routed(gert::TilingContext* context) {
     // Weight banks stay packed; scratch lasts only for this projection.
     workspace[0] += rows * rows * n * sizeof(uint16_t);
   }
-  context->SetBlockDim(rows * (n / OUTPUT_TILE));
+  context->SetBlockDim((rows <= MAX_REUSED_ROUTES ? 1 : rows) * (n / OUTPUT_TILE));
   context->SetTilingKey(0);
   data.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
   context->GetRawTilingData()->SetDataSize(data.GetDataSize());

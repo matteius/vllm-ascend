@@ -48,8 +48,20 @@ account for 46.5–49.8% of each rank's summed task time (not critical-path late
 Within-batch expert-unpack reuse passes 97 NPU tests and full real-weight smokes;
 matched short/23.4k medians improve to 11.203/11.050 tok/s. The wider-unpack
 candidate passes 101 NPU tests, real-weight layer replay, and all three full-model
-smokes. Its short coding median is 11.310 tok/s; the long-context run remains
-in progress. See [REPLAY_PROFILE.md](REPLAY_PROFILE.md). No production parity claim.
+smokes. Its completed short/23.4k coding medians are 11.310/11.239 tok/s.
+See [REPLAY_PROFILE.md](REPLAY_PROFILE.md). No production parity claim.
+
+Persistent N-tile route scheduling now passes 107 NPU tests and real-weight
+layer/full-model smokes. Its MTP k=1 + FULL graph short median is 11.830 tok/s;
+the matched long run is still active. There is no resident-memory increase.
+The five-token synthetic layer diagnostic has not improved (3.570 vs 3.484 ms),
+so do not extrapolate the two-token diagnostic's 24.93% gain to all batch sizes.
+After collecting the long run, evaluate bounded expert reuse for 30/50-route
+verification and a controlled MTP k=2/k=4 sweep; the current reuse/scheduling
+optimization only covers at most 20 routes. Larger draft counts need their own
+full-model correctness, graph replay, workspace-memory and throughput gates.
+Independent next trace lead: reuse Q/K/index-query RoPE tables, preserving
+FP32/FP64 policy and MRoPE coordinates instead of narrowing position integers.
 
 ## Acceptance criteria
 

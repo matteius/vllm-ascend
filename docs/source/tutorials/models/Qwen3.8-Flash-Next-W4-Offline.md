@@ -241,6 +241,9 @@ replay 的瓶颈 profile；仍未达到 W8 的 19.073/18.091 tok/s。
 46.5–49.8%（不是 critical-path 占比）。同 batch 的重复专家复用解包后，
 真实 smoke 通过，短/23.4k 中位数提高到 **11.203 / 11.050 tok/s**。
 更宽 unpack 候选已通过 101 项 NPU 回归、真实权重 layer replay 和三个
-整模型 smoke；短 coding 中位数为 **11.310 tok/s**，长上下文还在验证。
+整模型 smoke；短/23.4k coding 中位数为 **11.310 / 11.239 tok/s**。
+后续 persistent N-tile 调度通过 107 项 NPU 回归与整模型 smoke；
+MTP k=1 + FULL graph 短 coding 中位数为 **11.830 tok/s**，长请求运行中。
+其两-token 单层 replay 更快，五-token 单层没有改善；不推广到其它 MTP k。
 各候选、原始样本、kernel SHA 和边界说明见
 `artifacts/qwen38-w4-offline/REPLAY_PROFILE.md`。

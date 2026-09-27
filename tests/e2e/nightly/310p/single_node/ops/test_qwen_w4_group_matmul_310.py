@@ -298,6 +298,38 @@ def test_routed_invalid_input_fails_before_launch(bad):
         routed_kernel(*values)
 
 
+@pytest.mark.parametrize("outputs,inputs", [(640, 2560), (2560, 640)])
+@pytest.mark.parametrize("routes", [10, 20, 21])
+def test_routed_many_unique_owners_and_peer_transitions(routes, outputs, inputs):
+    # Persistent N-tile tasks must refresh every expert's metadata and drain
+    # their UB/Cube stores before processing the next local or peer row.
+    # Three-expert duplicate tests alone do not exercise twenty unique owners.
+    values, canonical = routed_values(routes, outputs, inputs, experts=routes)
+    values[-1] = torch.arange(routes, dtype=torch.int32)
+    device_values = [value.npu() for value in values]
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        for _ in range(3):
+            routed_kernel(*device_values)
+    torch.npu.current_stream().wait_stream(stream)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, stream=stream):
+        captured = routed_kernel(*device_values)
+    for phase in range(8):
+        ids = (torch.arange(routes, dtype=torch.int32) + phase) % routes
+        if phase % 4 == 1:
+            ids[::2] = -1
+        elif phase % 4 == 2:
+            ids[1::2] = routes
+        elif phase % 4 == 3:
+            ids.fill_(-1)
+        device_values[-1].copy_(ids)
+        graph.replay()
+        torch.testing.assert_close(captured.cpu(), routed_reference(values[0], canonical, ids), rtol=0.005, atol=0.003)
+
+
 def test_routed_meta_shape():
     values, _ = routed_values(20, 640, 2560)
     output = routed_kernel(*(value.to("meta") for value in values))

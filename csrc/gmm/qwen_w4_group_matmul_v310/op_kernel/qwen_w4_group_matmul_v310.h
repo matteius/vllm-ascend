@@ -153,6 +153,26 @@ class QwenW4GroupMatmulV310Cube {
     tileCount_ = tileCount;
   }
 
+  __aicore__ inline void SetWorkspaceTile(uint32_t logicalTile) {
+    coreNzBase_ = static_cast<int64_t>(logicalTile) * QW4_TILE_N * K_;
+  }
+
+  // Reuse this resource for peer routes too. Creating a second TPipe while
+  // CATLASS owns the first one would reset the live buffer/event allocation.
+  __aicore__ inline void ZeroOutputTile(GM_ADDR output, int64_t outputOffset) {
+    auto zero = resource.ubBuf.template GetBufferByByte<half>(0);
+    PipeBarrier<PIPE_ALL>();
+    Duplicate(zero, static_cast<half>(0), QW4_TILE_N);
+    SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
+    WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
+    GlobalTensor<half> destination;
+    destination.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(output));
+    DataCopy(destination[outputOffset], zero, QW4_TILE_N);
+    SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
+    WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
+    PipeBarrier<PIPE_ALL>();
+  }
+
   __aicore__ inline void Process() {
     const uint32_t coreId = tileId_;
     const uint32_t coreNum = tileCount_;
