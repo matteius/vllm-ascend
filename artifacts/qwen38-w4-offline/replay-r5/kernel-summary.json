@@ -1,0 +1,1677 @@
+{
+  "metric_warning": "Summed task times and reported hardware pipeline counters may overlap; neither is an additive critical-path latency or unprofiled throughput measurement.",
+  "traces": [
+    {
+      "file": "/srv/ai/src/qwen38-w4-hardware-20260927/replay-profile-r5/dp0_pp0_tp0_dcp0_ep0_rank0_3550363_20260927091750814_ascend_pt/ASCEND_PROFILER_OUTPUT/kernel_details.csv",
+      "device_ids": [
+        "0"
+      ],
+      "task_count": 81650,
+      "task_span_ms": 1596.859761,
+      "task_union_ms": 1048.758243,
+      "summed_task_ms": 1050.72217,
+      "projection_shapes": [
+        {
+          "name": "QwenW4RoutedMatmulV310",
+          "input_shapes": "\"30,2560;128,640,1280;128,640,20;128,640,20;30\"",
+          "count": 768,
+          "median_task_us": 350.586,
+          "block_counts": [
+            20
+          ],
+          "pipeline_counters": {
+            "aicore_time(us)": {
+              "samples": 768,
+              "median_us": 329.28
+            },
+            "vec_time(us)": {
+              "samples": 768,
+              "median_us": 106.64
+            },
+            "mac_time(us)": {
+              "samples": 768,
+              "median_us": 8.609
+            },
+            "scalar_time(us)": {
+              "samples": 768,
+              "median_us": 146.7765
+            },
+            "mte1_time(us)": {
+              "samples": 768,
+              "median_us": 25.304
+            },
+            "mte2_time(us)": {
+              "samples": 768,
+              "median_us": 132.228
+            },
+            "mte3_time(us)": {
+              "samples": 768,
+              "median_us": 32.2455
+            }
+          }
+        },
+        {
+          "name": "QwenW4RoutedMatmulV310",
+          "input_shapes": "\"30,640;128,2560,320;128,2560,5;128,2560,5;30\"",
+          "count": 384,
+          "median_task_us": 421.4325,
+          "block_counts": [
+            80
+          ],
+          "pipeline_counters": {
+            "aicore_time(us)": {
+              "samples": 384,
+              "median_us": 390.88
+            },
+            "vec_time(us)": {
+              "samples": 384,
+              "median_us": 95.549
+            },
+            "mac_time(us)": {
+              "samples": 384,
+              "median_us": 7.174
+            },
+            "scalar_time(us)": {
+              "samples": 384,
+              "median_us": 203.2945
+            },
+            "mte1_time(us)": {
+              "samples": 384,
+              "median_us": 21.087
+            },
+            "mte2_time(us)": {
+              "samples": 384,
+              "median_us": 131.023
+            },
+            "mte3_time(us)": {
+              "samples": 384,
+              "median_us": 43.236
+            }
+          }
+        }
+      ],
+      "categories": [
+        {
+          "name": "cast_layout_or_copy",
+          "count": 29334,
+          "summed_task_ms": 162.786049,
+          "mean_task_us": 5.549398275039203,
+          "median_task_us": 1.953,
+          "max_task_us": 2308.047,
+          "percent_summed_task_time": 15.49277760076196
+        },
+        {
+          "name": "collective",
+          "count": 40,
+          "summed_task_ms": 23.013598,
+          "mean_task_us": 575.3399499999999,
+          "median_task_us": 219.075,
+          "max_task_us": 4480.833,
+          "percent_summed_task_time": 2.190264815674347
+        },
+        {
+          "name": "named_attention_or_recurrence",
+          "count": 920,
+          "summed_task_ms": 55.368423,
+          "mean_task_us": 60.183068478260864,
+          "median_task_us": 43.19,
+          "max_task_us": 2880.963,
+          "percent_summed_task_time": 5.269558840659087
+        },
+        {
+          "name": "other",
+          "count": 42272,
+          "summed_task_ms": 153.021336,
+          "mean_task_us": 3.6199218395155186,
+          "median_task_us": 1.875,
+          "max_task_us": 1723.646,
+          "percent_summed_task_time": 14.563444111967296
+        },
+        {
+          "name": "other_matrix_multiply",
+          "count": 7932,
+          "summed_task_ms": 223.845574,
+          "mean_task_us": 28.220571608673726,
+          "median_task_us": 13.151,
+          "max_task_us": 1631.849,
+          "percent_summed_task_time": 21.303973627966755
+        },
+        {
+          "name": "w4_routed_projection",
+          "count": 1152,
+          "summed_task_ms": 432.68719,
+          "mean_task_us": 375.59651909722226,
+          "median_task_us": 362.435,
+          "max_task_us": 986.979,
+          "percent_summed_task_time": 41.17998100297056
+        }
+      ],
+      "top_operations": [
+        {
+          "name": "QwenW4RoutedMatmulV310",
+          "count": 1152,
+          "summed_task_ms": 432.68719,
+          "mean_task_us": 375.59651909722226,
+          "median_task_us": 362.435,
+          "max_task_us": 986.979,
+          "percent_summed_task_time": 41.17998100297056
+        },
+        {
+          "name": "aclnnMatmulWeightNz_MatMulCommon_MatMulV2",
+          "count": 4552,
+          "summed_task_ms": 189.609029,
+          "mean_task_us": 41.65400461335677,
+          "median_task_us": 38.503,
+          "max_task_us": 1631.849,
+          "percent_summed_task_time": 18.045591347901226
+        },
+        {
+          "name": "aclnnMatmul_TransData_TransData",
+          "count": 4520,
+          "summed_task_ms": 39.974879,
+          "mean_task_us": 8.843999778761063,
+          "median_task_us": 4.193,
+          "max_task_us": 846.771,
+          "percent_summed_task_time": 3.8045146606167073
+        },
+        {
+          "name": "Cast",
+          "count": 192,
+          "summed_task_ms": 26.107893,
+          "mean_task_us": 135.978609375,
+          "median_task_us": 130.156,
+          "max_task_us": 422.318,
+          "percent_summed_task_time": 2.4847570314424794
+        },
+        {
+          "name": "aclnnMul_MulAiCore_Mul",
+          "count": 8092,
+          "summed_task_ms": 24.201432,
+          "mean_task_us": 2.9907849728126545,
+          "median_task_us": 2.422,
+          "max_task_us": 10.781,
+          "percent_summed_task_time": 2.30331411014198
+        },
+        {
+          "name": "aclnnInplaceCopy_CastAiCore_Cast",
+          "count": 15110,
+          "summed_task_ms": 23.716595,
+          "mean_task_us": 1.5695959629384513,
+          "median_task_us": 1.328,
+          "max_task_us": 10.208,
+          "percent_summed_task_time": 2.2571708941860433
+        },
+        {
+          "name": "aclnnFloorDivides_FloorDivAiCpu_FloorDiv",
+          "count": 361,
+          "summed_task_ms": 23.058935,
+          "mean_task_us": 63.87516620498615,
+          "median_task_us": 45.859,
+          "max_task_us": 1723.646,
+          "percent_summed_task_time": 2.194579657532114
+        },
+        {
+          "name": "QsaIndexerScoreV310",
+          "count": 8,
+          "summed_task_ms": 22.504087,
+          "mean_task_us": 2813.010875,
+          "median_task_us": 2793.5155,
+          "max_task_us": 2880.963,
+          "percent_summed_task_time": 2.1417733100654
+        },
+        {
+          "name": "aclnnMatmulWeightNz_TransData_TransData",
+          "count": 4840,
+          "summed_task_ms": 18.609386,
+          "mean_task_us": 3.8449144628099177,
+          "median_task_us": 3.698,
+          "max_task_us": 7.656,
+          "percent_summed_task_time": 1.7711043443577479
+        },
+        {
+          "name": "trans_TransData_10",
+          "count": 8,
+          "summed_task_ms": 18.459035,
+          "mean_task_us": 2307.379375,
+          "median_task_us": 2307.591,
+          "max_task_us": 2308.047,
+          "percent_summed_task_time": 1.756795043165407
+        },
+        {
+          "name": "QsaGatherValueNzV310",
+          "count": 224,
+          "summed_task_ms": 17.27273,
+          "mean_task_us": 77.11040178571429,
+          "median_task_us": 80.182,
+          "max_task_us": 90.859,
+          "percent_summed_task_time": 1.6438912676602226
+        },
+        {
+          "name": "aclnnMatmul_MatMulCommon_MatMulV2",
+          "count": 1600,
+          "summed_task_ms": 16.022661,
+          "mean_task_us": 10.014163125,
+          "median_task_us": 3.333,
+          "max_task_us": 394.245,
+          "percent_summed_task_time": 1.5249189041095421
+        },
+        {
+          "name": "aclnnRecurrentGatedDeltaRuleV310_RecurrentGatedDeltaRuleV310_RecurrentGatedDeltaRuleV310",
+          "count": 288,
+          "summed_task_ms": 12.54506,
+          "mean_task_us": 43.55923611111111,
+          "median_task_us": 43.568,
+          "max_task_us": 44.818,
+          "percent_summed_task_time": 1.1939464454242932
+        },
+        {
+          "name": "aclnnWeightQuantBatchMatmulV2_WeightQuantBatchMatmulV2_WeightQuantBatchMatmulV2",
+          "count": 220,
+          "summed_task_ms": 10.790425,
+          "mean_task_us": 49.04738636363636,
+          "median_task_us": 48.776,
+          "max_task_us": 73.516,
+          "percent_summed_task_time": 1.0269532049561685
+        },
+        {
+          "name": "aclnnWeightQuantBatchMatmulV2_TransposeAiCore_Transpose",
+          "count": 220,
+          "summed_task_ms": 10.76127,
+          "mean_task_us": 48.91486363636364,
+          "median_task_us": 48.789,
+          "max_task_us": 77.396,
+          "percent_summed_task_time": 1.0241784467153672
+        },
+        {
+          "name": "aclnnMean_ReduceMeanAiCore_ReduceMean",
+          "count": 2328,
+          "summed_task_ms": 9.141613,
+          "mean_task_us": 3.92680970790378,
+          "median_task_us": 3.958,
+          "max_task_us": 7.135,
+          "percent_summed_task_time": 0.8700314184862017
+        },
+        {
+          "name": "aclnnSort_SortAiCore_Sort",
+          "count": 128,
+          "summed_task_ms": 7.412578,
+          "mean_task_us": 57.910765625,
+          "median_task_us": 64.818,
+          "max_task_us": 70.937,
+          "percent_summed_task_time": 0.7054745975332375
+        },
+        {
+          "name": "aclnnNonzeroV2_NonzeroAiCpu_NonZero",
+          "count": 96,
+          "summed_task_ms": 5.54966,
+          "mean_task_us": 57.80895833333334,
+          "median_task_us": 51.0025,
+          "max_task_us": 239.297,
+          "percent_summed_task_time": 0.5281757783791694
+        },
+        {
+          "name": "aclnnGroupedMatmulWeightNz_GroupedMatmul_GroupedMatmul",
+          "count": 224,
+          "summed_task_ms": 4.986112,
+          "mean_task_us": 22.259428571428572,
+          "median_task_us": 22.305,
+          "max_task_us": 23.568,
+          "percent_summed_task_time": 0.4745414289678498
+        },
+        {
+          "name": "aclnnCat_ConcatD_ConcatD",
+          "count": 1256,
+          "summed_task_ms": 4.835893,
+          "mean_task_us": 3.850233280254777,
+          "median_task_us": 3.333,
+          "max_task_us": 11.484,
+          "percent_summed_task_time": 0.460244690563634
+        },
+        {
+          "name": "aclnnPowTensorScalar_PowsAiCore_Pows",
+          "count": 1504,
+          "summed_task_ms": 4.577501,
+          "mean_task_us": 3.0435511968085107,
+          "median_task_us": 2.734,
+          "max_task_us": 9.531,
+          "percent_summed_task_time": 0.4356528424635791
+        },
+        {
+          "name": "hcom_allReduce__503_11_1",
+          "count": 1,
+          "summed_task_ms": 4.480833,
+          "mean_task_us": 4480.833,
+          "median_task_us": 4480.833,
+          "max_task_us": 4480.833,
+          "percent_summed_task_time": 0.4264526939600028
+        },
+        {
+          "name": "aclnnAdds_AddAiCore_Add",
+          "count": 3216,
+          "summed_task_ms": 4.417928,
+          "mean_task_us": 1.3737338308457712,
+          "median_task_us": 1.25,
+          "max_task_us": 3.88,
+          "percent_summed_task_time": 0.4204658592099565
+        },
+        {
+          "name": "aclnnWeightQuantBatchMatmulV2_TransData_TransData",
+          "count": 220,
+          "summed_task_ms": 4.307575,
+          "mean_task_us": 19.579886363636366,
+          "median_task_us": 18.9845,
+          "max_task_us": 34.427,
+          "percent_summed_task_time": 0.4099632731647796
+        },
+        {
+          "name": "aclnnMean_ReduceMeanAiCore_MemSet",
+          "count": 2328,
+          "summed_task_ms": 4.241259,
+          "mean_task_us": 1.821846649484536,
+          "median_task_us": 1.719,
+          "max_task_us": 2.865,
+          "percent_summed_task_time": 0.4036518045488657
+        },
+        {
+          "name": "aclnnAdd_AddAiCore_Add",
+          "count": 2024,
+          "summed_task_ms": 3.966257,
+          "mean_task_us": 1.95961314229249,
+          "median_task_us": 1.693,
+          "max_task_us": 6.172,
+          "percent_summed_task_time": 0.3774791389430757
+        },
+        {
+          "name": "aclnnReduceSum_ReduceSumOpAiCore_ReduceSum",
+          "count": 928,
+          "summed_task_ms": 3.861373,
+          "mean_task_us": 4.160962284482759,
+          "median_task_us": 5.182,
+          "max_task_us": 8.099,
+          "percent_summed_task_time": 0.36749705205135247
+        },
+        {
+          "name": "aclnnInplaceCopy_SliceAiCore_Slice",
+          "count": 1568,
+          "summed_task_ms": 3.386233,
+          "mean_task_us": 2.15958737244898,
+          "median_task_us": 1.641,
+          "max_task_us": 9.245,
+          "percent_summed_task_time": 0.3222767251594206
+        },
+        {
+          "name": "aclnnInplaceCopy_CastAiCpu_Cast",
+          "count": 24,
+          "summed_task_ms": 3.244089,
+          "mean_task_us": 135.170375,
+          "median_task_us": 133.138,
+          "max_task_us": 237.5,
+          "percent_summed_task_time": 0.3087485058014908
+        },
+        {
+          "name": "aclnnReduceSum_CastAiCpu_Cast",
+          "count": 24,
+          "summed_task_ms": 3.222629,
+          "mean_task_us": 134.27620833333333,
+          "median_task_us": 120.0785,
+          "max_task_us": 254.349,
+          "percent_summed_task_time": 0.3067061010047975
+        }
+      ]
+    },
+    {
+      "file": "/srv/ai/src/qwen38-w4-hardware-20260927/replay-profile-r5/dp0_pp0_tp1_dcp0_ep1_rank1_3550364_20260927091750814_ascend_pt/ASCEND_PROFILER_OUTPUT/kernel_details.csv",
+      "device_ids": [
+        "1"
+      ],
+      "task_count": 81184,
+      "task_span_ms": 1593.259084,
+      "task_union_ms": 1072.831677,
+      "summed_task_ms": 1075.892614,
+      "projection_shapes": [
+        {
+          "name": "QwenW4RoutedMatmulV310",
+          "input_shapes": "\"30,2560;128,640,1280;128,640,20;128,640,20;30\"",
+          "count": 768,
+          "median_task_us": 358.89300000000003,
+          "block_counts": [
+            20
+          ],
+          "pipeline_counters": {
+            "aicore_time(us)": {
+              "samples": 768,
+              "median_us": 337.53999999999996
+            },
+            "vec_time(us)": {
+              "samples": 768,
+              "median_us": 107.889
+            },
+            "mac_time(us)": {
+              "samples": 768,
+              "median_us": 8.609
+            },
+            "scalar_time(us)": {
+              "samples": 768,
+              "median_us": 149.3355
+            },
+            "mte1_time(us)": {
+              "samples": 768,
+              "median_us": 25.305
+            },
+            "mte2_time(us)": {
+              "samples": 768,
+              "median_us": 133.92000000000002
+            },
+            "mte3_time(us)": {
+              "samples": 768,
+              "median_us": 34.337999999999994
+            }
+          }
+        },
+        {
+          "name": "QwenW4RoutedMatmulV310",
+          "input_shapes": "\"30,640;128,2560,320;128,2560,5;128,2560,5;30\"",
+          "count": 384,
+          "median_task_us": 439.6095,
+          "block_counts": [
+            80
+          ],
+          "pipeline_counters": {
+            "aicore_time(us)": {
+              "samples": 384,
+              "median_us": 406.41999999999996
+            },
+            "vec_time(us)": {
+              "samples": 384,
+              "median_us": 96.591
+            },
+            "mac_time(us)": {
+              "samples": 384,
+              "median_us": 7.174
+            },
+            "scalar_time(us)": {
+              "samples": 384,
+              "median_us": 209.031
+            },
+            "mte1_time(us)": {
+              "samples": 384,
+              "median_us": 21.087
+            },
+            "mte2_time(us)": {
+              "samples": 384,
+              "median_us": 137.17700000000002
+            },
+            "mte3_time(us)": {
+              "samples": 384,
+              "median_us": 48.166
+            }
+          }
+        }
+      ],
+      "categories": [
+        {
+          "name": "cast_layout_or_copy",
+          "count": 29173,
+          "summed_task_ms": 164.064202,
+          "mean_task_us": 5.623837178212731,
+          "median_task_us": 2.083,
+          "max_task_us": 2308.229,
+          "percent_summed_task_time": 15.249124295968073
+        },
+        {
+          "name": "collective",
+          "count": 40,
+          "summed_task_ms": 35.674977,
+          "mean_task_us": 891.8744250000001,
+          "median_task_us": 288.0075,
+          "max_task_us": 4959.843,
+          "percent_summed_task_time": 3.3158492340017123
+        },
+        {
+          "name": "named_attention_or_recurrence",
+          "count": 920,
+          "summed_task_ms": 57.279354,
+          "mean_task_us": 62.26016739130435,
+          "median_task_us": 42.656,
+          "max_task_us": 3083.229,
+          "percent_summed_task_time": 5.32389136747062
+        },
+        {
+          "name": "other",
+          "count": 42031,
+          "summed_task_ms": 146.768601,
+          "mean_task_us": 3.4919131355428137,
+          "median_task_us": 1.901,
+          "max_task_us": 1188.75,
+          "percent_summed_task_time": 13.641565997403529
+        },
+        {
+          "name": "other_matrix_multiply",
+          "count": 7868,
+          "summed_task_ms": 220.265807,
+          "mean_task_us": 27.995145780376205,
+          "median_task_us": 12.969,
+          "max_task_us": 1634.922,
+          "percent_summed_task_time": 20.472843119638704
+        },
+        {
+          "name": "w4_routed_projection",
+          "count": 1152,
+          "summed_task_ms": 451.839673,
+          "mean_task_us": 392.2219383680556,
+          "median_task_us": 399.388,
+          "max_task_us": 833.073,
+          "percent_summed_task_time": 41.99672598551736
+        }
+      ],
+      "top_operations": [
+        {
+          "name": "QwenW4RoutedMatmulV310",
+          "count": 1152,
+          "summed_task_ms": 451.839673,
+          "mean_task_us": 392.2219383680556,
+          "median_task_us": 399.388,
+          "max_task_us": 833.073,
+          "percent_summed_task_time": 41.99672598551736
+        },
+        {
+          "name": "aclnnMatmulWeightNz_MatMulCommon_MatMulV2",
+          "count": 4552,
+          "summed_task_ms": 189.329892,
+          "mean_task_us": 41.592682776801404,
+          "median_task_us": 38.359,
+          "max_task_us": 1634.922,
+          "percent_summed_task_time": 17.5974711171314
+        },
+        {
+          "name": "aclnnMatmul_TransData_TransData",
+          "count": 4520,
+          "summed_task_ms": 39.857285,
+          "mean_task_us": 8.817983407079646,
+          "median_task_us": 4.193,
+          "max_task_us": 827.37,
+          "percent_summed_task_time": 3.7045783641749215
+        },
+        {
+          "name": "Cast",
+          "count": 192,
+          "summed_task_ms": 29.186322,
+          "mean_task_us": 152.01209375,
+          "median_task_us": 147.2655,
+          "max_task_us": 980.078,
+          "percent_summed_task_time": 2.712754193142923
+        },
+        {
+          "name": "aclnnInplaceCopy_CastAiCore_Cast",
+          "count": 15078,
+          "summed_task_ms": 24.620303,
+          "mean_task_us": 1.63286264756599,
+          "median_task_us": 1.328,
+          "max_task_us": 10.729,
+          "percent_summed_task_time": 2.2883606300135826
+        },
+        {
+          "name": "QsaIndexerScoreV310",
+          "count": 8,
+          "summed_task_ms": 24.430963,
+          "mean_task_us": 3053.870375,
+          "median_task_us": 3065.5075,
+          "max_task_us": 3083.229,
+          "percent_summed_task_time": 2.2707622193974837
+        },
+        {
+          "name": "aclnnMul_MulAiCore_Mul",
+          "count": 8028,
+          "summed_task_ms": 24.192489,
+          "mean_task_us": 3.013513826606876,
+          "median_task_us": 2.422,
+          "max_task_us": 10.677,
+          "percent_summed_task_time": 2.2485969961310657
+        },
+        {
+          "name": "aclnnMatmulWeightNz_TransData_TransData",
+          "count": 4840,
+          "summed_task_ms": 18.579343,
+          "mean_task_us": 3.8387072314049586,
+          "median_task_us": 3.672,
+          "max_task_us": 7.083,
+          "percent_summed_task_time": 1.7268770840358236
+        },
+        {
+          "name": "trans_TransData_10",
+          "count": 8,
+          "summed_task_ms": 18.459505,
+          "mean_task_us": 2307.438125,
+          "median_task_us": 2307.461,
+          "max_task_us": 2308.229,
+          "percent_summed_task_time": 1.7157386118090778
+        },
+        {
+          "name": "aclnnFloorDivides_FloorDivAiCpu_FloorDiv",
+          "count": 363,
+          "summed_task_ms": 18.130831,
+          "mean_task_us": 49.947192837465565,
+          "median_task_us": 46.536,
+          "max_task_us": 939.635,
+          "percent_summed_task_time": 1.685189652208171
+        },
+        {
+          "name": "QsaGatherValueNzV310",
+          "count": 224,
+          "summed_task_ms": 17.044188,
+          "mean_task_us": 76.090125,
+          "median_task_us": 79.401,
+          "max_task_us": 89.479,
+          "percent_summed_task_time": 1.584190445980699
+        },
+        {
+          "name": "aclnnMatmul_MatMulCommon_MatMulV2",
+          "count": 1600,
+          "summed_task_ms": 15.849063,
+          "mean_task_us": 9.905664375,
+          "median_task_us": 3.333,
+          "max_task_us": 385.365,
+          "percent_summed_task_time": 1.4731082632006989
+        },
+        {
+          "name": "aclnnRecurrentGatedDeltaRuleV310_RecurrentGatedDeltaRuleV310_RecurrentGatedDeltaRuleV310",
+          "count": 288,
+          "summed_task_ms": 12.340378,
+          "mean_task_us": 42.84853472222222,
+          "median_task_us": 42.8255,
+          "max_task_us": 43.646,
+          "percent_summed_task_time": 1.1469897496665964
+        },
+        {
+          "name": "aclnnMean_ReduceMeanAiCore_ReduceMean",
+          "count": 2328,
+          "summed_task_ms": 9.194198,
+          "mean_task_us": 3.949397766323024,
+          "median_task_us": 4.062,
+          "max_task_us": 5.599,
+          "percent_summed_task_time": 0.8545646545353085
+        },
+        {
+          "name": "aclnnWeightQuantBatchMatmulV2_TransposeAiCore_Transpose",
+          "count": 156,
+          "summed_task_ms": 7.760362,
+          "mean_task_us": 49.745910256410255,
+          "median_task_us": 47.7605,
+          "max_task_us": 79.401,
+          "percent_summed_task_time": 0.7212952202681447
+        },
+        {
+          "name": "aclnnWeightQuantBatchMatmulV2_WeightQuantBatchMatmulV2_WeightQuantBatchMatmulV2",
+          "count": 156,
+          "summed_task_ms": 7.675814,
+          "mean_task_us": 49.2039358974359,
+          "median_task_us": 48.4115,
+          "max_task_us": 74.974,
+          "percent_summed_task_time": 0.7134368151727083
+        },
+        {
+          "name": "aclnnSort_SortAiCore_Sort",
+          "count": 127,
+          "summed_task_ms": 7.416836,
+          "mean_task_us": 58.400283464566925,
+          "median_task_us": 64.948,
+          "max_task_us": 70.573,
+          "percent_summed_task_time": 0.6893658255004993
+        },
+        {
+          "name": "aclnnPowTensorScalar_PowsAiCore_Pows",
+          "count": 1504,
+          "summed_task_ms": 5.698538,
+          "mean_task_us": 3.7889215425531915,
+          "median_task_us": 2.839,
+          "max_task_us": 8.984,
+          "percent_summed_task_time": 0.5296567636814355
+        },
+        {
+          "name": "aclnnGroupedMatmulWeightNz_GroupedMatmul_GroupedMatmul",
+          "count": 224,
+          "summed_task_ms": 4.963445,
+          "mean_task_us": 22.158236607142857,
+          "median_task_us": 22.109,
+          "max_task_us": 26.484,
+          "percent_summed_task_time": 0.4613327515602779
+        },
+        {
+          "name": "hcom_allReduce__503_11_1",
+          "count": 1,
+          "summed_task_ms": 4.959843,
+          "mean_task_us": 4959.843,
+          "median_task_us": 4959.843,
+          "max_task_us": 4959.843,
+          "percent_summed_task_time": 0.46099795978337293
+        },
+        {
+          "name": "aclnnNonzeroV2_NonzeroAiCpu_NonZero",
+          "count": 96,
+          "summed_task_ms": 4.954945,
+          "mean_task_us": 51.614010416666666,
+          "median_task_us": 50.456,
+          "max_task_us": 108.047,
+          "percent_summed_task_time": 0.46054270988795915
+        },
+        {
+          "name": "aclnnCat_ConcatD_ConcatD",
+          "count": 1256,
+          "summed_task_ms": 4.813253,
+          "mean_task_us": 3.832207802547771,
+          "median_task_us": 3.333,
+          "max_task_us": 10.677,
+          "percent_summed_task_time": 0.4473729940486421
+        },
+        {
+          "name": "aclnnAdds_AddAiCore_Add",
+          "count": 3216,
+          "summed_task_ms": 4.423086,
+          "mean_task_us": 1.3753376865671643,
+          "median_task_us": 1.25,
+          "max_task_us": 3.776,
+          "percent_summed_task_time": 0.4111085012058648
+        },
+        {
+          "name": "aclnnMean_ReduceMeanAiCore_MemSet",
+          "count": 2328,
+          "summed_task_ms": 4.249213,
+          "mean_task_us": 1.8252633161512029,
+          "median_task_us": 1.745,
+          "max_task_us": 2.839,
+          "percent_summed_task_time": 0.3949476875951488
+        },
+        {
+          "name": "aclnnAdd_AddAiCore_Add",
+          "count": 2024,
+          "summed_task_ms": 3.933417,
+          "mean_task_us": 1.9433878458498022,
+          "median_task_us": 1.693,
+          "max_task_us": 6.042,
+          "percent_summed_task_time": 0.36559568760084454
+        },
+        {
+          "name": "aclnnReduceSum_ReduceSumOpAiCore_ReduceSum",
+          "count": 928,
+          "summed_task_ms": 3.774835,
+          "mean_task_us": 4.067710129310345,
+          "median_task_us": 5.13,
+          "max_task_us": 6.953,
+          "percent_summed_task_time": 0.3508561124855905
+        },
+        {
+          "name": "hcom_allReduce__503_8_1",
+          "count": 1,
+          "summed_task_ms": 3.747213,
+          "mean_task_us": 3747.213,
+          "median_task_us": 3747.213,
+          "max_task_us": 3747.213,
+          "percent_summed_task_time": 0.3482887558887917
+        },
+        {
+          "name": "hcom_allReduce__503_38_1",
+          "count": 1,
+          "summed_task_ms": 3.548906,
+          "mean_task_us": 3548.906,
+          "median_task_us": 3548.906,
+          "max_task_us": 3548.906,
+          "percent_summed_task_time": 0.329856897781436
+        },
+        {
+          "name": "aclnnInplaceCopy_CastAiCpu_Cast",
+          "count": 24,
+          "summed_task_ms": 3.435341,
+          "mean_task_us": 143.13920833333333,
+          "median_task_us": 147.0705,
+          "max_task_us": 169.479,
+          "percent_summed_task_time": 0.3193014763088614
+        },
+        {
+          "name": "aclnnInplaceCopy_SliceAiCore_Slice",
+          "count": 1568,
+          "summed_task_ms": 3.378584,
+          "mean_task_us": 2.1547091836734693,
+          "median_task_us": 1.641,
+          "max_task_us": 9.115,
+          "percent_summed_task_time": 0.3140261356975911
+        }
+      ]
+    },
+    {
+      "file": "/srv/ai/src/qwen38-w4-hardware-20260927/replay-profile-r5/dp0_pp0_tp2_dcp0_ep2_rank2_3550365_20260927091750814_ascend_pt/ASCEND_PROFILER_OUTPUT/kernel_details.csv",
+      "device_ids": [
+        "2"
+      ],
+      "task_count": 81684,
+      "task_span_ms": 1594.878902,
+      "task_union_ms": 1092.101675,
+      "summed_task_ms": 1100.231937,
+      "projection_shapes": [
+        {
+          "name": "QwenW4RoutedMatmulV310",
+          "input_shapes": "\"30,2560;128,640,1280;128,640,20;128,640,20;30\"",
+          "count": 768,
+          "median_task_us": 382.7605,
+          "block_counts": [
+            20
+          ],
+          "pipeline_counters": {
+            "aicore_time(us)": {
+              "samples": 768,
+              "median_us": 360.28499999999997
+            },
+            "vec_time(us)": {
+              "samples": 768,
+              "median_us": 117.83850000000001
+            },
+            "mac_time(us)": {
+              "samples": 768,
+              "median_us": 9.4695
+            },
+            "scalar_time(us)": {
+              "samples": 768,
+              "median_us": 158.6245
+            },
+            "mte1_time(us)": {
+              "samples": 768,
+              "median_us": 27.835
+            },
+            "mte2_time(us)": {
+              "samples": 768,
+              "median_us": 146.757
+            },
+            "mte3_time(us)": {
+              "samples": 768,
+              "median_us": 35.703
+            }
+          }
+        },
+        {
+          "name": "QwenW4RoutedMatmulV310",
+          "input_shapes": "\"30,640;128,2560,320;128,2560,5;128,2560,5;30\"",
+          "count": 384,
+          "median_task_us": 458.8935,
+          "block_counts": [
+            80
+          ],
+          "pipeline_counters": {
+            "aicore_time(us)": {
+              "samples": 384,
+              "median_us": 424.36
+            },
+            "vec_time(us)": {
+              "samples": 384,
+              "median_us": 105.535
+            },
+            "mac_time(us)": {
+              "samples": 384,
+              "median_us": 7.891500000000001
+            },
+            "scalar_time(us)": {
+              "samples": 384,
+              "median_us": 215.059
+            },
+            "mte1_time(us)": {
+              "samples": 384,
+              "median_us": 23.1955
+            },
+            "mte2_time(us)": {
+              "samples": 384,
+              "median_us": 143.0495
+            },
+            "mte3_time(us)": {
+              "samples": 384,
+              "median_us": 49.4715
+            }
+          }
+        }
+      ],
+      "categories": [
+        {
+          "name": "cast_layout_or_copy",
+          "count": 29364,
+          "summed_task_ms": 173.603234,
+          "mean_task_us": 5.912111224628798,
+          "median_task_us": 1.979,
+          "max_task_us": 2308.177,
+          "percent_summed_task_time": 15.778785196270848
+        },
+        {
+          "name": "collective",
+          "count": 40,
+          "summed_task_ms": 21.072738,
+          "mean_task_us": 526.81845,
+          "median_task_us": 209.8825,
+          "max_task_us": 3202.812,
+          "percent_summed_task_time": 1.9152996101402935
+        },
+        {
+          "name": "named_attention_or_recurrence",
+          "count": 920,
+          "summed_task_ms": 56.71985,
+          "mean_task_us": 61.65201086956522,
+          "median_task_us": 42.891,
+          "max_task_us": 3095.885,
+          "percent_summed_task_time": 5.155263003422523
+        },
+        {
+          "name": "other",
+          "count": 42264,
+          "summed_task_ms": 150.88756,
+          "mean_task_us": 3.5701201968578458,
+          "median_task_us": 1.849,
+          "max_task_us": 1626.51,
+          "percent_summed_task_time": 13.714159253677437
+        },
+        {
+          "name": "other_matrix_multiply",
+          "count": 7944,
+          "summed_task_ms": 224.562279,
+          "mean_task_us": 28.268162009063442,
+          "median_task_us": 13.138,
+          "max_task_us": 1633.333,
+          "percent_summed_task_time": 20.410449056070256
+        },
+        {
+          "name": "w4_routed_projection",
+          "count": 1152,
+          "summed_task_ms": 473.386276,
+          "mean_task_us": 410.92558680555555,
+          "median_task_us": 407.891,
+          "max_task_us": 1016.198,
+          "percent_summed_task_time": 43.02604388041864
+        }
+      ],
+      "top_operations": [
+        {
+          "name": "QwenW4RoutedMatmulV310",
+          "count": 1152,
+          "summed_task_ms": 473.386276,
+          "mean_task_us": 410.92558680555555,
+          "median_task_us": 407.891,
+          "max_task_us": 1016.198,
+          "percent_summed_task_time": 43.02604388041864
+        },
+        {
+          "name": "aclnnMatmulWeightNz_MatMulCommon_MatMulV2",
+          "count": 4552,
+          "summed_task_ms": 189.948166,
+          "mean_task_us": 41.728507469244285,
+          "median_task_us": 38.724,
+          "max_task_us": 1633.333,
+          "percent_summed_task_time": 17.264374866078807
+        },
+        {
+          "name": "aclnnMatmul_TransData_TransData",
+          "count": 4520,
+          "summed_task_ms": 40.191333,
+          "mean_task_us": 8.891887831858407,
+          "median_task_us": 4.219,
+          "max_task_us": 848.099,
+          "percent_summed_task_time": 3.652987306439188
+        },
+        {
+          "name": "Cast",
+          "count": 192,
+          "summed_task_ms": 32.765024,
+          "mean_task_us": 170.65116666666665,
+          "median_task_us": 146.107,
+          "max_task_us": 1829.036,
+          "percent_summed_task_time": 2.9780106264993833
+        },
+        {
+          "name": "aclnnInplaceCopy_CastAiCore_Cast",
+          "count": 15116,
+          "summed_task_ms": 25.514191,
+          "mean_task_us": 1.6878930272558879,
+          "median_task_us": 1.354,
+          "max_task_us": 1572.057,
+          "percent_summed_task_time": 2.318982947320134
+        },
+        {
+          "name": "QsaIndexerScoreV310",
+          "count": 8,
+          "summed_task_ms": 24.261328,
+          "mean_task_us": 3032.666,
+          "median_task_us": 3028.841,
+          "max_task_us": 3095.885,
+          "percent_summed_task_time": 2.205110321206755
+        },
+        {
+          "name": "aclnnMul_MulAiCore_Mul",
+          "count": 8104,
+          "summed_task_ms": 23.837662,
+          "mean_task_us": 2.9414686574531097,
+          "median_task_us": 2.396,
+          "max_task_us": 9.167,
+          "percent_summed_task_time": 2.1666033495626476
+        },
+        {
+          "name": "aclnnFloorDivides_FloorDivAiCpu_FloorDiv",
+          "count": 361,
+          "summed_task_ms": 19.411166,
+          "mean_task_us": 53.77054293628809,
+          "median_task_us": 52.266,
+          "max_task_us": 233.125,
+          "percent_summed_task_time": 1.7642794530150054
+        },
+        {
+          "name": "trans_TransData_10",
+          "count": 8,
+          "summed_task_ms": 18.457265,
+          "mean_task_us": 2307.158125,
+          "median_task_us": 2307.2005,
+          "max_task_us": 2308.177,
+          "percent_summed_task_time": 1.6775794611386563
+        },
+        {
+          "name": "aclnnMatmulWeightNz_TransData_TransData",
+          "count": 4840,
+          "summed_task_ms": 18.171956,
+          "mean_task_us": 3.7545363636363636,
+          "median_task_us": 3.62,
+          "max_task_us": 6.849,
+          "percent_summed_task_time": 1.6516477470695345
+        },
+        {
+          "name": "QsaGatherValueNzV310",
+          "count": 224,
+          "summed_task_ms": 16.989337,
+          "mean_task_us": 75.84525446428572,
+          "median_task_us": 79.479,
+          "max_task_us": 89.01,
+          "percent_summed_task_time": 1.5441595929604433
+        },
+        {
+          "name": "aclnnMatmul_MatMulCommon_MatMulV2",
+          "count": 1600,
+          "summed_task_ms": 15.948716,
+          "mean_task_us": 9.967947500000001,
+          "median_task_us": 3.333,
+          "max_task_us": 399.427,
+          "percent_summed_task_time": 1.449577626649098
+        },
+        {
+          "name": "aclnnRecurrentGatedDeltaRuleV310_RecurrentGatedDeltaRuleV310_RecurrentGatedDeltaRuleV310",
+          "count": 288,
+          "summed_task_ms": 12.518336,
+          "mean_task_us": 43.46644444444445,
+          "median_task_us": 43.568,
+          "max_task_us": 45.964,
+          "percent_summed_task_time": 1.137790640229343
+        },
+        {
+          "name": "aclnnWeightQuantBatchMatmulV2_WeightQuantBatchMatmulV2_WeightQuantBatchMatmulV2",
+          "count": 232,
+          "summed_task_ms": 11.318351,
+          "mean_task_us": 48.785995689655174,
+          "median_task_us": 48.75,
+          "max_task_us": 64.661,
+          "percent_summed_task_time": 1.0287240916548672
+        },
+        {
+          "name": "aclnnWeightQuantBatchMatmulV2_TransposeAiCore_Transpose",
+          "count": 232,
+          "summed_task_ms": 11.305442,
+          "mean_task_us": 48.730353448275864,
+          "median_task_us": 47.396,
+          "max_task_us": 79.375,
+          "percent_summed_task_time": 1.0275507935923514
+        },
+        {
+          "name": "aclnnMean_ReduceMeanAiCore_ReduceMean",
+          "count": 2328,
+          "summed_task_ms": 9.19817,
+          "mean_task_us": 3.951103951890034,
+          "median_task_us": 4.01,
+          "max_task_us": 7.057,
+          "percent_summed_task_time": 0.83602099618019
+        },
+        {
+          "name": "aclnnSort_SortAiCore_Sort",
+          "count": 128,
+          "summed_task_ms": 7.433673,
+          "mean_task_us": 58.0755703125,
+          "median_task_us": 65.026,
+          "max_task_us": 70.651,
+          "percent_summed_task_time": 0.6756459933593075
+        },
+        {
+          "name": "aclnnNonzeroV2_NonzeroAiCpu_NonZero",
+          "count": 96,
+          "summed_task_ms": 5.712188,
+          "mean_task_us": 59.501958333333334,
+          "median_task_us": 54.167,
+          "max_task_us": 227.161,
+          "percent_summed_task_time": 0.5191803480614652
+        },
+        {
+          "name": "aclnnGroupedMatmulWeightNz_GroupedMatmul_GroupedMatmul",
+          "count": 224,
+          "summed_task_ms": 4.962303,
+          "mean_task_us": 22.15313839285714,
+          "median_task_us": 22.201,
+          "max_task_us": 23.229,
+          "percent_summed_task_time": 0.45102335545091526
+        },
+        {
+          "name": "aclnnCat_ConcatD_ConcatD",
+          "count": 1256,
+          "summed_task_ms": 4.841722,
+          "mean_task_us": 3.854874203821656,
+          "median_task_us": 3.359,
+          "max_task_us": 10.833,
+          "percent_summed_task_time": 0.44006375721122154
+        },
+        {
+          "name": "aclnnReduceSum_CastAiCpu_Cast",
+          "count": 24,
+          "summed_task_ms": 4.727085,
+          "mean_task_us": 196.961875,
+          "median_task_us": 135.9375,
+          "max_task_us": 1607.656,
+          "percent_summed_task_time": 0.42964440869525494
+        },
+        {
+          "name": "aclnnWeightQuantBatchMatmulV2_TransData_TransData",
+          "count": 232,
+          "summed_task_ms": 4.534088,
+          "mean_task_us": 19.543482758620687,
+          "median_task_us": 18.9715,
+          "max_task_us": 34.401,
+          "percent_summed_task_time": 0.412102925530692
+        },
+        {
+          "name": "aclnnAdds_AddAiCore_Add",
+          "count": 3216,
+          "summed_task_ms": 4.453357,
+          "mean_task_us": 1.3847503109452737,
+          "median_task_us": 1.25,
+          "max_task_us": 3.958,
+          "percent_summed_task_time": 0.40476529086612034
+        },
+        {
+          "name": "aclnnMean_ReduceMeanAiCore_MemSet",
+          "count": 2328,
+          "summed_task_ms": 4.158121,
+          "mean_task_us": 1.7861344501718213,
+          "median_task_us": 1.719,
+          "max_task_us": 2.995,
+          "percent_summed_task_time": 0.37793131249561246
+        },
+        {
+          "name": "aclnnAdd_AddAiCore_Add",
+          "count": 2024,
+          "summed_task_ms": 3.969367,
+          "mean_task_us": 1.9611497035573122,
+          "median_task_us": 1.693,
+          "max_task_us": 7.161,
+          "percent_summed_task_time": 0.3607754752896252
+        },
+        {
+          "name": "aclnnReduceSum_ReduceSumOpAiCore_ReduceSum",
+          "count": 928,
+          "summed_task_ms": 3.903787,
+          "mean_task_us": 4.206667025862068,
+          "median_task_us": 5.208,
+          "max_task_us": 6.797,
+          "percent_summed_task_time": 0.3548149139030128
+        },
+        {
+          "name": "aclnnPowTensorScalar_PowsAiCore_Pows",
+          "count": 1504,
+          "summed_task_ms": 3.809203,
+          "mean_task_us": 2.5327147606382976,
+          "median_task_us": 2.63,
+          "max_task_us": 4.688,
+          "percent_summed_task_time": 0.3462181810852124
+        },
+        {
+          "name": "aclnnInplaceCopy_CastAiCpu_Cast",
+          "count": 24,
+          "summed_task_ms": 3.491691,
+          "mean_task_us": 145.487125,
+          "median_task_us": 143.841,
+          "max_task_us": 195.0,
+          "percent_summed_task_time": 0.31735953870970024
+        },
+        {
+          "name": "aclnnInplaceCopy_SliceAiCore_Slice",
+          "count": 1568,
+          "summed_task_ms": 3.368591,
+          "mean_task_us": 2.1483360969387753,
+          "median_task_us": 1.641,
+          "max_task_us": 9.115,
+          "percent_summed_task_time": 0.30617098874489407
+        },
+        {
+          "name": "hcom_allReduce__503_38_1",
+          "count": 1,
+          "summed_task_ms": 3.202812,
+          "mean_task_us": 3202.812,
+          "median_task_us": 3202.812,
+          "max_task_us": 3202.812,
+          "percent_summed_task_time": 0.2911033476026065
+        }
+      ]
+    },
+    {
+      "file": "/srv/ai/src/qwen38-w4-hardware-20260927/replay-profile-r5/dp0_pp0_tp3_dcp0_ep3_rank3_3550366_20260927091750814_ascend_pt/ASCEND_PROFILER_OUTPUT/kernel_details.csv",
+      "device_ids": [
+        "3"
+      ],
+      "task_count": 81316,
+      "task_span_ms": 1598.389812,
+      "task_union_ms": 1060.510699,
+      "summed_task_ms": 1067.073767,
+      "projection_shapes": [
+        {
+          "name": "QwenW4RoutedMatmulV310",
+          "input_shapes": "\"30,2560;128,640,1280;128,640,20;128,640,20;30\"",
+          "count": 768,
+          "median_task_us": 348.3335,
+          "block_counts": [
+            20
+          ],
+          "pipeline_counters": {
+            "aicore_time(us)": {
+              "samples": 768,
+              "median_us": 327.13
+            },
+            "vec_time(us)": {
+              "samples": 768,
+              "median_us": 107.054
+            },
+            "mac_time(us)": {
+              "samples": 768,
+              "median_us": 8.609
+            },
+            "scalar_time(us)": {
+              "samples": 768,
+              "median_us": 144.8025
+            },
+            "mte1_time(us)": {
+              "samples": 768,
+              "median_us": 25.304
+            },
+            "mte2_time(us)": {
+              "samples": 768,
+              "median_us": 131.5575
+            },
+            "mte3_time(us)": {
+              "samples": 768,
+              "median_us": 32.498000000000005
+            }
+          }
+        },
+        {
+          "name": "QwenW4RoutedMatmulV310",
+          "input_shapes": "\"30,640;128,2560,320;128,2560,5;128,2560,5;30\"",
+          "count": 384,
+          "median_task_us": 426.1845,
+          "block_counts": [
+            80
+          ],
+          "pipeline_counters": {
+            "aicore_time(us)": {
+              "samples": 384,
+              "median_us": 395.96000000000004
+            },
+            "vec_time(us)": {
+              "samples": 384,
+              "median_us": 95.895
+            },
+            "mac_time(us)": {
+              "samples": 384,
+              "median_us": 7.174
+            },
+            "scalar_time(us)": {
+              "samples": 384,
+              "median_us": 199.4635
+            },
+            "mte1_time(us)": {
+              "samples": 384,
+              "median_us": 21.087
+            },
+            "mte2_time(us)": {
+              "samples": 384,
+              "median_us": 130.586
+            },
+            "mte3_time(us)": {
+              "samples": 384,
+              "median_us": 45.0275
+            }
+          }
+        }
+      ],
+      "categories": [
+        {
+          "name": "cast_layout_or_copy",
+          "count": 29209,
+          "summed_task_ms": 166.276636,
+          "mean_task_us": 5.692650758327913,
+          "median_task_us": 1.979,
+          "max_task_us": 2307.812,
+          "percent_summed_task_time": 15.582487466398375
+        },
+        {
+          "name": "collective",
+          "count": 40,
+          "summed_task_ms": 34.646017,
+          "mean_task_us": 866.150425,
+          "median_task_us": 340.885,
+          "max_task_us": 4270.546,
+          "percent_summed_task_time": 3.2468249217113403
+        },
+        {
+          "name": "named_attention_or_recurrence",
+          "count": 920,
+          "summed_task_ms": 57.055623,
+          "mean_task_us": 62.01698152173913,
+          "median_task_us": 42.839,
+          "max_task_us": 3081.015,
+          "percent_summed_task_time": 5.346923967628566
+        },
+        {
+          "name": "other",
+          "count": 42113,
+          "summed_task_ms": 144.931739,
+          "mean_task_us": 3.4414964262816707,
+          "median_task_us": 1.875,
+          "max_task_us": 1176.432,
+          "percent_summed_task_time": 13.582166808154698
+        },
+        {
+          "name": "other_matrix_multiply",
+          "count": 7882,
+          "summed_task_ms": 221.302812,
+          "mean_task_us": 28.07698705912205,
+          "median_task_us": 12.969,
+          "max_task_us": 1628.776,
+          "percent_summed_task_time": 20.73922336430186
+        },
+        {
+          "name": "w4_routed_projection",
+          "count": 1152,
+          "summed_task_ms": 442.86094,
+          "mean_task_us": 384.42789930555557,
+          "median_task_us": 366.4585,
+          "max_task_us": 917.448,
+          "percent_summed_task_time": 41.50237347180516
+        }
+      ],
+      "top_operations": [
+        {
+          "name": "QwenW4RoutedMatmulV310",
+          "count": 1152,
+          "summed_task_ms": 442.86094,
+          "mean_task_us": 384.42789930555557,
+          "median_task_us": 366.4585,
+          "max_task_us": 917.448,
+          "percent_summed_task_time": 41.50237347180516
+        },
+        {
+          "name": "aclnnMatmulWeightNz_MatMulCommon_MatMulV2",
+          "count": 4552,
+          "summed_task_ms": 189.648646,
+          "mean_task_us": 41.662707820738135,
+          "median_task_us": 38.594,
+          "max_task_us": 1628.776,
+          "percent_summed_task_time": 17.772777465346497
+        },
+        {
+          "name": "aclnnMatmul_TransData_TransData",
+          "count": 4520,
+          "summed_task_ms": 40.231144,
+          "mean_task_us": 8.90069557522124,
+          "median_task_us": 4.193,
+          "max_task_us": 843.49,
+          "percent_summed_task_time": 3.7702308166666794
+        },
+        {
+          "name": "Cast",
+          "count": 192,
+          "summed_task_ms": 28.926301,
+          "mean_task_us": 150.65781770833334,
+          "median_task_us": 138.607,
+          "max_task_us": 1799.557,
+          "percent_summed_task_time": 2.7108061218039485
+        },
+        {
+          "name": "aclnnInplaceCopy_CastAiCore_Cast",
+          "count": 15085,
+          "summed_task_ms": 26.617367,
+          "mean_task_us": 1.764492343387471,
+          "median_task_us": 1.328,
+          "max_task_us": 1595.911,
+          "percent_summed_task_time": 2.4944261421431797
+        },
+        {
+          "name": "QsaIndexerScoreV310",
+          "count": 8,
+          "summed_task_ms": 24.383201,
+          "mean_task_us": 3047.900125,
+          "median_task_us": 3042.1095,
+          "max_task_us": 3081.015,
+          "percent_summed_task_time": 2.2850529882813624
+        },
+        {
+          "name": "aclnnMul_MulAiCore_Mul",
+          "count": 8042,
+          "summed_task_ms": 23.690778,
+          "mean_task_us": 2.945881372792838,
+          "median_task_us": 2.396,
+          "max_task_us": 9.271,
+          "percent_summed_task_time": 2.2201630976839484
+        },
+        {
+          "name": "trans_TransData_10",
+          "count": 8,
+          "summed_task_ms": 18.459921,
+          "mean_task_us": 2307.490125,
+          "median_task_us": 2307.539,
+          "max_task_us": 2307.812,
+          "percent_summed_task_time": 1.72995734417675
+        },
+        {
+          "name": "aclnnMatmulWeightNz_TransData_TransData",
+          "count": 4840,
+          "summed_task_ms": 18.390533,
+          "mean_task_us": 3.7996969008264463,
+          "median_task_us": 3.672,
+          "max_task_us": 7.656,
+          "percent_summed_task_time": 1.7234547009532097
+        },
+        {
+          "name": "aclnnFloorDivides_FloorDivAiCpu_FloorDiv",
+          "count": 361,
+          "summed_task_ms": 17.554495,
+          "mean_task_us": 48.62740997229917,
+          "median_task_us": 48.776,
+          "max_task_us": 242.552,
+          "percent_summed_task_time": 1.6451060407335456
+        },
+        {
+          "name": "QsaGatherValueNzV310",
+          "count": 224,
+          "summed_task_ms": 17.19391,
+          "mean_task_us": 76.7585267857143,
+          "median_task_us": 80.273,
+          "max_task_us": 88.594,
+          "percent_summed_task_time": 1.6113140939018136
+        },
+        {
+          "name": "aclnnMatmul_MatMulCommon_MatMulV2",
+          "count": 1600,
+          "summed_task_ms": 16.007788,
+          "mean_task_us": 10.0048675,
+          "median_task_us": 3.359,
+          "max_task_us": 394.271,
+          "percent_summed_task_time": 1.5001575800148033
+        },
+        {
+          "name": "aclnnRecurrentGatedDeltaRuleV310_RecurrentGatedDeltaRuleV310_RecurrentGatedDeltaRuleV310",
+          "count": 288,
+          "summed_task_ms": 12.488986,
+          "mean_task_us": 43.36453472222222,
+          "median_task_us": 43.503,
+          "max_task_us": 44.896,
+          "percent_summed_task_time": 1.170395748281946
+        },
+        {
+          "name": "aclnnMean_ReduceMeanAiCore_ReduceMean",
+          "count": 2328,
+          "summed_task_ms": 9.119413,
+          "mean_task_us": 3.9172736254295533,
+          "median_task_us": 3.984,
+          "max_task_us": 6.953,
+          "percent_summed_task_time": 0.8546187978773543
+        },
+        {
+          "name": "aclnnWeightQuantBatchMatmulV2_TransposeAiCore_Transpose",
+          "count": 170,
+          "summed_task_ms": 8.425756,
+          "mean_task_us": 49.5632705882353,
+          "median_task_us": 47.435,
+          "max_task_us": 78.776,
+          "percent_summed_task_time": 0.7896132639159894
+        },
+        {
+          "name": "aclnnWeightQuantBatchMatmulV2_WeightQuantBatchMatmulV2_WeightQuantBatchMatmulV2",
+          "count": 170,
+          "summed_task_ms": 8.244685,
+          "mean_task_us": 48.498147058823534,
+          "median_task_us": 48.62,
+          "max_task_us": 63.802,
+          "percent_summed_task_time": 0.7726443339694621
+        },
+        {
+          "name": "aclnnSort_SortAiCore_Sort",
+          "count": 128,
+          "summed_task_ms": 7.436693,
+          "mean_task_us": 58.0991640625,
+          "median_task_us": 65.052,
+          "max_task_us": 70.573,
+          "percent_summed_task_time": 0.6969239831382716
+        },
+        {
+          "name": "aclnnGroupedMatmulWeightNz_GroupedMatmul_GroupedMatmul",
+          "count": 224,
+          "summed_task_ms": 4.953106,
+          "mean_task_us": 22.112080357142858,
+          "median_task_us": 22.096,
+          "max_task_us": 23.333,
+          "percent_summed_task_time": 0.46417653148060195
+        },
+        {
+          "name": "aclnnCat_ConcatD_ConcatD",
+          "count": 1256,
+          "summed_task_ms": 4.838148,
+          "mean_task_us": 3.8520286624203823,
+          "median_task_us": 3.333,
+          "max_task_us": 11.276,
+          "percent_summed_task_time": 0.4534033306434006
+        },
+        {
+          "name": "aclnnNonzeroV2_NonzeroAiCpu_NonZero",
+          "count": 96,
+          "summed_task_ms": 4.772396,
+          "mean_task_us": 49.71245833333334,
+          "median_task_us": 49.7265,
+          "max_task_us": 67.604,
+          "percent_summed_task_time": 0.44724143237231323
+        },
+        {
+          "name": "aclnnAdds_AddAiCore_Add",
+          "count": 3216,
+          "summed_task_ms": 4.429077,
+          "mean_task_us": 1.3772005597014925,
+          "median_task_us": 1.25,
+          "max_task_us": 4.167,
+          "percent_summed_task_time": 0.41506755549356505
+        },
+        {
+          "name": "hcom_allReduce__503_11_1",
+          "count": 1,
+          "summed_task_ms": 4.270546,
+          "mean_task_us": 4270.546,
+          "median_task_us": 4270.546,
+          "max_task_us": 4270.546,
+          "percent_summed_task_time": 0.40021094436669813
+        },
+        {
+          "name": "aclnnMean_ReduceMeanAiCore_MemSet",
+          "count": 2328,
+          "summed_task_ms": 4.219091,
+          "mean_task_us": 1.8123243127147766,
+          "median_task_us": 1.719,
+          "max_task_us": 3.49,
+          "percent_summed_task_time": 0.3953888784897849
+        },
+        {
+          "name": "aclnnAdd_AddAiCore_Add",
+          "count": 2024,
+          "summed_task_ms": 3.975088,
+          "mean_task_us": 1.9639762845849802,
+          "median_task_us": 1.693,
+          "max_task_us": 6.094,
+          "percent_summed_task_time": 0.3725223244102111
+        },
+        {
+          "name": "aclnnReduceSum_ReduceSumOpAiCore_ReduceSum",
+          "count": 928,
+          "summed_task_ms": 3.900901,
+          "mean_task_us": 4.203557112068966,
+          "median_task_us": 5.0,
+          "max_task_us": 6.927,
+          "percent_summed_task_time": 0.36556994658083464
+        },
+        {
+          "name": "aclnnPowTensorScalar_PowsAiCore_Pows",
+          "count": 1504,
+          "summed_task_ms": 3.822521,
+          "mean_task_us": 2.541569813829787,
+          "median_task_us": 2.63,
+          "max_task_us": 4.141,
+          "percent_summed_task_time": 0.3582246249710307
+        },
+        {
+          "name": "hcom_allReduce__503_8_1",
+          "count": 1,
+          "summed_task_ms": 3.618827,
+          "mean_task_us": 3618.827,
+          "median_task_us": 3618.827,
+          "max_task_us": 3618.827,
+          "percent_summed_task_time": 0.33913559792347514
+        },
+        {
+          "name": "aclnnInplaceCopy_CastAiCpu_Cast",
+          "count": 24,
+          "summed_task_ms": 3.493361,
+          "mean_task_us": 145.55670833333335,
+          "median_task_us": 144.206,
+          "max_task_us": 201.615,
+          "percent_summed_task_time": 0.32737764792225466
+        },
+        {
+          "name": "aclnnWeightQuantBatchMatmulV2_TransData_TransData",
+          "count": 170,
+          "summed_task_ms": 3.358393,
+          "mean_task_us": 19.75525294117647,
+          "median_task_us": 19.219,
+          "max_task_us": 34.635,
+          "percent_summed_task_time": 0.31472922527576297
+        },
+        {
+          "name": "aclnnInplaceCopy_SliceAiCore_Slice",
+          "count": 1568,
+          "summed_task_ms": 3.349843,
+          "mean_task_us": 2.136379464285714,
+          "median_task_us": 1.615,
+          "max_task_us": 9.453,
+          "percent_summed_task_time": 0.3139279685806389
+        }
+      ]
+    }
+  ]
+}

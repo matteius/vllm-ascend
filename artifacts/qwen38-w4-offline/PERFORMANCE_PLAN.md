@@ -228,7 +228,22 @@ small-M Cube stage 从 K=128 改到 512 的独立候选通过 195 NPU tests，
 8.79% / 12.12%。第一题有 15.783/15.843 tok/s，但后两题接受率下降，
 不能挑第一题宣称达到目标。所有输出 SHA 改变；cold TTFT 361.316 秒。
 因此下一次 `replay-profile-r5` 保留 k=2 + FULL `[1,3]`，重新测量
-QSA score 修复后的瓶颈分布。该 profile 已启动，尚未形成新速度结论。
+QSA score 修复后的瓶颈分布。该 profile 已完成：native QSA score
+从每 rank 112 calls 降到 8，W4 projection 成为累计 task time 的
+41.18–43.03%。这些占比不是 critical-path 加速预测。长 host copy
+等待大部分与 NPU 工作重叠，不能当成纯 memcpy 成本直接扣除。
+
+QSA position geometry 的公共子表达式候选保留 INT64 floor，减少重复
+division；80 CPU / 92 NPU tests 通过，20 个局部 selection cases
+四个输出 fields 精确一致，T=3/5856 groups 从 0.510 降到 0.397 ms。
+同一 binary 的完整模型 `mtp2-r8` 已通过三个正确 smoke，保留
+MTP k=2 与有 runtime 证据的 FULL `[1,3]`。短三题全部生成 512
+tokens，14.919/13.183/13.213，中位数 13.213 比 r7 低 1.12%，
+没有短题提速证据；长题正在运行。源码线索还指向 k>1 的通用 greedy
+rejection 中 pageable draft-count H2D 与动态 boolean indexing；
+下一步可检查固定形状的设备端实现，不能用 CPU-spec 路径规避需求。
+在数值、synthetic/mixed-greedy、动态 replay 和真实 MTP tests 之前
+不修改生产 W8，不宣称移除一次同步就能消除整个 host wait。
 
 ## Acceptance criteria
 

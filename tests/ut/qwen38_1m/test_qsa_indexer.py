@@ -46,6 +46,7 @@ from vllm_ascend.models.qwen4_exp.ops.qsa_cache import (
 )
 from vllm_ascend.models.qwen4_exp.ops.qsa_indexer import (
     QSAGroupSelection,
+    _qsa_position_geometry,
     _repair_native_group_indices,
     _stable_topk_indices,
     _use_qsa_matmul_score,
@@ -56,6 +57,37 @@ from vllm_ascend.models.qwen4_exp.ops.qsa_indexer import (
 )
 
 _RATIO = INDEXER_COMPRESS_RATIO  # 4
+
+
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("ratio", [3, 4])
+@pytest.mark.parametrize("capacity", [0, 1, 512, 5856])
+def test_native_position_geometry_reuses_one_quotient(dtype, ratio, capacity, monkeypatch):
+    values = [-2, -1, 0, ratio - 1, ratio, 511, 512, 23423, 131071, 2**31 - 2]
+    if dtype == torch.int64:
+        values.append(2**40)
+    # Noncontiguous input must not change integer arithmetic or narrow INT64.
+    positions = torch.tensor([[p, 0] for p in values], dtype=dtype)[:, 0]
+    division = torch.div
+    calls = []
+
+    def count_division(*args, **kwargs):
+        calls.append(kwargs.get("rounding_mode"))
+        return division(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "div", count_division)
+    groups, starts, counts = _qsa_position_geometry(positions, ratio, capacity)
+    expected_groups = [min((p + 1) // ratio, capacity) for p in values]
+    expected_starts = [(p + 1) // ratio * ratio for p in values]
+    expected_counts = [p + 1 - start for p, start in zip(values, expected_starts)]
+    for actual, expected in zip((groups, starts, counts), (expected_groups, expected_starts, expected_counts)):
+        torch.testing.assert_close(actual, torch.tensor(expected, dtype=torch.int64))
+    assert calls == ["floor"]
+
+
+def test_native_position_geometry_empty_batch():
+    outputs = _qsa_position_geometry(torch.empty(0, dtype=torch.int32), _RATIO, 512)
+    assert all(output.shape == (0,) and output.dtype == torch.int64 for output in outputs)
 
 
 def _make_indexer(*, budget: int, ratio: int = _RATIO) -> AscendQwen4ExpQSAIndexer:

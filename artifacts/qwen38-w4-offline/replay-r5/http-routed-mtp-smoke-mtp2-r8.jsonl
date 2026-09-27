@@ -1,0 +1,77 @@
+{"event": "start", "case": "arithmetic", "payload": {"model": "qwen38-w4-experimental", "messages": [{"role": "user", "content": "What is 17 * 19? Reply with just the integer."}], "temperature": 0, "seed": 1024, "max_tokens": 16, "chat_template_kwargs": {"enable_thinking": false}, "stream": true, "stream_options": {"include_usage": true}}}
+{"event": "delta", "case": "arithmetic", "elapsed_s": 1.0401318440053728, "text": "3", "reasoning": ""}
+{"event": "delta", "case": "arithmetic", "elapsed_s": 1.2877111320049153, "text": "23", "reasoning": ""}
+{"event": "result", "case": "arithmetic", "content": "323", "reasoning": "", "finish_reason": "stop", "done": true, "correct": true, "usage": {"prompt_tokens": 28, "total_tokens": 32, "completion_tokens": 4, "prompt_tokens_details": {"cached_tokens": 0, "created_cache_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": 0}}, "elapsed_s": 1.2878411290002987, "ttft_s": 1.0401318440053728, "e2e_tokens_per_second": 3.1059731747385997, "decode_tokens_per_second": 12.110971133203396}
+{"event": "start", "case": "count_1_50", "payload": {"model": "qwen38-w4-experimental", "messages": [{"role": "user", "content": "Return the integers 1 through 50 in order, comma-separated. No other text."}], "temperature": 0, "seed": 1024, "max_tokens": 192, "chat_template_kwargs": {"enable_thinking": false}, "stream": true, "stream_options": {"include_usage": true}}}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 1.0177469920017757, "text": "1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 1.1978684249988873, "text": ", 2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 1.3787491010007216, "text": ", 3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 1.5646212930005277, "text": ", 4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 1.7481394420028664, "text": ", 5", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 1.9330754449983942, "text": ", 6", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 2.122308655998495, "text": ", 7", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 2.311202240001876, "text": ", 8", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 2.5028763790032826, "text": ", 9", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 2.6857792590017198, "text": ", 1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 2.868636831997719, "text": "0, ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 3.0502205840020906, "text": "11,", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 3.2326566970004933, "text": " 12", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 3.4182268450022093, "text": ", 1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 3.6027718350014766, "text": "3, ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 3.783934737999516, "text": "14,", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 3.9625043720006943, "text": " 15", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 4.14844498399907, "text": ", 1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 4.335107409002376, "text": "6, ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 4.518661014997633, "text": "17,", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 4.7006253200015635, "text": " 18", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 4.883619282998552, "text": ", 1", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 5.072888511997007, "text": "9, ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 5.254430073000549, "text": "20,", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 5.442962020999403, "text": " 21", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 5.62559441600024, "text": ", 2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 5.814758073996927, "text": "2, ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 6.001264983002329, "text": "23,", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 6.183400253998116, "text": " 24", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 6.372188337998523, "text": ", 2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 6.561089046001143, "text": "5, ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 6.746658303003642, "text": "26,", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 6.935978098001215, "text": " 27", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 7.134388348997163, "text": ", 2", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 7.321250271997997, "text": "8, ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 7.504470826002944, "text": "29,", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 7.696509927998704, "text": " 30", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 7.8840890349965775, "text": ", 3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 8.072621172999789, "text": "1, ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 8.260926989998552, "text": "32,", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 8.453655734003405, "text": " 33", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 8.641198201003135, "text": ", 3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 8.829982297000242, "text": "4, ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 9.01670946500235, "text": "35,", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 9.213426447997335, "text": " 36", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 9.399586006999016, "text": ", 3", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 9.596961921997718, "text": "7, ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 9.78800089500146, "text": "38,", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 9.981718146998901, "text": " 39", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 10.171548421996704, "text": ", 4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 10.356137003996992, "text": "0, ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 10.539839493998443, "text": "41,", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 10.73174519299937, "text": " 42", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 10.913096493000921, "text": ", 4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 11.10176428900013, "text": "3, ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 11.29751308199775, "text": "44,", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 11.490008893000777, "text": " 45", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 11.674340156998369, "text": ", 4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 11.868912133999402, "text": "6, ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 12.06298249700194, "text": "47,", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 12.257321069999307, "text": " 48", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 12.445483584997419, "text": ", 4", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 12.633896316001483, "text": "9, ", "reasoning": ""}
+{"event": "delta", "case": "count_1_50", "elapsed_s": 12.819196151001961, "text": "50", "reasoning": ""}
+{"event": "result", "case": "count_1_50", "content": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50", "reasoning": "", "finish_reason": "stop", "done": true, "correct": true, "usage": {"prompt_tokens": 31, "total_tokens": 221, "completion_tokens": 190, "prompt_tokens_details": {"cached_tokens": 0, "created_cache_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": 0}}, "elapsed_s": 12.819329935002315, "ttft_s": 1.0177469920017757, "e2e_tokens_per_second": 14.821367494506699, "decode_tokens_per_second": 16.014800803657867}
+{"event": "start", "case": "python_output", "payload": {"model": "qwen38-w4-experimental", "messages": [{"role": "user", "content": "What does this Python code print? Reply with only the output.\nprint([x*x for x in range(6) if x % 2 == 0])"}], "temperature": 0, "seed": 1024, "max_tokens": 48, "chat_template_kwargs": {"enable_thinking": false}, "stream": true, "stream_options": {"include_usage": true}}}
+{"event": "delta", "case": "python_output", "elapsed_s": 1.21507041699806, "text": "[", "reasoning": ""}
+{"event": "delta", "case": "python_output", "elapsed_s": 1.389917697000783, "text": "0, ", "reasoning": ""}
+{"event": "delta", "case": "python_output", "elapsed_s": 1.5728320880007232, "text": "4, ", "reasoning": ""}
+{"event": "delta", "case": "python_output", "elapsed_s": 1.7585093099987716, "text": "16]", "reasoning": ""}
+{"event": "result", "case": "python_output", "content": "[0, 4, 16]", "reasoning": "", "finish_reason": "stop", "done": true, "correct": true, "usage": {"prompt_tokens": 46, "total_tokens": 57, "completion_tokens": 11, "prompt_tokens_details": {"cached_tokens": 0, "created_cache_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": 0}}, "elapsed_s": 1.945073657996545, "ttft_s": 1.21507041699806, "e2e_tokens_per_second": 5.6553128231298775, "decode_tokens_per_second": 13.698569319119985}
+HTTP_SMOKE_PASS qwen38-w4-experimental

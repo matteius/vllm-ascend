@@ -342,3 +342,13 @@ W8 launcher 未修改。无 profiler 的实际 tok/s 仍低于 W8 的
 draft 接受率降低。没有用 counting 的 20.198 tok/s 代替真实 coding
 吞吐，也不提升 k=4 为更快默认。当前最佳长题配置仍是 k=2，正在重新
 profile QSA 修复后的剩余成本；W8 基线 19.073/18.091 仍未达到。
+
+新 trace 已完成，native QSA score 每 rank 从 112 calls 降至 8；
+W4 projections 仍是最大具名算子成本，占累计 task time 的 41–43%，
+不是 critical-path 占比。进一步复用 QSA position 商的候选通过
+80 CPU / 92 NPU tests，20 个局部 selection cases 均精确一致；
+三-token / 5,856 groups 的 callback 从 0.510 降到 0.397 ms。
+局部 gain 不能等同 tok/s。`mtp2-r8` 通过三个正确 smoke，继续使用
+MTP k=2 与有 runtime 证据的 FULL `[1,3]`。三题各生成 512 tokens，
+短中位数 13.213 tok/s，比旧 13.363 低 1.12%，没有短题提速证据。
+长题正在运行；目前已完成的长题中位数仍是 r7 的 13.683 tok/s。

@@ -739,6 +739,76 @@ home launcher SHA256 仍为
 max=8 steps。其 trace 尚未完成；不能把旧 profile 的瓶颈比例当成
 QSA score 修复后的实测，也不能把带 profiler 的请求算作速度基准。
 
+## QSA score 修复后的新 trace：replay-profile-r5
+
+保留 compact vendor、MTP k=2、FULL `[1,3]` 和两个 W4-only QSA
+dispatch 修复。三个真实 smoke 正确结束，冷前缀 warmup 完成后采集
+delay=4 / max_iterations=8 的 worker trace；128-token profile 请求
+完整结束，cached_tokens=23168。其 12.538 tok/s 含 profiler 扰动，
+不能替代无 profiler 的三题中位数。冷 warmup TTFT=357.803 秒。
+四个 rank 均导出成功，每 rank 1152 次 W4 projection，符合
+8 × 48 × 3；host 原始目录为 `replay-profile-r5`，本地 CSV 副本
+为 `/tmp/qwen38-w4-full-replay-r5`，可审计摘要见 [`replay-r5/`](replay-r5/)。
+
+| rank | task span ms | task union ms | W4 projection 总和 ms | W4 占累计 task time |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 1596.860 | 1048.758 | 432.687 | 41.18% |
+| 1 | 1593.259 | 1072.832 | 451.840 | 42.00% |
+| 2 | 1594.879 | 1092.102 | 473.386 | 43.03% |
+| 3 | 1598.390 | 1060.511 | 442.861 | 41.50% |
+
+原 native `QsaIndexerScoreV310` 从 r4 每 rank 112 calls 降至 8，
+累计 22.504–24.431 ms，剩余 shape 为 `[3,4,128]` query 搭配
+三请求页表；不能直接套用单请求 GEMM。NZ MatMul 累计约 189–190 ms。
+INT64 FloorDiv 仍有 361–363 calls、17.554–23.059 ms，192 次 AiCPU
+Cast 为 26.108–32.765 ms。上述时间可能重叠，不是可直接相加的提速。
+
+rank0 的八个最长 `aten::copy_` 为 99.378–113.128 ms；各自内部
+同时有 76.636–87.286 ms 的 device-task 区间并集。这些 host 等待
+不等价于纯 memcpy 成本。其父算子是 `aten::to/_to_copy`，紧邻
+`argmax` 后的 host-to-device copy。源码中的通用 greedy rejection
+path 有未 pin 的 draft-count H2D、动态 boolean indexing 和
+`if torch.any(...)`；k=1 的专用路径不经过该函数。它是下一步的
+设备端固定形状 sampling 诊断线索，尚未修改或证明为全部等待的来源。
+不能将 sampled host self time 与 device time 再次相加。
+
+## 第十一个候选：复用 QSA causal position 商
+
+selection 原 GEMM 分支重复计算三次 `(position + 1) // ratio`；
+native 分支也算两次。新 helper 只做一次 INT64 floor division，
+共同产生 visible groups、tail start 和 tail count。保留负 padding、
+大整数、clamp 与稳定 ties 的语义，不改成 INT32，不新增同步或环境变量。
+
+80 个 CPU tests 通过（3.80 秒），新增 17 项覆盖非连续输入、空 batch、
+负位置、ratio=3/4 和超过 INT32 的位置。92 个 NPU QSA tests 通过
+（31.74 秒），包括新增八项整数语义回归及原有动态 replay 检查。
+新的 `benchmark_qsa_geometry_310` 比较两个源码 snapshot、记录 SHA256，
+20 个 capacity/token 组合的四个 selection fields 全部逐元素精确一致。
+
+| capacity groups | query tokens | 原 selection ms | 复用后 ms | 变化 |
+| --- | ---: | ---: | ---: | ---: |
+| 512 | 3 | 0.413127 | 0.366174 | -11.37% |
+| 2048 | 3 | 0.513780 | 0.399147 | -22.31% |
+| 5856 | 3 | 0.509781 | 0.396926 | -22.14% |
+| 8192 | 3 | 0.517764 | 0.402167 | -22.33% |
+
+每个 snapshot 为 30 iterations × 5 trials，reference 先于 candidate，
+不是随机交错实验；全部 20 个局部中位数降低 6.14–26.77%，但这仅是
+breakable graph 间的 eager callback，不是整模型加速比例。采集结束、
+server 空闲且准确 PID tree 完全退出后才运行 NPU tests 和 timings。
+温度监督保留，W8 launcher SHA256 仍为
+`ae81d75eec7516fc6f455a3a071e52410ba6c477c34e0114df647f4c125c77df`。
+
+完整模型 `mtp2-r8` 保留同一 compact binary、MTP k=2 和 FULL
+`[1,3]`；三个真实 smoke 正确结束，runtime 三-token FULL 与 MTP
+计数递增均有证据。短三题全部完成 512 tokens，为
+14.919 / 13.183 / 13.213 tok/s，中位数 **13.213**，比 r7 的
+13.363 低 1.12%。drafted/accepted=382/321、432/297、430/298；
+只有第一题的输出 SHA 与 r7 相同，acceptance 仍变化；短题没有形成
+提速证据。长题正在运行，已完成的长题中位数仍为 r7 的
+13.683。尚未达到 W8 的 19.073 / 18.091，不把局部 selection 降时
+当作已实现的 generation speed 提升。
+
 ## 复现与交接
 
 简短 runbook（仅已授权的隔离 host 环境，不替换 W8）：

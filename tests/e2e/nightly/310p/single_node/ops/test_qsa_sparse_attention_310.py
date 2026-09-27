@@ -13,6 +13,7 @@ from vllm_ascend.models.qwen4_exp.ops.qsa_index_cache_310 import (
 )
 from vllm_ascend.models.qwen4_exp.ops.qsa_indexer import (
     QSAGroupSelection,
+    _qsa_position_geometry,
     _repair_native_group_indices,
     _stable_topk_indices,
     qsa_indexer_score_310_reference,
@@ -23,6 +24,29 @@ from vllm_ascend.models.qwen4_exp.ops.qsa_sparse_attention_310 import (
     qsa_sparse_attention_310_reference,
 )
 from vllm_ascend.utils import enable_custom_op
+
+
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("ratio", [3, 4])
+@pytest.mark.parametrize("capacity", [512, 5856])
+def test_qsa_position_geometry_preserves_int64_and_floor_on_npu(dtype, ratio, capacity):
+    if not torch_npu.npu.is_available() or "310" not in torch_npu.npu.get_device_name(0):
+        pytest.skip("requires an Ascend 310P NPU")
+    torch_npu.npu.set_compile_mode(jit_compile=False)
+    values = [-2, -1, 0, ratio - 1, ratio, 127, 128, 23423, 131071, 2**31 - 2]
+    if dtype == torch.int64:
+        values.append(2**40)
+    storage = torch.tensor([[p, 0] for p in values], dtype=dtype).npu()
+    positions = storage[:, 0]
+    groups, starts, counts = _qsa_position_geometry(positions, ratio, capacity)
+    expected_starts = [(p + 1) // ratio * ratio for p in values]
+    expected = (
+        [min((p + 1) // ratio, capacity) for p in values],
+        expected_starts,
+        [p + 1 - start for p, start in zip(values, expected_starts)],
+    )
+    for actual, reference in zip((groups, starts, counts), expected):
+        torch.testing.assert_close(actual.cpu(), torch.tensor(reference, dtype=torch.int64), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(

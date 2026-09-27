@@ -113,6 +113,21 @@ def _use_qsa_matmul_score(
     )
 
 
+def _qsa_position_geometry(
+    positions: torch.Tensor, compress_ratio: int, capacity: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute visible groups and the causal tail with one integer division.
+
+    Keep INT64 and floor semantics, including padded negative positions. On
+    310P these small integer divisions can run on AiCPU; recomputing the same
+    quotient for score masking, group counts and tail starts adds launches.
+    """
+    next_positions = positions.to(torch.long) + 1
+    complete_groups = torch.div(next_positions, compress_ratio, rounding_mode="floor")
+    tail_starts = complete_groups * compress_ratio
+    return complete_groups.clamp_max(capacity), tail_starts, next_positions - tail_starts
+
+
 def compress_keys(
     raw_keys: torch.Tensor,
     compress_ratio: int,
@@ -377,9 +392,10 @@ def qsa_indexer_select_groups_310(
 
     groups_per_block = compressed_key_cache.shape[1] - _QSA_INDEX_CACHE_SCRATCH_ROWS
     capacity = block_table.shape[1] * groups_per_block
-    if _use_qsa_matmul_score(
+    use_matmul_score = _use_qsa_matmul_score(
         query.shape[0], capacity, block_table.shape[0], query_start_loc.numel(), max_matmul_decode_tokens
-    ):
+    )
+    if use_matmul_score:
         # Reuse the paged-key GEMM for long prefills and wide single-request
         # decode. At 7K visible groups and two decode queries on 310P, it
         # scores about four times faster than the native per-group kernel.
@@ -399,9 +415,6 @@ def qsa_indexer_select_groups_310(
                 stop = min(start + tile_tokens, query.shape[0])
                 tile_scores = torch.matmul(query_fp32[start:stop], keys_transposed).relu_().sum(dim=1)
                 scores[start:stop].copy_(tile_scores)
-        visible_groups = ((positions.to(torch.long) + 1) // compress_ratio).clamp_max(capacity)
-        group_ids = torch.arange(capacity, device=query.device)
-        scores.masked_fill_(group_ids.unsqueeze(0) >= visible_groups.unsqueeze(1), -torch.inf)
     else:
         scores = op(
             query.contiguous(),
@@ -413,12 +426,12 @@ def qsa_indexer_select_groups_310(
         )
     block_topk = token_topk // compress_ratio
     selected_width = min(block_topk, scores.shape[1])
-    positions_long = positions.to(torch.long)
-    visible_groups = torch.div(positions_long + 1, compress_ratio, rounding_mode="floor").clamp_max(scores.shape[1])
+    visible_groups, tail_starts, tail_counts = _qsa_position_geometry(positions, compress_ratio, scores.shape[1])
+    if use_matmul_score:
+        group_ids = torch.arange(capacity, device=query.device)
+        scores.masked_fill_(group_ids.unsqueeze(0) >= visible_groups.unsqueeze(1), -torch.inf)
     selected = _repair_native_group_indices(_stable_topk_indices(scores, selected_width), visible_groups)
     group_counts = visible_groups.clamp_max(selected_width)
-    tail_starts = torch.div(positions_long + 1, compress_ratio, rounding_mode="floor") * compress_ratio
-    tail_counts = positions_long + 1 - tail_starts
     return QSAGroupSelection(selected, group_counts, tail_starts, tail_counts)
 
 
