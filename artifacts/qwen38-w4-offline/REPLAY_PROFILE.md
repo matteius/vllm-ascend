@@ -195,8 +195,12 @@ coding 为 12.377 tok/s，低于 k=2 同题的 13.482；不能用 counting 替�
 drafted/accepted=548/375、680/344、660/346，acceptance 分别为
 68.43% / 50.59% / 52.42%。更长 verification 加上更低接受率抵消了
 每步生成更多 tokens 的收益；不推荐把 k=4 当成 coding 提速配置。
-约 23.4k 的 k=4 长 benchmark 已开始，独立记录稳定性与长请求速度，
-不改写这个短请求回归结论。
+约 23.4k 的 k=4 长 benchmark 也完成：**9.838 / 7.914 / 6.653 tok/s**，
+中位数 **7.914 tok/s**，低于 k=1 的 11.052。三题均完成 512 tokens，
+cached_tokens=23168，drafted/accepted=492/389、608/359、720/335。
+acceptance=79.07% / 59.05% / 46.53%。冷 warmup TTFT=371.591 s。
+本轮 CPU 编译和后续 NPU tests 都在最后一个请求完成后才启动。
+长请求也不支持将 k=4 作为 coding 提速配置。
 
 | 已完成短 coding sweep | 中位 tok/s | FULL verification tokens | capture 报告 GiB |
 | --- | ---: | ---: | ---: |
@@ -208,6 +212,60 @@ drafted/accepted=548/375、680/344、660/346，acceptance 分别为
 W4 k=1 与更大 k 同时改变了大 batch kernel 分支；不是单独改变 k 的
 纯 causal A/B。k=2/k=4 使用同一 binary，prompt/sampling/长度协议相同。
 小样本不能说明 k=2 的 1.20% 中位数优势显著。当前目标仍未达成。
+
+## 第五个候选：Qwen-only resident-L1 decoded tile
+
+独立 vendor `ops-l1-r1` 把 tiled packed-W4 的 FP16 tile 通过 MTE3 从 UB
+直接搬到 L1，移除该 tile 的 GM 写入及随后的 GM→L1 读取。每个 AI core
+保留最大 `[32,2560]` FP16 B tile（163,840 bytes），旁边为两个
+`[128,128]` FP16 activation stages（共 65,536 bytes）。总 L1 上限
+229,376 bytes；L0 double buffering、升序 K=128 的 FP32 accumulation 和
+FP16 output 保持不变。跨 MTE3/MTE1/M/V 的事件显式同步，所有本地
+tile 在每次调用/route/replay 都重新生成，绝不缓存跨请求的 decoded experts。
+
+只改 Qwen kernel 内部的 tiled 分支，canonical reference 和共享 W8/GLM
+CATLASS helper 不变。此轮先保留旧 tiling 的 GM workspace 大小，以隔离
+执行路径；尚未将其减少。因此不把移除 memory traffic 写成 allocator
+或长窗口容量提升。没有新增常驻 expanded expert bank。
+
+新增 M=1/15/16/17/63/64/65/127/128、K=640/2560 的图重放，五轮都更换
+输入和权重，覆盖 L1 B stride、双 activation stages、M fractal 尾部。
+**140 NPU tests passed / 108.69 s**；37 CPU/build tests passed / 4.78 s。
+构建 `build-l1-r1.log` 的 group/routed binary SHA256 分别为：
+
+```text
+303e5bb7283bfd74daffb3297f412f5d71ace8b04f7be7b6bf088a38a9bc82b8
+df4872e5ace484548c6b94dd88bc8df2f6d39d480ad6fa23e6a481680536b0e0
+```
+
+真实 layer0、相同 `[1,2,3,5,8]` synthetic input 顺序、相同 local routes
+和 experts 的 replay 对比如下（无 TP collective，不是整模型速度）：
+
+| tokens | persistent-r3 ms | L1-r1 ms | latency 降低 |
+| --- | ---: | ---: | ---: |
+| 1 | 0.590 | 0.524 | 11.06% |
+| 2 | 0.421 | 0.390 | 7.29% |
+| 3 | 2.681 | 2.434 | 9.22% |
+| 5 | 2.136 | 1.956 | 8.44% |
+| 8 | 6.465 | 6.133 | 5.14% |
+
+allocator allocated/reserved 与相同形状的 persistent-r3 一致。
+证据 `layer-l1-r1.jsonl`。真实 k=2 + FULL `[1,3]`（日志 label `mtp2-r2`）
+通过三个正确性 smoke；counting 为 15.373 tok/s，Python 和 323 正确
+终止。runtime 表确认三-token `FULL`，MTP drafted/accepted 增长，
+model-load 仍为 19.3821 GiB/rank，capture 0.38 GiB。
+
+三题短 coding 为 **14.207 / 11.895 / 12.470 tok/s**，中位数
+**12.470 tok/s**，相对相同 k=2 的 persistent-r3（11.972）提高 **4.16%**。
+全部完成 512 tokens。drafted/accepted 为 376/323、446/289、426/299；
+接受率 85.90% / 64.80% / 70.19%。首题输出 SHA 与旧 k=2 相同，后两题
+不同；接受数量略有变化，不能把所有增益都解释为 kernel 的纯因果作用。
+第一题 decode 从 37.902 降到 35.969 s，第二题从 45.388 降到 42.958 s，
+第三题从 42.682 降到 40.978 s。三题均改善，但小样本不是统计显著性证明。
+
+证据为 `http-routed-mtp-smoke-mtp2-r2.jsonl`、`w4-mtp2-r2-short.jsonl`。
+约 23.4k 的长 benchmark 在短测试完成后自动开始；仍在执行，不以单层
+或 counting 数据宣称达到生产 W8 的 19.073/18.091 tok/s。
 
 ## 复现与交接
 
@@ -231,6 +289,11 @@ bash qwen38-w4-server-routed-check-r1.sh mtp2-r1 \
   /srv/ai/src/qwen38-w4-operator-build-r1/ops-persistent-r3/vendors/qwen_w4_probe_transformer 2
 bash qwen38-w4-mtp-short-benchmark.sh mtp2-r1
 # k=4 对应最后一个参数 4，capture sizes 自动配为 [1,5]。
+
+# L1 候选，同样先通过真实 smoke，再测三条 512-token coding：
+bash qwen38-w4-server-routed-check-r1.sh mtp2-r2 \
+  /srv/ai/src/qwen38-w4-operator-build-r1/ops-l1-r1/vendors/qwen_w4_probe_transformer 2
+bash qwen38-w4-mtp-short-benchmark.sh mtp2-r2
 ```
 
 服务配置见本页开头和 tutorial，仍为 :8002 / TP4 / EP /
@@ -242,6 +305,9 @@ secret scan 等均通过；全局 `check-symbolic-meta` 仍因未改动的
 `csrc/torch_binding_meta.cpp:655`（已有 W2 meta 的 `empty_symint({`）失败，
 已与 HEAD 对照，不把这个结果写成全库 lint 全绿。三个 C++ 文件另行
 手动 clang-format（仓库 hook 本身排除 csrc）。未跑全库多型号硬件测试。
+L1 候选的 raw JSONL request ID 曾被 typos 把随机 hex 子串当成拼写错误；
+仅为 `"request_id": "chatcmpl-<hex>"` 增加精确 ignore regex，原始证据
+保持逐字节不变，不豁免其它 benchmark 文本或源代码。
 
 另外在临时快照 `/tmp/qwen-w4-replay-format.lZNQ6h` 执行了完整
 `bash format.sh ci`，日志 `/tmp/qwen-w4-replay-format-ci.log`；失败项还包括
@@ -272,7 +338,9 @@ imports 等。自动格式修改只留在临时快照，没有污染任务 workt
 persistent 20-route 候选已完成算子、真实权重单层和整模型 smoke，
 短/长 coding benchmark 均完成；80-route 候选也已完成 MTP k=2 的真实
 smoke、三-token FULL replay 和短 coding；k=4 的真实 smoke 与五-token
-FULL replay、短 coding 也完成，长 coding 仍在执行。
+FULL replay、短/长 coding 也完成。
+L1 候选通过 140 项 NPU tests、真实 layer 和三个整模型 smoke，
+k=2 三-token FULL replay 与短 coding 完成；其长 benchmark 仍在执行。
 本轮只隔离 batch-one decode，不声称 W4 已验证 128k×16、双 160k 或
 完整任务质量。flashcomm1 和多模态未在本轮验证；容量和量化质量仍需后续
 独立评测，不能伪造 accuracy YAML 分数。

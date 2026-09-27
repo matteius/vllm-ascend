@@ -76,6 +76,31 @@ def test_tiled_k_batch_selection_matches_reference(inputs):
     torch.testing.assert_close(actual, reference(*values), rtol=0.005, atol=0.003)
 
 
+@pytest.mark.parametrize("tokens", [1, 15, 16, 17, 63, 64, 65, 127, 128])
+@pytest.mark.parametrize("inputs", [640, 2560])
+def test_tiled_graph_replay_fractal_boundaries(tokens, inputs):
+    # Exercise the resident-L1 B stride, both activation stages, and the
+    # partial last M fractal. Change weights as well as A on every replay:
+    # no previous tile/route/graph invocation may survive in local memory.
+    values = make_inputs(tokens, 128, inputs)
+    device_values = [value.npu() for value in layout_values(values, True)]
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        for _ in range(3):
+            kernel(*device_values, tiled=True)
+    torch.npu.current_stream().wait_stream(stream)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, stream=stream):
+        output = kernel(*device_values, tiled=True)
+    for phase in range(5):
+        values = make_inputs(tokens, 128, inputs, seed=3110 + phase)
+        for destination, source in zip(device_values, layout_values(values, True)):
+            destination.copy_(source)
+        graph.replay()
+        torch.testing.assert_close(output.cpu(), reference(*values), rtol=0.005, atol=0.003)
+
+
 @pytest.mark.parametrize("tiled", [False, True])
 def test_every_byte_and_offset_with_basis_inputs(tiled):
     # Each output is one dequantized weight, removing matmul cancellation as

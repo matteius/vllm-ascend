@@ -259,6 +259,12 @@ MTP k=2 的三个真实 smoke 与三-token FULL replay 通过；短 coding 中�
 为 **11.972 tok/s**，并非 counting 的 14.600 tok/s。
 MTP k=4 的真实 smoke、五-token FULL replay 也通过，但短 coding 中位数
 回落至 **10.155 tok/s**（三题 12.377/9.877/10.155）；不能用 counting 的
-16.179 tok/s 宣称 coding 提速。k=4 长请求仍在验证，不自动升级生产配置。
+16.179 tok/s 宣称 coding 提速。k=4 的约 23.4k 热前缀三题也完成，
+中位数 7.914 tok/s，低于 k=1 的 11.052；不自动升级生产配置。
+最新 Qwen-only L1 tile 候选通过 **140 项 NPU tests** 和三个真实 smoke，
+MTP k=2 + 三-token FULL replay 确认有效。短 coding 中位数提高到
+**12.470 tok/s**（三题 14.207/11.895/12.470），比旧 k=2 高 4.16%；
+约 23.4k 长测试仍在执行。没有常驻 expanded expert bank，W8/GLM helper
+未修改，model-load 仍为 19.3821 GiB/rank；没有据此宣称新的 context 容量。
 各候选、原始样本、kernel SHA 和边界说明见
 `artifacts/qwen38-w4-offline/REPLAY_PROFILE.md`。

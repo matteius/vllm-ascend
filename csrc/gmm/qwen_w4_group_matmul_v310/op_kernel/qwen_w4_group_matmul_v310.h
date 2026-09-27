@@ -17,10 +17,10 @@
  * backend losslessly re-encodes nibbles during loading into Cube NZ order,
  * avoiding runtime weight/metadata gathers. The canonical backend instead
  * gathers each decoded 16-output-channel plane into NZ. Each AI core decodes
- * only its current 32-output-channel tile into a per-output-tile workspace.
- * CATLASS therefore consumes an already-NZ B operand:
- * temporary scratch totals [N,K] FP16 for one invocation, but no persistent
- * dequantized expert bank or separate ND-to-NZ conversion is retained.
+ * only its current 32-output-channel tile. Tiled weights move directly from
+ * UB to L1, with two activation stages beside the resident tile; canonical
+ * weights retain the per-output-tile GM workspace and shared CATLASS block.
+ * No persistent dequantized expert bank or separate ND-to-NZ pass is retained.
  */
 
 #ifndef QWEN_W4_GROUP_MATMUL_V310_H
@@ -57,6 +57,10 @@ constexpr uint32_t QW4_TILED_K_BATCH = 512;
 constexpr uint32_t QW4_MAX_TILED_K_BATCH = 640;
 constexpr uint32_t QW4_WIDE_INPUT_DIM = 2560;
 constexpr uint32_t QW4_WIDE_TILED_K_BATCH = QW4_WIDE_INPUT_DIM / 2;
+constexpr uint32_t QW4_L1_WEIGHT_BYTES = QW4_TILE_N * QW4_WIDE_INPUT_DIM * sizeof(half);
+constexpr uint32_t QW4_CUBE_M = 128;
+constexpr uint32_t QW4_CUBE_STAGES = 2;
+constexpr uint32_t QW4_L1_ACTIVATION_BYTES = QW4_CUBE_M * QW4_TILE_K * sizeof(half);
 // Per packed byte: uint8 input, FP16 input, int16 cast, two FP16 outputs.
 constexpr uint32_t QW4_TILED_BYTES_PER_PACKED = 9;
 constexpr uint32_t QW4_BUFFER_ALIGNMENT = 512;
@@ -98,6 +102,8 @@ class QwenW4GroupMatmulV310Cube {
       Catlass::Gemm::Tile::PackedTileCopyTla<ArchTag, half, layout::RowMajor, half, layout::zN, half, layout::RowMajor>;
   using BlockMmad =
       Gemm::Block::BlockMmadTla<DispatchPolicyTla, L1TileShapeTla, L0TileShapeTla, half, half, half, void, TileCopy>;
+  static_assert(QW4_L1_WEIGHT_BYTES + QW4_CUBE_STAGES * QW4_L1_ACTIVATION_BYTES <= ArchTag::L1_SIZE,
+                "Qwen W4 decoded tile and activation stages must fit L1");
 
   __aicore__ inline QwenW4GroupMatmulV310Cube() {}
 
@@ -193,6 +199,16 @@ class QwenW4GroupMatmulV310Cube {
       const uint32_t nActual = MinU<uint32_t>(QW4_TILE_N, (uint32_t)N_ - n0);
 
       DequantTileToNz(n0, nActual);
+      if (tiled_) {
+        // Unified 310P cores can copy UB directly into L1. Keep the
+        // decoded tile on chip through the complete K reduction.
+        SetFlag<HardEvent::MTE3_MTE1>(EVENT_ID4);
+        WaitFlag<HardEvent::MTE3_MTE1>(EVENT_ID4);
+        MatmulFromL1(n0, nActual);
+        SetFlag<HardEvent::MTE1_MTE3>(EVENT_ID4);
+        WaitFlag<HardEvent::MTE1_MTE3>(EVENT_ID4);
+        continue;
+      }
       // The dequantizer writes this core's packed-NZ workspace through
       // MTE3, while BlockMmad consumes it from GM through MTE2.  A pipe
       // barrier does not order those engines on 310P.
@@ -244,6 +260,100 @@ class QwenW4GroupMatmulV310Cube {
   }
 
  private:
+  // Qwen-only resident-B block: the existing shared CATLASS block remains
+  // unchanged for W8, GLM and the canonical (non-tiled) W4 reference path.
+  // Double-buffer A/L0 and preserve the original ascending K=128 reduction.
+  __aicore__ inline void MatmulFromL1(uint32_t n0, uint32_t nActual) {
+    auto aLayout = tla::MakeLayout<half, layout::RowMajor>((uint32_t)T_, (uint32_t)K_);
+    auto tensorA = tla::MakeTensor(xGm_, aLayout, Arch::PositionGM{});
+    using CopyA = typename TileCopy::template CopyGmToL1A<decltype(tensorA)>;
+    CopyA copyA;
+    typename TileCopy::CopyL1ToL0A copyL0A;
+    typename TileCopy::CopyL1ToL0B copyL0B;
+    typename BlockMmad::TileMmad tileMmad;
+    constexpr auto aL1Layout =
+        tla::MakeLayout<half, typename TileCopy::LayoutTagL1A>(tla::Int<QW4_CUBE_M>{}, tla::Int<QW4_TILE_K>{});
+    const uint32_t mActual = T_ == 1 ? QW4_FRACTAL_SIZE : (uint32_t)T_;
+    auto bL1Layout = tla::MakeLayout<half, typename TileCopy::LayoutTagL1B>((uint32_t)K_, nActual);
+    auto tensorL1B = tla::MakeTensor(resource.l1Buf.template GetBufferByByte<half>(0), bL1Layout, Arch::PositionL1{});
+    auto aL0Layout = tla::MakeLayout<half, typename TileCopy::LayoutTagL0A>(mActual, QW4_TILE_K);
+    auto bL0Layout = tla::MakeLayout<half, typename TileCopy::LayoutTagL0B>(QW4_TILE_K, nActual);
+    auto l0C = resource.l0CBuf.template GetBufferByByte<float>(0);
+    auto tensorL0C = tla::MakeTensor(l0C, tla::MakeLayoutL0C(mActual, nActual), Arch::PositionL0C{});
+    for (uint32_t stage = 0; stage < QW4_CUBE_STAGES; ++stage) {
+      SetFlag<HardEvent::MTE1_MTE2>(stage);
+      SetFlag<HardEvent::M_MTE1>(stage);
+    }
+    for (uint32_t k0 = 0; k0 < K_; k0 += QW4_TILE_K) {
+      const uint32_t stage = (k0 / QW4_TILE_K) % QW4_CUBE_STAGES;
+      auto l1A = resource.l1Buf.template GetBufferByByte<half>(QW4_L1_WEIGHT_BYTES + stage * QW4_L1_ACTIVATION_BYTES);
+      auto tensorL1A = tla::MakeTensor(l1A, aL1Layout, Arch::PositionL1{});
+      auto tileA = GetTile(tensorA, tla::MakeCoord((uint32_t)0, k0), tla::MakeShape((uint32_t)T_, QW4_TILE_K));
+      WaitFlag<HardEvent::MTE1_MTE2>(stage);
+      copyA(tensorL1A, tileA);
+      SetFlag<HardEvent::MTE2_MTE1>(stage);
+      auto l0A = resource.l0ABuf.template GetBufferByByte<half>(stage * QW4_L1_ACTIVATION_BYTES);
+      auto l0B = resource.l0BBuf.template GetBufferByByte<half>(stage * QW4_TILE_N * QW4_TILE_K * sizeof(half));
+      auto tensorL0A = tla::MakeTensor(l0A, aL0Layout, Arch::PositionL0A{});
+      auto tensorL0B = tla::MakeTensor(l0B, bL0Layout, Arch::PositionL0B{});
+      auto tileL1A = GetTile(tensorL1A, tla::MakeCoord((uint32_t)0, (uint32_t)0), tla::MakeShape(mActual, QW4_TILE_K));
+      auto tileL1B = GetTile(tensorL1B, tla::MakeCoord(k0, (uint32_t)0), tla::MakeShape(QW4_TILE_K, nActual));
+      WaitFlag<HardEvent::M_MTE1>(stage);
+      WaitFlag<HardEvent::MTE2_MTE1>(stage);
+      copyL0A(tensorL0A, tileL1A);
+      copyL0B(tensorL0B, tileL1B);
+      SetFlag<HardEvent::MTE1_MTE2>(stage);
+      SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
+      WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
+      const uint8_t unitFlag = k0 + QW4_TILE_K == K_ ? 0b11 : 0b10;
+      tileMmad(tensorL0C, tensorL0A, tensorL0B, mActual, nActual, QW4_TILE_K, k0 == 0, unitFlag);
+      SetFlag<HardEvent::M_MTE1>(stage);
+    }
+    for (uint32_t stage = 0; stage < QW4_CUBE_STAGES; ++stage) {
+      WaitFlag<HardEvent::M_MTE1>(stage);
+      WaitFlag<HardEvent::MTE1_MTE2>(stage);
+    }
+    StoreAccumulator(l0C, n0, nActual);
+  }
+
+  __aicore__ inline void StoreAccumulator(LocalTensor<float> accumulator, uint32_t n0, uint32_t nActual) {
+    const uint32_t mAligned = AlignUpU<uint32_t>((uint32_t)T_, QW4_FRACTAL_SIZE);
+    const uint32_t nAligned = AlignUpU<uint32_t>(nActual, QW4_FRACTAL_SIZE);
+    const uint32_t elements = mAligned * nAligned;
+    auto result = resource.ubBuf.template GetBufferByByte<float>(0);
+    auto output = resource.ubBuf.template GetBufferByByte<half>(elements * sizeof(float));
+    SetFlag<HardEvent::M_V>(EVENT_ID7);
+    WaitFlag<HardEvent::M_V>(EVENT_ID7);
+    DataCopyParams fromCube;
+    fromCube.blockCount = nAligned / QW4_FRACTAL_SIZE;
+    fromCube.blockLen = mAligned / QW4_FRACTAL_SIZE;
+    fromCube.srcStride = 0;
+    fromCube.dstStride = 0;
+    DataCopyEnhancedParams enhanced;
+    enhanced.blockMode = BlockMode::BLOCK_MODE_MATRIX;
+    DataCopy(result, accumulator, fromCube, enhanced);
+    Cast(output, result, RoundMode::CAST_NONE, elements);
+    SetFlag<HardEvent::V_MTE3>(EVENT_ID7);
+    WaitFlag<HardEvent::V_MTE3>(EVENT_ID7);
+    for (uint32_t nf = 0; nf < nAligned / QW4_FRACTAL_SIZE; ++nf) {
+      for (uint32_t mf = 0; mf < mAligned / QW4_FRACTAL_SIZE; ++mf) {
+        const uint32_t row = mf * QW4_FRACTAL_SIZE;
+        const uint32_t ubOffset = (nf * (mAligned / QW4_FRACTAL_SIZE) + mf) * QW4_FRACTAL_SIZE * QW4_FRACTAL_SIZE;
+        const int64_t gmOffset = static_cast<int64_t>(row) * N_ + n0 + nf * QW4_FRACTAL_SIZE;
+        DataCopyParams toGm;
+        toGm.blockCount = MinU<uint32_t>(QW4_FRACTAL_SIZE, (uint32_t)T_ - row);
+        toGm.blockLen = 1;
+        toGm.srcStride = 0;
+        toGm.dstStride = (N_ - QW4_FRACTAL_SIZE) * sizeof(half) / 32;
+        DataCopy(yGm_[gmOffset], output[ubOffset], toGm);
+      }
+    }
+    SetFlag<HardEvent::MTE3_V>(EVENT_ID7);
+    WaitFlag<HardEvent::MTE3_V>(EVENT_ID7);
+    SetFlag<HardEvent::V_M>(EVENT_ID7);
+    WaitFlag<HardEvent::V_M>(EVENT_ID7);
+  }
+
   __aicore__ inline void AllocBuffers() {
     uint32_t off = 0;
     scaleUB_ = resource.ubBuf.template GetBufferByByte<half>(off);
@@ -493,8 +603,9 @@ class QwenW4GroupMatmulV310Cube {
         SetFlag<HardEvent::V_MTE3>(EVENT_ID2);
         WaitFlag<HardEvent::V_MTE3>(EVENT_ID2);
         if (tiled_) {
-          DataCopy(wdqNzGm_[nzBase + k0 * QW4_FRACTAL_SIZE], signedHalfUB_, (int32_t)packedTileCount_);
-          DataCopy(wdqNzGm_[nzBase + nzColumnBlockStride + k0 * QW4_FRACTAL_SIZE], signedHalfUB_[packedTileCount_],
+          auto weightL1 = resource.l1Buf.template GetBufferByByte<half>(0);
+          DataCopy(weightL1[k0 * QW4_FRACTAL_SIZE], signedHalfUB_, (int32_t)packedTileCount_);
+          DataCopy(weightL1[nzColumnBlockStride + k0 * QW4_FRACTAL_SIZE], signedHalfUB_[packedTileCount_],
                    (int32_t)packedTileCount_);
         } else {
           DataCopy(wdqNzGm_[nzBase + k0 * QW4_FRACTAL_SIZE], nzTileUB_, (int32_t)decodedTileCount_);

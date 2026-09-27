@@ -66,17 +66,19 @@ smokes and three-token FULL replay; its short coding median is 11.972 tok/s
 (13.482/11.259/11.972), only 1.20% above k=1. Lower acceptance limits the gain.
 MTP k=4 also passes all three real smokes and five-token FULL replay, but its
 completed short median regresses to 10.155 tok/s (12.377/9.877/10.155), versus
-the misleadingly faster 16.179 tok/s counting smoke. Its long-context gate is
-running; do not promote k=4 as a coding acceleration. Graph capture reports
+the misleadingly faster 16.179 tok/s counting smoke. Its long-context run also
+completed, at 9.838/7.914/6.653 tok/s (median 7.914), below k=1's 11.052.
+All three completed 512 tokens, with 23,168 cached tokens; acceptance was
+79.07%/59.05%/46.53%. Do not promote k=4 as a coding acceleration. Graph capture reports
 0.38 GiB for k=2 and 0.50 GiB for k=4, with model-load still 19.3821 GiB/rank.
 Additional projection-output scratch is bounded at 31.25 MiB
 for 80 routes and N=2560, without a resident expanded expert bank.
 Independent next trace lead: reuse Q/K/index-query RoPE tables, preserving
 FP32/FP64 policy and MRoPE coordinates instead of narrowing position integers.
 
-The larger kernel hypothesis to test next is removing the dequantized tile's
-UB→GM→L1 round trip. `DequantTileToNz` currently writes a full FP16 N=32 tile to
-per-route global scratch before CATLASS reloads it. The installed CANN 9.1
+The next kernel candidate removes the dequantized tile's UB→GM→L1 round trip.
+The previous `DequantTileToNz` writes a full FP16 N=32 tile to per-route global
+scratch before CATLASS reloads it. The installed CANN 9.1
 `dav_m200/kernel_operator_data_copy_impl.h` supplies `DataCopyUB2L1Impl` through
 `copy_ubuf_to_cbuf` outside the vector-only build. This is an API lead, not
 evidence that the proposed kernel works or is faster. A private Qwen-only
@@ -84,6 +86,30 @@ prototype must bound L1 alongside the activation tiles, preserve exact NZ
 layout and MTE3/MTE1/M lifetimes, and pass the full numerical/replay suite
 before a full-model MTP/graph benchmark. Do not modify the shared W8/GLM block
 kernel speculatively or count theoretical traffic savings as a tok/s result.
+
+The Qwen-only `ops-l1-r1` prototype now passes 140 numerical/replay NPU tests
+(108.69 s), including 18 new M-fractal/activation-stage boundary cases, and
+37 CPU/build tests (4.78 s). Matched real-layer graph replay at 1/2/3/5/8
+tokens is 0.524/0.390/2.434/1.956/6.133 ms, 5.14–11.06% below persistent-r3.
+Full-model k=2 + FULL `[1,3]` under label `mtp2-r2` passes all three real
+smokes and shows three-token FULL runtime replay with rising MTP counters.
+Short coding is 14.207/11.895/12.470 tok/s, median **12.470**, up **4.16%**
+from the previous k=2 median of 11.972. All requests completed 512 tokens;
+drafted/accepted=376/323,446/289,426/299. Only the first output hash matches
+the older run, and acceptance also varies slightly, so this is not a pure
+kernel causal estimate. The 23.4k-context run is active. This still misses
+the measured W8 baseline; counting's 15.373 tok/s is not coding throughput.
+Canonical W4 and the shared W8/GLM helper remain unchanged. The existing GM
+workspace allocation is deliberately retained for this first execution-path
+A/B, so allocator memory/capacity savings are not yet claimed.
+
+Another bounded follow-up is peer-output initialization: each persistent N
+tile currently calls `ZeroOutputTile` separately for every remote expert row,
+with a vector fill, GM store and pipeline drains each time. Since one block
+owns all route rows for that N tile, a single strided zero-fill of those rows
+before local expert work could replace the repeated clears. This must retain
+local→peer graph-replay correctness and order zero stores before local output
+stores. It is a source-level hypothesis only, not implemented or benchmarked.
 
 ## Acceptance criteria
 
