@@ -166,6 +166,7 @@ from .weight_mapping import (
 
 _BATCHED_QSA_MIN_PREFILL_TOKENS = 16
 _BATCHED_QSA_MAX_DECODE_TOKENS = 2
+_BATCHED_QSA_W4_MAX_DECODE_TOKENS = 8
 _BATCHED_QSA_MIN_DECODE_GROUPS = 256
 
 # ``VllmConfig`` is only needed for typing; keep import light.
@@ -1088,6 +1089,12 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
         self.params_dtype = dtype_policy.qsa_main_dtype
         expert_quant = w4_config(config)
         self.reuse_query_rope = expert_quant is not None and expert_quant["backend"] == "cube_310_routed"
+        # Routed W4 verifies several MTP tokens in one replay. Preserve the
+        # production W8 bound, but cover W4's three/five-token verification
+        # batches and its eight-token (80-route) graph limit.
+        self._batched_qsa_max_decode_tokens = (
+            _BATCHED_QSA_W4_MAX_DECODE_TOKENS if self.reuse_query_rope else _BATCHED_QSA_MAX_DECODE_TOKENS
+        )
         hidden = int(config.hidden_size)
         self.head_dim = int(getattr(config, "head_dim", 256))
         self.tp_rank, self.tp_size = expert_sharding
@@ -1151,12 +1158,20 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
             "_qsa_decode_group_list",
             torch.arange(
                 1,
-                _BATCHED_QSA_MAX_DECODE_TOKENS * self.num_kv_heads + 1,
+                self._batched_qsa_max_decode_tokens * self.num_kv_heads + 1,
                 dtype=torch.int64,
                 device=device,
             )
             * heads_per_kv_head,
             persistent=False,
+        )
+
+    def _can_use_batched_qsa_decode(self, metadata: object, num_tokens: int, selected_groups: int) -> bool:
+        return (
+            metadata.num_decodes > 0
+            and metadata.num_prefills == 0
+            and num_tokens <= self._batched_qsa_max_decode_tokens
+            and selected_groups >= _BATCHED_QSA_MIN_DECODE_GROUPS
         )
 
     def _reduce_output(self, output: torch.Tensor) -> torch.Tensor:
@@ -1576,12 +1591,7 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
             use_batched_prefill = (
                 metadata.num_prefills > 0 and metadata.num_decodes == 0 and seq_len >= _BATCHED_QSA_MIN_PREFILL_TOKENS
             )
-            use_batched_decode = (
-                metadata.num_decodes > 0
-                and metadata.num_prefills == 0
-                and seq_len <= _BATCHED_QSA_MAX_DECODE_TOKENS
-                and selection.group_indices.shape[1] >= _BATCHED_QSA_MIN_DECODE_GROUPS
-            )
+            use_batched_decode = self._can_use_batched_qsa_decode(metadata, seq_len, selection.group_indices.shape[1])
             if metadata.block_tables.shape[0] == 1 and (use_batched_prefill or use_batched_decode):
                 sparse_attention = qsa_batched_prefill_310
             sparse_kwargs = {}

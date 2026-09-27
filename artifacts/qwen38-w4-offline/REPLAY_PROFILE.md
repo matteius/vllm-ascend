@@ -462,6 +462,64 @@ drafted/accepted 为 380/321、448/289、438/293，第三题 acceptance 从
 `QWEN_W4_COMPACT_MTP2_SEQUENCE_COMPLETE`；服务仍留在 :8002，未自动
 替换 W8 launcher。下一独立优先级为上面的 QSA decode dispatch。
 
+## 第九个候选：W4 MTP 的 grouped QSA dispatch
+
+仅对显式 `cube_310_routed`，将 batched decode 上限从 2 扩展到 8，
+预创建的 int64 group-list 同步覆盖 `8 * local_kv_heads`。W8、eager-W4、
+其它 Cube backend 仍为 2；prefill、混合批次、少于 256 个 selection groups
+和多请求的原 dispatch 限制不变。没有新增环境变量、host routing、cache
+复制或常驻 expert bank；使用现有 NZ gather + grouped matmul 实现。
+
+本地 **128 个 CPU tests 通过**（5.04 秒，仍排除两个已有 vLLM mock
+不兼容项），含 backend × TP1/2/4 的 group-list 所有权、非持久化、
+decode/prefill/selection-width 边界检查。新增 30 个 NPU replay cases，
+覆盖 T=1/2/3/5/8、Q/KV heads=6/1、12/1、24/2、256/512 groups；同一
+graph 逐次改变 Q/K/V、随机物理页表、selected groups/counts 和 tail，
+并先以 NaN 污染输出，与旧 native sparse attention 比较。
+
+首次测试进程没有对齐 serving 的 `jit_compile=False`，在 capture `Mul`
+时报 legacy aclop 不支持；保留 `qsa-mtp-r1-tests.log`。测试改为 serving
+已有的 ACLNN 模式后，完整 QSA 文件 **72 passed，49.45 秒**，保留
+2,207 条旧 CANN/Python deprecation warnings，不将其隐去。
+成功证据 `qsa-mtp-r2-tests.log`，未改变 serving 的编译模式。
+
+独立 graph benchmark 为 synthetic QSA-only、24,576-token cache、512
+selection groups，30 replays × 5 trials；不是整模型 tok/s：
+
+| query tokens | sparse ms（Q/KV=6/1） | grouped ms（Q/KV=6/1） |
+| --- | --- | --- |
+| 1 | 1.303978 | 0.193993 |
+| 2 | 1.687083 | 0.249664 |
+| 3 | 2.071416 | 0.296986 |
+| 5 | 3.061050 | 0.375953 |
+| 8 | 3.071496 | 0.411330 |
+
+12/1、24/2 也完成，共 15 个形状；最大绝对输出差 7.63e-6。
+原始记录 `qsa-mtp-graph-r1.jsonl`；工具
+`tools/qwen4exp/benchmark_qsa_mtp_graph_310.py`。三-token 局部延迟下降
+85.66%，不能将此百分比用于整模型。kernel 仍为 `ops-compact-r1`，
+真实模型 `mtp2-r6` 保持 MTP k=2 + FULL `[1,3]`；三个真实 smoke
+均正确完成，runtime 表确认三-token FULL replay。短 coding 为
+**15.167 / 12.555 / 13.601 tok/s**，中位数 **13.601**，比 12.926
+高 5.22%。drafted/accepted=378/322、456/283、422/302；输出 SHA
+均变化，不能将全部差异归于 QSA。weights 19.38 GiB/rank、graph
+0.38 GiB、KV 12.91 GiB，W8 launcher 未改。23.4k benchmark 已完成：
+**12.856 / 10.933 / 10.919 tok/s**，中位数 **10.933**（比 9.777 高
+11.82%）。三题均生成 512 tokens、复用 23,168 prefix tokens；
+drafted/accepted=364/331、428/299、426/298，输出 SHA 均变化。
+cold TTFT **357.285 秒**，三个热 TTFT 4.566/4.716/5.270 秒。
+原始证据 `w4-mtp2-r6-{short,long}.jsonl`、
+`http-routed-mtp-smoke-mtp2-r6.jsonl`；host server log 为
+`server-routed-mtp-mtp2-r6.log`。目标仍未达成：W8 为 19.073/18.091，
+此前 k=1 长上下文中位数 12.754 也仍高于本轮 k=2。
+
+下一独立诊断是 `replay-profile-r4` 的真实 k=2 长上下文 trace，保留
+当前 compact kernel、shared RoPE 和 grouped QSA。benchmark 全部
+完成、server idle 且 PID 身份核验后才停止旧隔离服务；只重启 :8002。
+先跑三个真实 smoke，再以相同 prefix warmup，随后延迟四步采八步，
+128-token profiled 请求必须完整结束。profiled tok/s 不作为性能基准；
+旧 r3 k=1 trace 的各类比例不能直接当成当前归因。
+
 ## 复现与交接
 
 简短 runbook（仅已授权的隔离 host 环境，不替换 W8）：
@@ -505,6 +563,11 @@ bash qwen38-w4-mtp-short-benchmark.sh mtp2-r4
 bash qwen38-w4-server-routed-check-r1.sh mtp2-r5 \
   /srv/ai/src/qwen38-w4-operator-build-r1/ops-compact-r1/vendors/qwen_w4_probe_transformer 2
 bash qwen38-w4-mtp-short-benchmark.sh mtp2-r5
+
+# same compact kernel, W4-only grouped QSA for MTP verification
+bash qwen38-w4-server-routed-check-r1.sh mtp2-r6 \
+  /srv/ai/src/qwen38-w4-operator-build-r1/ops-compact-r1/vendors/qwen_w4_probe_transformer 2
+bash qwen38-w4-mtp-short-benchmark.sh mtp2-r6
 ```
 
 服务配置见本页开头和 tutorial，仍为 :8002 / TP4 / EP /
@@ -562,6 +625,9 @@ k=2 三-token FULL replay 与短/长 coding 均完成。批量清零版本也完
 匹配 k=1 已完成 **12.787 / 12.754 tok/s**；compact-row 版本通过
 163 项 NPU tests、真实 partial-layer 和三个完整模型 smoke，短/23.4k coding
 中位数 **12.926 / 9.777 tok/s**，均已完成，不宣称 W8 速度达标。
+W4 grouped-QSA 候选通过 128 项 CPU、72 项 NPU tests 和三个真实
+smoke，三-token FULL replay 与六个 512-token coding 请求全部完成；
+短/长中位数 **13.601 / 10.933 tok/s**，仍未达到 W8。
 本轮只隔离 batch-one decode，不声称 W4 已验证 128k×16、双 160k 或
 完整任务质量。flashcomm1 和多模态未在本轮验证；容量和量化质量仍需后续
 独立评测，不能伪造 accuracy YAML 分数。

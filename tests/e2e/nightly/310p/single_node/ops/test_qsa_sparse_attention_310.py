@@ -103,6 +103,83 @@ def test_batched_prefill_matches_native_with_paged_cache_and_tail(
         torch.testing.assert_close(grouped.cpu(), expected.cpu(), rtol=1e-2, atol=2e-3)
 
 
+@pytest.mark.parametrize("num_tokens", [1, 2, 3, 5, 8])
+@pytest.mark.parametrize("query_heads,kv_heads", [(6, 1), (12, 1), (24, 2)])
+@pytest.mark.parametrize("num_groups", [256, 512])
+def test_grouped_mtp_graph_replay_refreshes_query_selection_and_paged_cache(
+    num_tokens, query_heads, kv_heads, num_groups
+):
+    if not torch_npu.npu.is_available() or "310" not in torch_npu.npu.get_device_name(0):
+        pytest.skip("requires an Ascend 310P NPU")
+    # Match serving's ACLNN mode; legacy aclop Mul cannot be captured.
+    torch.npu.set_device(0)
+    torch.npu.set_compile_mode(jit_compile=False)
+    enable_custom_op()
+    generator = torch.Generator().manual_seed(315)
+    device = "npu:0"
+    block_size, head_dim, cache_blocks = 128, 256, 192
+    cache_shape = (cache_blocks, kv_heads * head_dim // 16, block_size, 16)
+    query = torch.zeros((num_tokens, query_heads, head_dim), dtype=torch.float16, device=device)
+    key_cache = torch_npu.npu_format_cast(torch.zeros(cache_shape, dtype=torch.float16, device=device), 29)
+    value_cache = torch_npu.npu_format_cast(torch.zeros(cache_shape, dtype=torch.float16, device=device), 29)
+    selection = QSAGroupSelection(
+        group_indices=torch.zeros((num_tokens, num_groups), dtype=torch.int32, device=device),
+        group_counts=torch.full((num_tokens,), num_groups, dtype=torch.int32, device=device),
+        tail_starts=torch.full((num_tokens,), 23040, dtype=torch.int32, device=device),
+        tail_counts=torch.ones(num_tokens, dtype=torch.int32, device=device),
+    )
+    block_table = torch.arange(cache_blocks, dtype=torch.int32, device=device).unsqueeze(0)
+    query_start_loc = torch.tensor([0, num_tokens], dtype=torch.int32, device=device)
+    # The module precreates the maximum-sized buffer, then slices the actual
+    # token/head group count inside capture. Include unused buffer entries.
+    group_list = torch.arange(1, 8 * kv_heads + 1, dtype=torch.int64, device=device) * (query_heads // kv_heads)
+
+    def grouped():
+        return qsa_batched_prefill_310(
+            query,
+            key_cache,
+            value_cache,
+            selection,
+            block_table,
+            query_start_loc,
+            scale=head_dim**-0.5,
+            decode_group_list=group_list,
+        )
+
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        for _ in range(3):
+            grouped()
+    torch.npu.current_stream().wait_stream(stream)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, stream=stream):
+        captured = grouped()
+    previous = None
+    for phase, key_scale in enumerate((0.1, 1.0, 4.0)):
+        query.copy_((torch.randn(query.shape, generator=generator) * 0.5).half())
+        key_cache.copy_((torch.randn(cache_shape, generator=generator) * key_scale).half().to(device))
+        value_cache.copy_((torch.randn(cache_shape, generator=generator) * 0.1).half().to(device))
+        ids = torch.stack([torch.randperm(5760, generator=generator)[:num_groups] for _ in range(num_tokens)])
+        counts = torch.full((num_tokens,), num_groups - phase, dtype=torch.int32)
+        counts[0] = (0, 1, num_groups)[phase]
+        selection.group_indices.copy_(ids.to(torch.int32))
+        selection.group_counts.copy_(counts)
+        selection.tail_starts.fill_(23040 + phase * 4)
+        selection.tail_counts.copy_((torch.arange(num_tokens, dtype=torch.int32) + phase) % 4 + 1)
+        block_table.copy_(torch.randperm(cache_blocks, generator=generator).to(torch.int32).unsqueeze(0))
+        expected = qsa_sparse_attention_310(query, key_cache, value_cache, selection, block_table, query_start_loc)
+        captured.fill_(float("nan"))
+        graph.replay()
+        actual = captured.cpu()
+        torch.testing.assert_close(actual, expected.cpu(), rtol=1e-2, atol=2e-3)
+        assert torch.isfinite(actual).all()
+        if previous is not None:
+            assert not torch.equal(actual, previous)
+        previous = actual
+
+
 @pytest.mark.parametrize("scale", [256**-0.5, 0.07])
 def test_batched_prefill_score_scale_matches_reference(scale: float) -> None:
     if not torch_npu.npu.is_available() or "310" not in torch_npu.npu.get_device_name(0):

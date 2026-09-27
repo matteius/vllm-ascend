@@ -306,3 +306,15 @@ graph 从 5.942 降到 4.513 ms。完整模型短三题为
 **10.946/9.777/9.251 tok/s**，中位数 **9.777**（比旧 10.120 低 3.39%），
 三个输出 SHA 都变化。下一步独立验证 W4 的三/五-token batched QSA
 decode，仍保留 MTP 与 graphs；当前服务留在 :8002，未替换 W8 launcher。
+
+新的隔离 QSA 候选仅对 routed-W4 将 grouped decode 上限扩展到八-token，
+并预建对应 group-list；其它 backend 与 W8 仍为两-token。128 项 CPU、
+72 项 NPU QSA tests 通过（含 30 项动态 replay）。Q/KV=6/1 的三-token
+QSA-only graph 从 2.071 降到 0.297 ms，不能视为整模型同比提速。
+`mtp2-r6` 已通过三个真实权重 smoke，MTP k=2 与三-token FULL replay
+均有 runtime 证据。短 coding 15.167/12.555/13.601 tok/s，中位数
+13.601，比 12.926 高 5.22%，但输出与 acceptance 均变化。
+23.4k 三题为 12.856/10.933/10.919 tok/s，中位数 10.933（比 9.777
+高 11.82%）；每题生成 512 tokens、复用 23,168 prefix tokens，输出
+SHA 均变化。cold TTFT 357.285 秒，未宣称 W8 parity 或生产等价。
+下一步采集保留 MTP/graphs 的新整模型 trace，不能沿用旧 profile 比例。

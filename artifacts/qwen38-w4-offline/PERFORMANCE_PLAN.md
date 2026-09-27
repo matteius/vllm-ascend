@@ -174,6 +174,27 @@ output hashes changed. All three generated 512 tokens and reused 23,168
 prefix tokens; cold TTFT 358.307 s. The two-query-token QSA batched decode
 cap is the next independent priority, with MTP and graphs still required.
 
+The W4-only grouped QSA dispatch extension is implemented for up to eight
+query tokens, including precreated group-list sizing. W8 and other W4
+backends retain the two-token bound. 128 CPU tests and all 72 NPU QSA tests
+pass, including 30 dynamic replay cases across 1/2/3/5/8 tokens and local
+KV-head counts 1/2. The first NPU test attempt used legacy JIT mode and failed
+capture; the rerun aligns the test with serving's existing ACLNN mode.
+At the TP4 shape (6 query heads, 1 KV head), isolated three-token replay
+falls from 2.071 to 0.297 ms. This does not establish whole-model speed.
+Real-weight `mtp2-r6` uses the same compact kernel, MTP k=2 and FULL [1,3].
+All three correct smokes pass, and runtime tables confirm three-token FULL
+replay. Short coding rates are 15.167/12.555/13.601 tok/s, median 13.601;
+all output hashes and acceptance differ from the prior run. The 23.4k
+benchmark completes at 12.856/10.933/10.919 tok/s, median 10.933 (+11.82%
+versus 9.777). All three generate 512 tokens, reuse 23,168 cached tokens,
+and have changed output hashes; cold TTFT is 357.285 s. This is not W8
+parity, and even the earlier k=1 long median (12.754) remains higher.
+The next measurement is a fresh full-model k=2 long-context trace, keeping
+the compact kernel, shared RoPE and expanded QSA dispatch together. The
+older k=1 trace predates these optimizations; do not assume its percentages
+still describe the current bottleneck. Profiled requests are not speed tests.
+
 ## Acceptance criteria
 
 - Compare against a freshly measured W8 baseline on the same four NPUs,
