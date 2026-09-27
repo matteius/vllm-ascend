@@ -36,10 +36,11 @@ extern "C" __global__ __aicore__ void qwen_w4_grouped_matmul_v310(GM_ADDR x, GM_
         }
       }
       const int64_t metadata = expert * n * (k / NsQwenW4::QW4_GROUP_SIZE);
-      for (int64_t row = start; row < end; row += NsQwenW4::QW4_CUBE_M) {
-        const int64_t count = end - row < NsQwenW4::QW4_CUBE_M ? end - row : NsQwenW4::QW4_CUBE_M;
-        op.InitGeometry(x + row * k * sizeof(half), codes + expert * n * k / 2, scale + metadata * sizeof(half),
-                        offset + metadata, y + row * n * sizeof(half), user, count, n, k, true);
+      if (end > start) {
+        // The helper streams bounded M tiles through one resident L1 weight
+        // tile, so large groups no longer repeat weight unpacking per 128 rows.
+        op.InitGeometry(x + start * k * sizeof(half), codes + expert * n * k / 2, scale + metadata * sizeof(half),
+                        offset + metadata, y + start * n * sizeof(half), user, end - start, n, k, true);
         op.SetTileRange(tile, nTiles);
         op.SetWorkspaceTile(AscendC::GetBlockIdx());
         op.Process();

@@ -1,0 +1,19 @@
+Device_id,Name,Type,Accelerator Core,Start Time(us),Duration(us),Wait Time(us),Block Num
+0,aclnnInplaceCopy_CastAiCpu_Cast,N/A,N/A,1790527605995855.433	,229.766,0,0
+0,aclnnSort_SortAiCore_MemSet,N/A,N/A,1790527605996238.896	,1.719,153.698,8
+0,aclnnSort_SortAiCore_Sort,N/A,N/A,1790527605996269.261	,3.516,28.646,1
+0,aclnnSort_CastAiCore_Cast,N/A,N/A,1790527605996272.855	,4.818,0.078,1
+0,aclnnInplaceCopy_CastAiCore_Cast,N/A,N/A,1790527605998860.641	,2.24,2582.969,1
+0,aclnnInplaceCopy_CastAiCore_Cast,N/A,N/A,1790527605998883.610	,0.964,20.729,1
+0,aclnnSort_SortAiCore_MemSet,N/A,N/A,1790527605999222.229	,1.667,337.656,8
+0,aclnnSort_SortAiCore_Sort,N/A,N/A,1790527605999223.974	,3.542,0.078,1
+0,aclnnSort_CastAiCore_Cast,N/A,N/A,1790527605999249.078	,4.948,21.562,1
+0,aclnnArange_ArangeAiCore_Range,N/A,N/A,1790527606001025.406	,1.901,1771.38,8
+0,aclnnInplaceIndexCopy_ScatterUpdateAiCPU_ScatterUpdate,N/A,N/A,1790527606001422.047	,62.031,394.74,8
+0,aclnnArange_ArangeAiCore_Range,N/A,N/A,1790527606002857.646	,1.615,1373.568,8
+0,aclnnInplaceIndexCopy_ScatterUpdateAiCore_ScatterUpdate,N/A,N/A,1790527606003189.781	,10.99,330.521,1
+0,aclnnInplaceCopy_CastAiCore_Cast,N/A,N/A,1790527606003453.479	,4.948,252.708,1
+0,aclnnInplaceCopy_CastAiCore_Cast,N/A,N/A,1790527606005331.031	,2.188,1872.604,1
+0,aclnnArange_ArangeAiCore_Range,N/A,N/A,1790527606005353.531	,1.458,20.312,8
+0,aclnnInplaceIndexCopy_ScatterUpdateAiCore_ScatterUpdate,N/A,N/A,1790527606005577.490	,10.547,222.5,1
+0,aclnnInplaceCopy_CastAiCore_Cast,N/A,N/A,1790527606005961.422	,4.792,373.385,1

@@ -159,7 +159,10 @@ def route_topk(
     topk_weights, topk_ids = probs.topk(top_k, dim=-1)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-    topk_weights = topk_weights * routed_scaling_factor
+    # Model metadata is a host scalar, so this removes an identity kernel
+    # without synchronizing routing tensors or changing reduction order.
+    if routed_scaling_factor != 1.0:
+        topk_weights = topk_weights * routed_scaling_factor
     return topk_weights, topk_ids.to(torch.int64)
 
 

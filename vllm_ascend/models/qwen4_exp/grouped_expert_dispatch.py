@@ -71,12 +71,21 @@ def build_grouped_expert_dispatch(
     token_indices = torch.arange(num_tokens, device=topk_ids.device).unsqueeze(1).expand(-1, top_k).reshape(-1)
     route_weights = topk_weights.to(weight_dtype).reshape(-1, 1)
 
-    # 310P sorts float32 keys on AI Core. The conversion is exact for the
-    # bounded expert id and permutation ranges used by this model.
-    expert_sort_key = pair_expert.to(torch.float32) if num_local_experts <= _MAX_EXACT_FLOAT32_INTEGER else pair_expert
+    # 310P sorts FP32 keys on AI Core, but direct INT64 -> FP32 uses a much
+    # slower AI-CPU cast. The bounded, nonnegative keys fit exactly in INT32
+    # and FP32, so taking the two AI-Core casts preserves every sort key.
+    expert_sort_key = (
+        pair_expert.to(torch.int32).to(torch.float32)
+        if num_local_experts <= _MAX_EXACT_FLOAT32_INTEGER
+        else pair_expert
+    )
     order = torch.argsort(expert_sort_key, stable=True)
     local_expert_ids = torch.arange(num_local_experts, device=topk_ids.device, dtype=pair_expert.dtype)
     counts = (pair_expert.unsqueeze(1) == local_expert_ids).sum(dim=0)
-    inverse_sort_key = order.to(torch.float32) if num_routes <= _MAX_EXACT_FLOAT32_INTEGER else order
+    # Inverting by scatter/index_copy is mathematically cheaper, but the 310P
+    # implementations are slower than AI-Core sorting for these route sizes.
+    # Avoid the INT64 -> FP32 AI-CPU cast here too; keep the unbounded integer
+    # path for permutations beyond FP32's exact integer range.
+    inverse_sort_key = order.to(torch.int32).to(torch.float32) if num_routes <= _MAX_EXACT_FLOAT32_INTEGER else order
     inverse_order = torch.argsort(inverse_sort_key)
     return GroupedExpertDispatch(order, inverse_order, token_indices, route_weights, counts)

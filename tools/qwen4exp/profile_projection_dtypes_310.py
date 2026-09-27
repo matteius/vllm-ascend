@@ -32,6 +32,17 @@ ACTIVATION_SCALE = 1 / 128
 WEIGHT_SCALE = 1 / 32
 NZ_FORMAT = 29
 PROJECTIONS = {"gate_up": (2560, 1280), "down": (640, 2560)}
+CASES = (
+    "fp16_preformatted",
+    "int8_preformatted",
+    "w4a16_packed_grouped",
+    "w4a16_packed_routed",
+    "w4a8_native_prepared",
+    "int8_activation_quant_only",
+    "int4_activation_limbs_only",
+    "int8_with_activation_quant",
+    "w4a8_native_with_activation_quant",
+)
 
 
 def matched_inputs(rows, width, outputs, seed=1024):
@@ -127,6 +138,9 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--rows", type=int, nargs="+", default=[1, 3, 6, 16, 32, 128, 512])
     parser.add_argument("--projections", choices=list(PROJECTIONS), nargs="+", default=list(PROJECTIONS))
+    parser.add_argument(
+        "--cases", choices=CASES, nargs="+", default=CASES, help="subset to time; routed W4 is skipped above 80 rows"
+    )
     parser.add_argument("--iterations", type=int, default=30)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument(
@@ -150,7 +164,7 @@ def main():
             for rows in args.rows:
                 data = matched_inputs(rows, width, outputs)
                 expected = F.linear(data[0].float(), data[1].float()).half()
-                cases = make_cases(data, npu)
+                cases = {name: function for name, function in make_cases(data, npu).items() if name in args.cases}
                 for name, function in cases.items():
                     actual = function()
                     if "only" not in name:

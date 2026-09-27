@@ -1,0 +1,49 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0 -- /srv/ai/venvs/qwen38-w4-test-ce1862/bin/python
+cachedir: .pytest_cache
+rootdir: /srv/ai/src/qwen38-w4-native-build.zHZtEd/runtime
+configfile: pyproject.toml
+plugins: anyio-4.15.1
+collecting ... collected 33 items
+
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_empty_experts_m_tails_and_peer_zero[1-False] PASSED [  3%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_empty_experts_m_tails_and_peer_zero[1-True] PASSED [  6%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_empty_experts_m_tails_and_peer_zero[15-False] PASSED [  9%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_empty_experts_m_tails_and_peer_zero[15-True] PASSED [ 12%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_empty_experts_m_tails_and_peer_zero[16-False] PASSED [ 15%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_empty_experts_m_tails_and_peer_zero[16-True] PASSED [ 18%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_empty_experts_m_tails_and_peer_zero[17-False] PASSED [ 21%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_empty_experts_m_tails_and_peer_zero[17-True] PASSED [ 24%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_empty_experts_m_tails_and_peer_zero[127-False] PASSED [ 27%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_empty_experts_m_tails_and_peer_zero[127-True] PASSED [ 30%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_empty_experts_m_tails_and_peer_zero[128-False] PASSED [ 33%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_empty_experts_m_tails_and_peer_zero[128-True] PASSED [ 36%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_empty_experts_m_tails_and_peer_zero[129-False] PASSED [ 39%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_empty_experts_m_tails_and_peer_zero[129-True] PASSED [ 42%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_empty_experts_m_tails_and_peer_zero[513-False] PASSED [ 45%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_empty_experts_m_tails_and_peer_zero[513-True] PASSED [ 48%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_real_projection_shapes[2560-1280-False] PASSED [ 51%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_real_projection_shapes[2560-1280-True] PASSED [ 54%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_real_projection_shapes[640-2560-False] PASSED [ 57%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_real_projection_shapes[640-2560-True] PASSED [ 60%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_resident_weight_reuse_across_m_tiles[129-2560-1280] PASSED [ 63%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_resident_weight_reuse_across_m_tiles[129-640-2560] PASSED [ 66%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_resident_weight_reuse_across_m_tiles[257-2560-1280] PASSED [ 69%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_resident_weight_reuse_across_m_tiles[257-640-2560] PASSED [ 72%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_resident_weight_reuse_across_m_tiles[513-2560-1280] PASSED [ 75%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_resident_weight_reuse_across_m_tiles[513-640-2560] PASSED [ 78%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_replay_changes_group_ends_weights_and_activations[False] PASSED [ 81%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_replay_changes_group_ends_weights_and_activations[True] PASSED [ 84%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_native_integer_dot_exact_for_all_weight_bytes_and_zero_points PASSED [ 87%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_invalid_metadata_rejected_before_device_launch[False] PASSED [ 90%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_invalid_metadata_rejected_before_device_launch[True] PASSED [ 93%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_meta_projection_shape_and_dtype[False] PASSED [ 96%]
+tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_grouped_native_310.py::test_meta_projection_shape_and_dtype[True] PASSED [100%]
+
+=============================== warnings summary ===============================
+../../../venvs/qwen38-w4-test-ce1862/lib/python3.12/site-packages/torch/jit/_script.py:365: 14 warnings
+  /srv/ai/venvs/qwen38-w4-test-ce1862/lib/python3.12/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 33 passed, 14 warnings in 13.61s =======================

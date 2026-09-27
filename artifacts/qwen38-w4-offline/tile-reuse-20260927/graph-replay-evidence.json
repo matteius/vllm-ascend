@@ -1,0 +1,26 @@
+[
+  {
+    "trace": "/srv/ai/src/qwen38-w4-native-build.zHZtEd/tile-server-traces/dp0_pp0_tp0_dcp0_ep0_rank0_1016012_20260927170157391_ascend_pt/ASCEND_PROFILER_OUTPUT/trace_view.json",
+    "replay_events": {
+      "AscendCL@aclmdlRIExecuteAsync": 110
+    }
+  },
+  {
+    "trace": "/srv/ai/src/qwen38-w4-native-build.zHZtEd/tile-server-traces/dp0_pp0_tp1_dcp0_ep1_rank1_1016013_20260927170157391_ascend_pt/ASCEND_PROFILER_OUTPUT/trace_view.json",
+    "replay_events": {
+      "AscendCL@aclmdlRIExecuteAsync": 110
+    }
+  },
+  {
+    "trace": "/srv/ai/src/qwen38-w4-native-build.zHZtEd/tile-server-traces/dp0_pp0_tp2_dcp0_ep2_rank2_1016014_20260927170157391_ascend_pt/ASCEND_PROFILER_OUTPUT/trace_view.json",
+    "replay_events": {
+      "AscendCL@aclmdlRIExecuteAsync": 110
+    }
+  },
+  {
+    "trace": "/srv/ai/src/qwen38-w4-native-build.zHZtEd/tile-server-traces/dp0_pp0_tp3_dcp0_ep3_rank3_1016015_20260927170157391_ascend_pt/ASCEND_PROFILER_OUTPUT/trace_view.json",
+    "replay_events": {
+      "AscendCL@aclmdlRIExecuteAsync": 110
+    }
+  }
+]

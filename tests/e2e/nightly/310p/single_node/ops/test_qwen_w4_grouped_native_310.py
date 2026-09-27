@@ -7,6 +7,8 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 
+from vllm_ascend.models.qwen4_exp.grouped_expert_dispatch import build_grouped_expert_dispatch
+from vllm_ascend.models.qwen4_exp.moe import route_topk
 from vllm_ascend.models.qwen4_exp.w4_moe import pack_cube_tiles
 from vllm_ascend.models.qwen4_exp.w4a8_int4 import (
     pack_native_metadata,
@@ -109,6 +111,62 @@ def test_real_projection_shapes(inputs, outputs, native):
     ends = torch.tensor([16, 17, 31], dtype=torch.int64)
     actual = invoke(device_arguments(data, ends, native), native).cpu()
     torch.testing.assert_close(actual, reference(data, ends, native), rtol=0.005, atol=0.003)
+
+
+@pytest.mark.parametrize("inputs,outputs", [(2560, 1280), (640, 2560)])
+@pytest.mark.parametrize("rows", [129, 257, 513])
+def test_resident_weight_reuse_across_m_tiles(inputs, outputs, rows):
+    data = values(rows + 135, inputs=inputs, outputs=outputs)
+    # An unaligned second expert, a second multi-tile group, and trailing peers.
+    ends = torch.tensor([rows, rows + 129, rows + 130], dtype=torch.int64)
+    actual = invoke(device_arguments(data, ends, False), False).cpu()
+    torch.testing.assert_close(actual, reference(data, ends, False), rtol=0.005, atol=0.003)
+    assert torch.count_nonzero(actual[ends[-1] :]) == 0
+
+
+@pytest.mark.parametrize("renormalize", [False, True])
+def test_identity_router_scale_is_bitwise_unchanged_on_device(renormalize):
+    logits = torch.randn(6, 256, generator=torch.Generator().manual_seed(1024)).half().npu()
+    expected, expected_ids = logits.float().softmax(-1).topk(10, dim=-1)
+    if renormalize:
+        expected = expected / expected.sum(-1, keepdim=True)
+    expected = expected * 1.0
+    actual, ids = route_topk(logits, 10, renormalize=renormalize, routed_scaling_factor=1.0)
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
+    torch.testing.assert_close(ids.cpu(), expected_ids.cpu(), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("tokens", [1, 3, 129, 512])
+def test_dispatch_inverse_replay_changes_local_and_peer_routes(tokens):
+    ids = torch.zeros(tokens, 10, dtype=torch.int64, device="npu")
+    weights = torch.ones_like(ids, dtype=torch.float32)
+
+    def dispatch():
+        return build_grouped_expert_dispatch(
+            weights, ids, num_local_experts=128, expert_offset=128, weight_dtype=torch.float32
+        )
+
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        for _ in range(3):
+            dispatch()
+    torch.npu.current_stream().wait_stream(stream)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, stream=stream):
+        captured = dispatch()
+    generator = torch.Generator().manual_seed(73)
+    for phase in range(4):
+        replacements = torch.randint(512, (tokens, 10), generator=generator)
+        if phase == 1:
+            replacements.zero_()  # all peer-owned
+        elif phase == 2:
+            replacements.fill_(129)  # one repeated local expert
+        ids.copy_(replacements)
+        graph.replay()
+        order = captured.order.cpu()
+        torch.testing.assert_close(captured.inverse_order.cpu(), torch.argsort(order), rtol=0, atol=0)
+        torch.testing.assert_close(order[captured.inverse_order.cpu()], torch.arange(tokens * 10), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("native", [False, True])

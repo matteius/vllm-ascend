@@ -4,6 +4,7 @@
 
 import sys
 import types
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -11,6 +12,54 @@ import torch
 from vllm_ascend.models.qwen4_exp.grouped_expert_dispatch import build_grouped_expert_dispatch
 from vllm_ascend.models.qwen4_exp.moe import _w8a8_packed_grouped_experts_npu, w8a8_grouped_experts
 from vllm_ascend.models.qwen4_exp.weight_mapping import local_expert_range
+
+
+@pytest.mark.parametrize("tokens", [0, 1, 3, 129, 512])
+def test_bounded_sort_keys_preserve_exact_permutation_inverse(tokens):
+    ids = torch.randint(512, (tokens, 10), generator=torch.Generator().manual_seed(73))
+    weights = torch.ones_like(ids, dtype=torch.float32)
+    with patch.object(torch, "argsort", wraps=torch.argsort) as sort:
+        dispatch = build_grouped_expert_dispatch(
+            weights, ids, num_local_experts=128, expert_offset=128, weight_dtype=torch.float32
+        )
+    assert sort.call_count == 2
+    assert all(call.args[0].dtype == torch.float32 for call in sort.call_args_list)
+    torch.testing.assert_close(dispatch.inverse_order, torch.argsort(dispatch.order), rtol=0, atol=0)
+
+
+def test_large_peer_ids_are_bounded_before_sort_key_narrowing():
+    # Narrowing raw global ids would wrap these values into local experts.
+    ids = torch.tensor([[128, (1 << 40) + 128, -(1 << 40) + 128, 129]])
+    dispatch = build_grouped_expert_dispatch(
+        torch.ones_like(ids, dtype=torch.float32),
+        ids,
+        num_local_experts=2,
+        expert_offset=128,
+        weight_dtype=torch.float32,
+    )
+    assert dispatch.counts.tolist() == [1, 1]
+    assert dispatch.order.tolist() == [0, 3, 1, 2]
+
+
+@pytest.mark.parametrize("num_local_experts", [2, 8])
+def test_sort_keys_keep_integer_fallback_outside_exact_range(num_local_experts):
+    ids = torch.tensor([[1, 0], [7, 1], [2, 0]])
+    # Exercise both guarded branches without allocating millions of routes.
+    with (
+        patch("vllm_ascend.models.qwen4_exp.grouped_expert_dispatch._MAX_EXACT_FLOAT32_INTEGER", 4),
+        patch.object(torch, "argsort", wraps=torch.argsort) as sort,
+    ):
+        dispatch = build_grouped_expert_dispatch(
+            torch.ones_like(ids, dtype=torch.float32),
+            ids,
+            num_local_experts=num_local_experts,
+            expert_offset=0,
+            weight_dtype=torch.float32,
+        )
+    expected_key_dtype = torch.float32 if num_local_experts <= 4 else torch.int64
+    assert sort.call_args_list[0].args[0].dtype == expected_key_dtype
+    assert sort.call_args_list[1].args[0].dtype == torch.int64
+    torch.testing.assert_close(dispatch.inverse_order, torch.argsort(dispatch.order), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("num_experts,world_size", [(8, 1), (8, 4), (512, 6)])
