@@ -6,7 +6,18 @@ import threading
 
 import pytest
 
-from tools.qwen4exp.benchmark_capacity import fit_prompt, parse_metrics, stream_request
+from tools.qwen4exp.benchmark_capacity import fit_prompt, parse_metrics, prompt_lengths, stream_request
+
+
+def test_asymmetric_session_lengths():
+    assert prompt_lengths(256, 2, None) == [256, 256]
+    assert prompt_lengths(256, 2, [256, 8192]) == [256, 8192]
+
+
+@pytest.mark.parametrize("lengths", [[], [256], [256, 0], [-1, 8192], [256, 8192, 4096]])
+def test_invalid_session_lengths(lengths):
+    with pytest.raises(ValueError, match="one positive prompt length"):
+        prompt_lengths(256, 2, lengths)
 
 
 def test_exact_prompt_budget_keeps_both_ends():

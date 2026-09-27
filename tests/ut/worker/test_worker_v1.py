@@ -289,9 +289,75 @@ class TestNPUWorker(TestBase):
         worker.model_runner.max_num_reqs = 2
         with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
             self.assertEqual(
-                worker._scale_kv_cache_memory_for_multi_group(12345), 12345 - 64 * mamba_spec.page_size_bytes
+                worker._scale_kv_cache_memory_for_multi_group(12345),
+                ((12345 - 64 * mamba_spec.page_size_bytes) // attn_spec.page_size_bytes) * attn_spec.page_size_bytes,
             )
             self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(1), 0)
+
+        # Virtual Mamba pages can dominate the planner's block size even
+        # though only the fixed 64-slot pool exists on device. Converting the
+        # budget upward is necessary to avoid stranding physical KV memory.
+        large_mamba_spec = MambaSpec(block_size=2, shapes=((20, 4),), dtypes=(torch.float32,))
+        groups[1] = KVCacheGroupSpec(layer_names=["linear_attn"], kv_cache_spec=large_mamba_spec)
+        physical_budget = 123450
+        with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
+            planner_budget = worker._scale_kv_cache_memory_for_multi_group(physical_budget)
+        blocks = planner_budget // large_mamba_spec.page_size_bytes
+        physical_bytes = blocks * attn_spec.page_size_bytes + 64 * large_mamba_spec.page_size_bytes
+        self.assertGreater(planner_budget, physical_budget)
+        self.assertLessEqual(physical_bytes, physical_budget)
+        self.assertLess(physical_budget - physical_bytes, attn_spec.page_size_bytes)
+
+        # Hybrid grouping pads attention pages to the Mamba page size, but
+        # the compact 310P allocator uses the original dense K/V shapes.
+        padded_attn_spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            head_size_v=4,
+            dtype=torch.float16,
+            page_size_padded=large_mamba_spec.page_size_bytes,
+        )
+        groups[0] = KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=padded_attn_spec)
+        with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
+            self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(physical_budget), planner_budget)
+
+    @unittest.skipIf(vllm_version_is("0.28.0"), "vLLM #51718 only changed the main planner")
+    def test_compact_prefix_budget_includes_qsa_index_side_cache(self):
+        from vllm_ascend.models.qwen4_exp.kv_cache import AscendQSAFullAttentionSpec
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mamba = MambaSpec(block_size=128, shapes=((8, 128, 128),), dtypes=(torch.float16,))
+        attention = AscendQSAFullAttentionSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=256,
+            dtype=torch.float16,
+            page_size_padded=mamba.page_size_bytes,
+        )
+        groups = [KVCacheGroupSpec(["qsa"], attention), KVCacheGroupSpec(["gdn"], mamba)]
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.vllm_config = SimpleNamespace(
+            cache_config=SimpleNamespace(
+                enable_prefix_caching=True,
+                get_resolved_kv_cache_layout=lambda: SimpleNamespace(is_layer_compact=True, is_block_compact=True),
+            ),
+            kv_transfer_config=None,
+        )
+        worker.model_runner = SimpleNamespace(
+            supports_compact_mamba_state=True,
+            supports_prefix_mamba_state_tier=True,
+            num_compact_mamba_blocks=64,
+        )
+        worker.get_kv_cache_spec = lambda: {"qsa": attention, "gdn": mamba}
+        budget = 64 * (1 << 20)
+        expected_blocks = (budget - 64 * mamba.page_size_bytes) // (
+            attention.main_page_size_bytes + attention.index_page_size_bytes
+        )
+        with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
+            self.assertEqual(
+                worker._scale_kv_cache_memory_for_multi_group(budget), expected_blocks * mamba.page_size_bytes
+            )
 
     @unittest.skipIf(
         vllm_version_is("0.28.0"),

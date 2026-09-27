@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable
+from copy import copy
 from typing import TYPE_CHECKING, ClassVar, Literal
 
 import torch
@@ -712,10 +713,12 @@ class _GDNAttention(nn.Module, MambaBase):
         state_indices: torch.Tensor,
         query_start_loc: torch.Tensor,
         has_initial_state: torch.Tensor | None,
+        metadata: GDNAttentionMetadata | None = None,
     ) -> torch.Tensor:
         """Run the 310P stateful op, or the torch fallback."""
         cache = self.kv_cache[0]
-        metadata = get_forward_context().attn_metadata[self.prefix]
+        if metadata is None:
+            metadata = get_forward_context().attn_metadata[self.prefix]
         spec_metadata = getattr(metadata, "spec_decode_metadata", None)
         if mixed.device.type == "npu" and spec_metadata is not None:
             conv_metadata = spec_metadata.spec_causal_conv1d
@@ -950,6 +953,65 @@ class _GDNAttention(nn.Module, MambaBase):
             ),
         ).squeeze(0)
 
+    def _native_mixed_attention(self, mixed, a, b, metadata):
+        """Update disjoint prefill and speculative states, preserving token order.
+
+        Metadata views are shared across layers for this step only. The native
+        conv/recurrent spec path must not receive the prefill rows or mutate
+        their state; the prefill path must not use speculative accept counts.
+        """
+        views = getattr(metadata, "_qwen4exp_mixed_views", None)
+        if views is None:
+            spec = copy(metadata)
+            spec.num_prefills = spec.num_prefill_tokens = 0
+            spec.num_decodes = spec.num_decode_tokens = 0
+            spec.num_actual_tokens = metadata.num_spec_decode_tokens
+            non_spec = copy(metadata)
+            non_spec.spec_sequence_masks = None
+            non_spec.spec_decode_metadata = None
+            non_spec.num_spec_decodes = non_spec.num_spec_decode_tokens = 0
+            non_spec.num_actual_tokens = metadata.num_prefill_tokens + metadata.num_decode_tokens
+            views = (spec, non_spec)
+            metadata._qwen4exp_mixed_views = views
+        g, beta = self._native_gating(a, b)
+        out = mixed.new_empty((mixed.shape[0], self.num_v_heads, self.params.head_v_dim))
+        for view, indices, state_indices, query_start_loc, has_initial_state in (
+            (
+                views[0],
+                metadata.spec_token_indx,
+                metadata.spec_state_indices_tensor,
+                metadata.spec_query_start_loc,
+                None,
+            ),
+            (
+                views[1],
+                metadata.non_spec_token_indx,
+                metadata.non_spec_state_indices_tensor,
+                metadata.non_spec_query_start_loc,
+                metadata.has_initial_state,
+            ),
+        ):
+            assert indices is not None and state_indices is not None and query_start_loc is not None
+            branch = self._stateful_short_conv(
+                mixed.index_select(0, indices), state_indices, query_start_loc, has_initial_state, metadata=view
+            )
+            q, k, v = torch.split(branch, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
+            branch_out = self._native_delta_rule(
+                q.reshape(-1, self.num_k_heads, self.params.head_k_dim),
+                k.reshape(-1, self.num_k_heads, self.params.head_k_dim),
+                v.reshape(-1, self.num_v_heads, self.params.head_v_dim),
+                g.index_select(1, indices),
+                beta.index_select(1, indices),
+                view,
+                state_indices,
+                query_start_loc,
+                has_initial_state,
+            )
+            # Match gdn_310's merge: IndexPutV2-backed index_copy_ is not
+            # supported for every 310P layout.
+            out[indices] = branch_out.to(out.dtype)
+        return out.to(self.compute_dtype)
+
     def forward(self, block_input: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         del positions  # GDN applies no rotary
         seq_len = block_input.shape[0]
@@ -980,7 +1042,10 @@ class _GDNAttention(nn.Module, MambaBase):
             b = b[:seq_len]
             if metadata.spec_sequence_masks is not None:
                 if metadata.num_prefills or metadata.num_decodes:
-                    raise NotImplementedError("Qwen4Exp GDN mixed speculative/non-speculative batches")
+                    if block_input.device.type != "npu":
+                        raise NotImplementedError("Mixed speculative GDN requires the native 310P state-update path")
+                    out = self._native_mixed_attention(mixed, a, b, metadata)
+                    return self._project_output(block_input, out)
                 state_indices = metadata.spec_state_indices_tensor
                 query_start_loc = metadata.spec_query_start_loc
                 has_initial_state = None
@@ -1056,6 +1121,11 @@ class _GDNAttention(nn.Module, MambaBase):
                 out[start:stop] = segment
                 if state_indices is not None:
                     self.kv_cache[1][cache_idx].copy_(final_state.to(self.kv_cache[1].dtype))
+        return self._project_output(block_input, out)
+
+    def _project_output(self, block_input: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+        seq_len = out.shape[0]
+        p = self.params
         normed = _rms_norm(out, self.norm_weight, self.rms_norm_eps, self.compute_dtype)
         z = _linear(block_input, self.in_proj_z, self.compute_dtype).reshape(seq_len, self.num_v_heads, p.head_v_dim)
         out = (normed * torch.sigmoid(z)).reshape(seq_len, self.value_dim)

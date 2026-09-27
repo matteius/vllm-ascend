@@ -32,6 +32,13 @@ METRICS = (
 WARMUP_OUTPUT_TOKENS = 32
 
 
+def prompt_lengths(default: int, concurrency: int, per_session: list[int] | None) -> list[int]:
+    lengths = per_session if per_session is not None else [default] * concurrency
+    if len(lengths) != concurrency or any(length <= 0 for length in lengths):
+        raise ValueError("provide one positive prompt length per concurrent session")
+    return lengths
+
+
 def parse_metrics(text: str) -> dict[str, float]:
     values = dict.fromkeys(METRICS, 0.0)
     for line in text.splitlines():
@@ -135,6 +142,9 @@ def main() -> None:
     parser.add_argument("--model", default="qwen38-w4-experimental")
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--prompt-tokens", type=int, required=True)
+    parser.add_argument(
+        "--prompt-token-lengths", type=int, nargs="+", help="Override lengths per session for mixed batches"
+    )
     parser.add_argument("--output-tokens", type=int, default=512)
     parser.add_argument("--concurrency", type=int, choices=(1, 2), default=2)
     parser.add_argument("--mode", choices=("throughput", "recall"), default="throughput")
@@ -145,13 +155,17 @@ def main() -> None:
     args = parser.parse_args()
     if args.prompt_tokens <= 0 or args.output_tokens <= 0:
         parser.error("token counts must be positive")
+    try:
+        lengths = prompt_lengths(args.prompt_tokens, args.concurrency, args.prompt_token_lengths)
+    except ValueError as exc:
+        parser.error(str(exc))
     # Read the checkpoint's tokenizer directly. Importing transformers would
     # also auto-load torch_npu in the serving venv; this client needs no NPU.
     from tokenizers import Tokenizer
 
     tokenizer = Tokenizer.from_file(str(Path(args.model_dir) / "tokenizer.json"))
     run_id = uuid.uuid4().hex
-    prompts = [build_prompt(tokenizer, args.prompt_tokens, f"{run_id}-{i}", args.mode) for i in range(args.concurrency)]
+    prompts = [build_prompt(tokenizer, length, f"{run_id}-{i}", args.mode) for i, length in enumerate(lengths)]
     barrier = threading.Barrier(args.concurrency)
 
     def metrics():

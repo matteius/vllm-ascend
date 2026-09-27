@@ -741,7 +741,19 @@ class NPUWorker(WorkerBase):
                     layer_spec = group_spec
                 group_pages += layer_spec.page_size_bytes
                 if not (compact_mamba_state and isinstance(layer_spec, MambaSpec)):
-                    sum_pages += layer_spec.page_size_bytes
+                    if (
+                        compact_mamba_state
+                        and getattr(model_runner, "supports_prefix_mamba_state_tier", False)
+                        and isinstance(layer_spec, AttentionSpec)
+                    ):
+                        # The compact 310P runner allocates K/V (and QSA's
+                        # index side cache) from physical shapes, not from the
+                        # planner's page_size_padded. Hybrid grouping pads small
+                        # attention pages to the larger Mamba page size; charging
+                        # that unused padding strands device memory.
+                        sum_pages += layer_spec.real_page_size_bytes
+                    else:
+                        sum_pages += layer_spec.page_size_bytes
                 elif getattr(model_runner, "supports_prefix_mamba_state_tier", False):
                     # Compact prefix states no longer scale with scheduler
                     # blocks, but their one shared resident pool still costs
@@ -751,6 +763,23 @@ class NPUWorker(WorkerBase):
         if compact_prefix_bytes:
             available_memory = max(0, available_memory - compact_prefix_bytes)
             logger.info("Reserved %d bytes for the shared compact Mamba prefix-state pool.", compact_prefix_bytes)
+            if bytes_per_block > 0 and sum_pages > 0:
+                # The scheduler still addresses virtual Mamba blocks, but the
+                # 310P allocator materializes only the fixed pool above. Convert
+                # the physical attention budget into planner bytes in BOTH
+                # directions: a dominant virtual Mamba group otherwise leaves
+                # most of the physical cache budget unused. Use whole physical
+                # blocks so the planner can never round beyond that budget.
+                num_blocks = available_memory // sum_pages
+                logger.info(
+                    "Compact prefix KV budget: %d physical attention bytes/block, "
+                    "%d planner bytes/block, %d blocks within %d physical bytes.",
+                    sum_pages,
+                    bytes_per_block,
+                    num_blocks,
+                    available_memory,
+                )
+                return num_blocks * bytes_per_block
         if bytes_per_block > 0 and sum_pages > bytes_per_block:
             scale = bytes_per_block / sum_pages
             logger.info(

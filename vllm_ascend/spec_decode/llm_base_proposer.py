@@ -1508,9 +1508,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         hidden_states = hidden_states[token_indices_to_sample]
         token_indices_to_sample = self.arange[:batch_size]
 
-        input_batch_size = num_input_tokens if (self.method == "mtp" or self.use_cuda_graph) else batch_size
-
         forward_context = get_forward_context()
+        input_batch_size = num_input_tokens if (self.method == "mtp" or self.use_cuda_graph) else batch_size
+        if self.method == "mtp" and forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
+            # Only the first draft consumes the target's prefill/verify rows.
+            # Later drafts have one row per request, matching the metadata
+            # built by attn_update_stack_num_spec_norm. Keep the capture bucket
+            # for FULL graphs, but never feed a stale prefill-sized tail to an
+            # eager draft (not even for a single request, where it broadcasts).
+            input_batch_size = batch_size
         _EXTRA_CTX.num_tokens = input_batch_size
         _EXTRA_CTX.num_accept_tokens = batch_size
 
@@ -1871,6 +1877,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self.token_arange_np[: input_batch_size + 1]
                 ).clone()
             else:
+                if self.method == "mtp":
+                    input_batch_size = batch_size
                 common_attn_metadata.query_start_loc = self.arange[: batch_size + 1]
                 common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
                     self.token_arange_np[: batch_size + 1]
