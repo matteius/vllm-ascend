@@ -669,6 +669,42 @@ model-load 仍为 19.3821 GiB/rank，graph capture 0.38 GiB；没有新增
 W8 的 19.073/18.091 tok/s 仍未达到；32k 单会话结果不是容量或完整
 coding accuracy 评测，不能据此给 W4 生产等价结论。
 
+## 未保留：small-M Cube K=512 stages
+
+为降低 projection 中 copy/event/scalar 指令数量，试验仅对 compact
+M≤32 使用 512-wide Cube K stage，M>32 保持 128；K=640 的最后
+128 个元素单独处理。L1 activation 总分配不增加，double-buffered
+L0A/L0B 分别最多 64 KiB，编译时断言边界；packed bank、解包和共享
+W8/GLM helper 不变。独立 vendor 为 `ops-cube-k-r1`。
+
+第一次新增测试误用不受支持的 K=128，binding 正确拒绝，未发生 NPU
+kernel fault。改用受支持的 K=256，仍通过 K=640 覆盖 128-wide tail；
+最终 **195 NPU tests passed / 137.12 秒**，15 条已有 warnings。
+覆盖 M=31/32/33 dispatch 边界、改变权重的 replay、compact owner
+长度变化和 peer rows。构建 binary SHA256：
+
+```text
+group:  da3a88dee3753c7733dde5ccdfc16f2a8684b1c9faadbcecaa24c4005c0f2531
+routed: d020321d7606711da74d239e74ab2a17a5c736a8acecbc61b60acd5d26a11b31
+```
+
+但相同真实 layer-0、synthetic input/route 序列、无 collective 的
+graph replay 全部略慢，不能进入完整模型：
+
+| tokens | compact 基线 ms | K=512 候选 ms | 变化 |
+| --- | --- | --- | --- |
+| 1 | 0.507837 | 0.521943 | +2.78% |
+| 2 | 0.343229 | 0.345853 | +0.76% |
+| 3 | 2.382508 | 2.437904 | +2.33% |
+| 5 | 1.861499 | 1.895122 | +1.81% |
+| 8 | 4.519393 | 4.600229 | +1.79% |
+
+候选源码及新增测试仅归档在 `replay-r4/cube-k-rejected.patch`，未进入
+运行源码；matched JSONL 也在该目录。没有用这个 binary 启动模型。
+下一项是以已验证 compact kernel + 两个 QSA dispatch 修复，重新测
+MTP k=4 的 `[1,5]` FULL replay；旧 k=4 慢速结果早于这些修复，
+不能当成当前版本结果。新 run `mtp4-r2` 尚待真实 smoke/短长六题完成。
+
 ## 复现与交接
 
 简短 runbook（仅已授权的隔离 host 环境，不替换 W8）：

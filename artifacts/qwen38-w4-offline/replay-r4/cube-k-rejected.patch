@@ -1,0 +1,137 @@
+diff --git a/csrc/gmm/qwen_w4_group_matmul_v310/op_kernel/qwen_w4_group_matmul_v310.h b/csrc/gmm/qwen_w4_group_matmul_v310/op_kernel/qwen_w4_group_matmul_v310.h
+index 76180c3cc..7c7cf5fcb 100644
+--- a/csrc/gmm/qwen_w4_group_matmul_v310/op_kernel/qwen_w4_group_matmul_v310.h
++++ b/csrc/gmm/qwen_w4_group_matmul_v310/op_kernel/qwen_w4_group_matmul_v310.h
+@@ -59,6 +59,8 @@ constexpr uint32_t QW4_WIDE_INPUT_DIM = 2560;
+ constexpr uint32_t QW4_WIDE_TILED_K_BATCH = QW4_WIDE_INPUT_DIM / 2;
+ constexpr uint32_t QW4_L1_WEIGHT_BYTES = QW4_TILE_N * QW4_WIDE_INPUT_DIM * sizeof(half);
+ constexpr uint32_t QW4_CUBE_M = 128;
++constexpr uint32_t QW4_SMALL_CUBE_M = 32;
++constexpr uint32_t QW4_SMALL_CUBE_K = 512;
+ constexpr uint32_t QW4_CUBE_STAGES = 2;
+ constexpr uint32_t QW4_L1_ACTIVATION_BYTES = QW4_CUBE_M * QW4_TILE_K * sizeof(half);
+ constexpr uint32_t QW4_ROUTE_GATHER_ROWS = 16;
+@@ -256,7 +258,11 @@ class QwenW4GroupMatmulV310Cube {
+         // decoded tile on chip through the complete K reduction.
+         SetFlag<HardEvent::MTE3_MTE1>(EVENT_ID4);
+         WaitFlag<HardEvent::MTE3_MTE1>(EVENT_ID4);
+-        MatmulFromL1(n0, nActual);
++        if (T_ <= QW4_SMALL_CUBE_M) {
++          MatmulFromL1<QW4_SMALL_CUBE_M, QW4_SMALL_CUBE_K>(n0, nActual);
++        } else {
++          MatmulFromL1<QW4_CUBE_M, QW4_TILE_K>(n0, nActual);
++        }
+         SetFlag<HardEvent::MTE1_MTE3>(EVENT_ID4);
+         WaitFlag<HardEvent::MTE1_MTE3>(EVENT_ID4);
+         continue;
+@@ -317,8 +323,16 @@ class QwenW4GroupMatmulV310Cube {
+  private:
+   // Qwen-only resident-B block: the existing shared CATLASS block remains
+   // unchanged for W8, GLM and the canonical (non-tiled) W4 reference path.
+-  // Double-buffer A/L0 and preserve the original ascending K=128 reduction.
++  // Small compact expert batches fit four times more K in each A/L0 stage.
++  // Reduce per-chunk copy/event/scalar overhead without growing L1 or changing
++  // the packed/unpack layout. Larger M retains the original K=128 path.
++  template <uint32_t CubeM, uint32_t CubeK>
+   __aicore__ inline void MatmulFromL1(uint32_t n0, uint32_t nActual) {
++    constexpr uint32_t activationBytes = CubeM * CubeK * sizeof(half);
++    constexpr uint32_t weightStageBytes = QW4_TILE_N * CubeK * sizeof(half);
++    static_assert(activationBytes <= QW4_L1_ACTIVATION_BYTES, "Cube A must fit the reserved L1 stage");
++    static_assert(QW4_CUBE_STAGES * activationBytes <= ArchTag::L0A_SIZE, "Cube A must fit double-buffered L0A");
++    static_assert(QW4_CUBE_STAGES * weightStageBytes <= ArchTag::L0B_SIZE, "Cube B must fit double-buffered L0B");
+     auto aLayout = tla::MakeLayout<half, layout::RowMajor>((uint32_t)T_, (uint32_t)K_);
+     auto tensorA = tla::MakeTensor(xGm_, aLayout, Arch::PositionGM{});
+     using CopyA = typename TileCopy::template CopyGmToL1A<decltype(tensorA)>;
+@@ -327,32 +341,34 @@ class QwenW4GroupMatmulV310Cube {
+     typename TileCopy::CopyL1ToL0B copyL0B;
+     typename BlockMmad::TileMmad tileMmad;
+     constexpr auto aL1Layout =
+-        tla::MakeLayout<half, typename TileCopy::LayoutTagL1A>(tla::Int<QW4_CUBE_M>{}, tla::Int<QW4_TILE_K>{});
++        tla::MakeLayout<half, typename TileCopy::LayoutTagL1A>(tla::Int<CubeM>{}, tla::Int<CubeK>{});
+     const uint32_t mActual = T_ == 1 ? QW4_FRACTAL_SIZE : (uint32_t)T_;
+     auto bL1Layout = tla::MakeLayout<half, typename TileCopy::LayoutTagL1B>((uint32_t)K_, nActual);
+     auto tensorL1B = tla::MakeTensor(resource.l1Buf.template GetBufferByByte<half>(0), bL1Layout, Arch::PositionL1{});
+-    auto aL0Layout = tla::MakeLayout<half, typename TileCopy::LayoutTagL0A>(mActual, QW4_TILE_K);
+-    auto bL0Layout = tla::MakeLayout<half, typename TileCopy::LayoutTagL0B>(QW4_TILE_K, nActual);
+     auto l0C = resource.l0CBuf.template GetBufferByByte<float>(0);
+     auto tensorL0C = tla::MakeTensor(l0C, tla::MakeLayoutL0C(mActual, nActual), Arch::PositionL0C{});
+     for (uint32_t stage = 0; stage < QW4_CUBE_STAGES; ++stage) {
+       SetFlag<HardEvent::MTE1_MTE2>(stage);
+       SetFlag<HardEvent::M_MTE1>(stage);
+     }
+-    for (uint32_t k0 = 0; k0 < K_; k0 += QW4_TILE_K) {
+-      const uint32_t stage = (k0 / QW4_TILE_K) % QW4_CUBE_STAGES;
++    for (uint32_t k0 = 0; k0 < K_; k0 += CubeK) {
++      // K=640 ends with a 128-wide tail; never load past the resident tile.
++      const uint32_t kActual = MinU<uint32_t>(CubeK, (uint32_t)K_ - k0);
++      const uint32_t stage = (k0 / CubeK) % QW4_CUBE_STAGES;
+       auto l1A = resource.l1Buf.template GetBufferByByte<half>(QW4_L1_WEIGHT_BYTES + stage * QW4_L1_ACTIVATION_BYTES);
+       auto tensorL1A = tla::MakeTensor(l1A, aL1Layout, Arch::PositionL1{});
+-      auto tileA = GetTile(tensorA, tla::MakeCoord((uint32_t)0, k0), tla::MakeShape((uint32_t)T_, QW4_TILE_K));
++      auto tileA = GetTile(tensorA, tla::MakeCoord((uint32_t)0, k0), tla::MakeShape((uint32_t)T_, kActual));
+       WaitFlag<HardEvent::MTE1_MTE2>(stage);
+       copyA(tensorL1A, tileA);
+       SetFlag<HardEvent::MTE2_MTE1>(stage);
+-      auto l0A = resource.l0ABuf.template GetBufferByByte<half>(stage * QW4_L1_ACTIVATION_BYTES);
+-      auto l0B = resource.l0BBuf.template GetBufferByByte<half>(stage * QW4_TILE_N * QW4_TILE_K * sizeof(half));
++      auto l0A = resource.l0ABuf.template GetBufferByByte<half>(stage * activationBytes);
++      auto l0B = resource.l0BBuf.template GetBufferByByte<half>(stage * weightStageBytes);
++      auto aL0Layout = tla::MakeLayout<half, typename TileCopy::LayoutTagL0A>(mActual, kActual);
++      auto bL0Layout = tla::MakeLayout<half, typename TileCopy::LayoutTagL0B>(kActual, nActual);
+       auto tensorL0A = tla::MakeTensor(l0A, aL0Layout, Arch::PositionL0A{});
+       auto tensorL0B = tla::MakeTensor(l0B, bL0Layout, Arch::PositionL0B{});
+-      auto tileL1A = GetTile(tensorL1A, tla::MakeCoord((uint32_t)0, (uint32_t)0), tla::MakeShape(mActual, QW4_TILE_K));
+-      auto tileL1B = GetTile(tensorL1B, tla::MakeCoord(k0, (uint32_t)0), tla::MakeShape(QW4_TILE_K, nActual));
++      auto tileL1A = GetTile(tensorL1A, tla::MakeCoord((uint32_t)0, (uint32_t)0), tla::MakeShape(mActual, kActual));
++      auto tileL1B = GetTile(tensorL1B, tla::MakeCoord(k0, (uint32_t)0), tla::MakeShape(kActual, nActual));
+       WaitFlag<HardEvent::M_MTE1>(stage);
+       WaitFlag<HardEvent::MTE2_MTE1>(stage);
+       copyL0A(tensorL0A, tileL1A);
+@@ -360,8 +376,8 @@ class QwenW4GroupMatmulV310Cube {
+       SetFlag<HardEvent::MTE1_MTE2>(stage);
+       SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
+       WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
+-      const uint8_t unitFlag = k0 + QW4_TILE_K == K_ ? 0b11 : 0b10;
+-      tileMmad(tensorL0C, tensorL0A, tensorL0B, mActual, nActual, QW4_TILE_K, k0 == 0, unitFlag);
++      const uint8_t unitFlag = k0 + kActual == K_ ? 0b11 : 0b10;
++      tileMmad(tensorL0C, tensorL0A, tensorL0B, mActual, nActual, kActual, k0 == 0, unitFlag);
+       SetFlag<HardEvent::M_MTE1>(stage);
+     }
+     for (uint32_t stage = 0; stage < QW4_CUBE_STAGES; ++stage) {
+diff --git a/tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_group_matmul_310.py b/tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_group_matmul_310.py
+index c76f5aec6..6ae02084d 100644
+--- a/tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_group_matmul_310.py
++++ b/tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_group_matmul_310.py
+@@ -76,11 +76,12 @@ def test_tiled_k_batch_selection_matches_reference(inputs):
+     torch.testing.assert_close(actual, reference(*values), rtol=0.005, atol=0.003)
+ 
+ 
+-@pytest.mark.parametrize("tokens", [1, 15, 16, 17, 63, 64, 65, 127, 128])
+-@pytest.mark.parametrize("inputs", [640, 2560])
++@pytest.mark.parametrize("tokens", [1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128])
++@pytest.mark.parametrize("inputs", [256, 512, 640, 2560])
+ def test_tiled_graph_replay_fractal_boundaries(tokens, inputs):
+     # Exercise the resident-L1 B stride, both activation stages, and the
+-    # partial last M fractal. Change weights as well as A on every replay:
++    # partial last M fractal, small-M Cube dispatch and K=128 tail after a
++    # 512-wide stage. Change weights as well as A on every replay:
+     # no previous tile/route/graph invocation may survive in local memory.
+     values = make_inputs(tokens, 128, inputs)
+     device_values = [value.npu() for value in layout_values(values, True)]
+@@ -153,6 +154,16 @@ def test_wide_unpack_basis_at_batch_and_group_boundaries():
+     torch.testing.assert_close(actual, reference(x, packed, scales, offsets), rtol=0, atol=0)
+ 
+ 
++@pytest.mark.parametrize("inputs", [640, 2560])
++def test_small_cube_basis_at_k_stage_and_tail_boundaries(inputs):
++    columns = sorted({0, 127, 128, 511, 512, inputs - 1, inputs - 128})
++    x, packed, scales, offsets = make_inputs(len(columns), 128, inputs)
++    x = torch.eye(inputs, dtype=torch.float16)[columns]
++    scales.fill_(0.125)
++    actual = kernel(*(v.npu() for v in layout_values([x, packed, scales, offsets], True)), tiled=True).cpu()
++    torch.testing.assert_close(actual, reference(x, packed, scales, offsets), rtol=0, atol=0)
++
++
+ @pytest.mark.parametrize("bad", ["tokens", "scale_shape", "offset_dtype", "packed_shape", "noncontiguous"])
+ def test_invalid_inputs_fail_before_device_launch(bad):
+     values = list(make_inputs(2, 640, 2560))

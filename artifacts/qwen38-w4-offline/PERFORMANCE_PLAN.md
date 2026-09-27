@@ -219,6 +219,12 @@ projection 的 copy/event/scalar 开销，必须先通过数值、动态 replay�
 真实 partial-layer A/B，再进入完整模型 benchmark。生产 W8 未修改，
 19.073/18.091 tok/s 的目标仍未达到。
 
+small-M Cube stage 从 K=128 改到 512 的独立候选通过 195 NPU tests，
+但相同真实 partial-layer 的五个 replay shapes 全部慢 0.76–2.78%，
+故没有保留，也未进入整模型。记录与源码 patch 已归档。
+接下来以同一已验证 compact binary 和 QSA 修复重测 k=4 + FULL
+`[1,5]`；这是新的待验证实验，不代表旧 k=4 结果已经被推翻。
+
 ## Acceptance criteria
 
 - Compare against a freshly measured W8 baseline on the same four NPUs,
