@@ -351,4 +351,17 @@ W4 projections 仍是最大具名算子成本，占累计 task time 的 41–43%
 局部 gain 不能等同 tok/s。`mtp2-r8` 通过三个正确 smoke，继续使用
 MTP k=2 与有 runtime 证据的 FULL `[1,3]`。三题各生成 512 tokens，
 短中位数 13.213 tok/s，比旧 13.363 低 1.12%，没有短题提速证据。
-长题正在运行；目前已完成的长题中位数仍是 r7 的 13.683 tok/s。
+约 23.4k 长三题也完成，14.639/12.990/12.119 tok/s，中位数
+12.990（比 r7 的 13.683 低 5.07%）；均生成 512 tokens、复用
+23,168 prefix tokens。cold TTFT 358.321 秒，输出与 acceptance
+改变，没有整模型提速证据，仍未达到 W8 基线。
+
+新的固定形状 greedy rejection 路径移除均匀 2–8 drafts 的 host-count
+H2D 和动态 boolean indexing，保留 k=1、ragged 与 random fallback。
+55 CPU、64 NPU changing-input graph tests 和既有 21 sampler UT
+通过。两 drafts / batch-one 的独立 eager sampler 从 1.824–2.022 ms
+降到 0.182–0.207 ms；这不是整模型同倍数提速。
+`mtp2-r9` 三个真实 smoke 正确、MTP k=2 和 FULL `[1,3]` runtime
+replay 有证据。短三题全部完成 512 tokens，15.358/13.239/13.729
+tok/s，中位数 **13.729**（比 r8 高 3.90%）；输出和 acceptance 改变，
+不将全部差异归因于新 sampler。长题仍在运行，W8 基线尚未达到。

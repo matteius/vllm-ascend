@@ -32,6 +32,7 @@ from vllm_ascend.ops.triton.reject_sample import (
 )
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.sampler import apply_top_k_top_p
+from vllm_ascend.sample.uniform_greedy_rejection import try_uniform_greedy_rejection
 
 
 class AscendRejectionSampler(RejectionSampler):
@@ -1068,6 +1069,19 @@ def rejection_greedy_sample_pytorch(
     synthetic_conditional_rates=None,
     synthetic_mode=False,
 ):
+    if try_uniform_greedy_rejection(
+        output_token_ids,
+        draft_token_ids,
+        target_argmax,
+        bonus_token_ids,
+        draft_tokens_per_req,
+        max_spec_len,
+        is_greedy,
+        uniform_probs,
+        synthetic_conditional_rates,
+        synthetic_mode,
+    ):
+        return
     batch_size = output_token_ids.size(0)
     num_tokens = draft_token_ids.size(0)
     device = output_token_ids.device

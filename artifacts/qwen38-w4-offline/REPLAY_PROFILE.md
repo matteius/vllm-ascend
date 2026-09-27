@@ -769,7 +769,7 @@ rank0 的八个最长 `aten::copy_` 为 99.378–113.128 ms；各自内部
 `argmax` 后的 host-to-device copy。源码中的通用 greedy rejection
 path 有未 pin 的 draft-count H2D、动态 boolean indexing 和
 `if torch.any(...)`；k=1 的专用路径不经过该函数。它是下一步的
-设备端固定形状 sampling 诊断线索，尚未修改或证明为全部等待的来源。
+设备端固定形状 sampling 诊断线索，后续候选见下；未证明为全部等待的来源。
 不能将 sampled host self time 与 device time 再次相加。
 
 ## 第十一个候选：复用 QSA causal position 商
@@ -805,9 +805,72 @@ server 空闲且准确 PID tree 完全退出后才运行 NPU tests 和 timings�
 14.919 / 13.183 / 13.213 tok/s，中位数 **13.213**，比 r7 的
 13.363 低 1.12%。drafted/accepted=382/321、432/297、430/298；
 只有第一题的输出 SHA 与 r7 相同，acceptance 仍变化；短题没有形成
-提速证据。长题正在运行，已完成的长题中位数仍为 r7 的
-13.683。尚未达到 W8 的 19.073 / 18.091，不把局部 selection 降时
+提速证据。长三题已完成，14.639 / 12.990 / 12.119 tok/s，中位数
+**12.990**，比 r7 的 13.683 低 5.07%。每题生成 512 tokens、复用
+23,168 prefix tokens；drafted/accepted=378/322、422/301、450/288，
+输出 SHA 与 acceptance 改变。冷 TTFT 358.321 秒，没有整模型提速
+证据。尚未达到 W8 的 19.073 / 18.091，不把局部 selection 降时
 当作已实现的 generation speed 提升。
+
+## 第十二个候选：固定形状 multi-draft greedy rejection
+
+新增 `sample/uniform_greedy_rejection.py`，仅在各请求 draft 长度一致且
+为 2–8 时提前处理。scheduler 的 Python lengths 用于确认矩形布局，
+接受/拒绝和 greedy mask 保留在设备上。静态有界循环使用 `where`
+与逐列 copy，避免 pageable draft-count H2D、动态 boolean indexing、
+`nonzero`、`if torch.any`。拒绝后的 suffix、非 greedy 行以及多余
+output columns 保留调用方原值。k=1、ragged、空 draft 或超过八个
+draft 仍走原路径；不改 random sampling 或概率。没有新增环境变量。
+
+55 项 CPU tests 覆盖至八 drafts 的全部 acceptance patterns、mixed
+greedy、int32/int64 输出、非连续输入、synthetic probability 边界、
+负 draft ID 和 fallback 不改输出。64 项 310P tests 通过实际 dispatcher
+验证 eager 与 graph 完全一致，capture 后改变 drafts、targets、bonus、
+概率和 greedy mask，并用 777 污染 output 检查 replay 清理。合计
+119 项通过（15.86 秒），既有 sampler UT 另有 21 项通过（11.09 秒）。
+
+第一轮 microbenchmark 在 old reference 的全接受 case 因 bonus int64 /
+output int32 不匹配报错；这是工具未遵守旧接口 dtype 的问题，不是新
+算子故障。已把 benchmark bonus 改为与实际 sampler 一样的 int32，
+保留失败日志 `uniform-rejection-r1-bench.log`，使用新输出 r2 重跑，
+没有覆盖失败证据。源码和 runtime 候选未因此修改。
+
+| drafts | batch | 全接受 | 原 eager ms | 新 eager ms |
+| ---: | ---: | --- | ---: | ---: |
+| 2 | 1 | 否 | 1.824482 | 0.206545 |
+| 2 | 1 | 是 | 2.022500 | 0.181590 |
+| 4 | 1 | 否 | 1.679657 | 0.304908 |
+| 4 | 1 | 是 | 1.964977 | 0.342370 |
+| 8 | 1 | 否 | 1.687348 | 0.613797 |
+| 8 | 1 | 是 | 2.122682 | 0.569095 |
+
+全部 18 个 cases（drafts 2/4/8 × batch 1/4/16 × accept/reject）
+输出精确一致，50 iterations × 5 trials 的局部中位数降低 63.62–91.98%。
+old reference 先运行、candidate 后运行，并非随机交错；这些是独立
+sampler timings，不把约 100 ms 的 profile host copy wait 当成可消除
+的 sampling 成本，也不外推等比例整模型 gain。原始数据及源码 SHA256
+见 `replay-r5/uniform-rejection-r2.jsonl`。
+
+`mtp2-r8` 六个请求和 smoke 完成、server 空闲且准确 PID tree 正常退出
+后才替换隔离 W4 runtime 的 sampler 并运行上述检查。W8 环境和 launcher
+未修改。新的 `mtp2-r9` 使用同一 compact kernel、TP4/EP、MTP k=2、
+FULL `[1,3]` 和同一短/23.4k benchmark protocol。三个真实 smoke 已正确
+结束（323、完整 1–50、`[0, 4, 16]`），runtime 三-token FULL replay
+计数及两 draft positions 的 acceptance 均有证据。权重仍为
+19.3821 GiB/rank，graph 仍为 0.38 GiB。
+
+短三题各完成 512 tokens：**15.358 / 13.239 / 13.729 tok/s**，中位数
+**13.729**，比 r8 的 13.213 高 3.90%。drafted/accepted 为
+382/321、440/291、426/300；所有输出 SHA 改变，第一题虽然计数与
+r8 相同但输出并非 bitwise 相同。不能把全部差异归因于 sampler，
+也不能用 counting smoke 的 16.549 tok/s 代替 coding median。
+`replay-r5/w4-mtp2-r9-short.jsonl` 与相邻 smoke JSONL 保留完整结果。
+长题正在运行，还没有新的长上下文结论，W8 19.073/18.091 目标未达成。
+server 留在隔离 :8002，API PID 3684371、engine 3685195，TP workers
+3685525–3685528；host 日志 `server-routed-mtp-mtp2-r9.log`。
+
+本候选 scoped manual hooks 全部通过，只有同一未改动的
+`check-symbolic-meta` 第 655 行问题需跳过；不是全库 lint 全绿。
 
 ## 复现与交接
 
