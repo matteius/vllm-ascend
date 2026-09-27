@@ -7,7 +7,6 @@
 
 namespace optiling {
 constexpr int64_t MAX_ROUTES = 80;
-constexpr int64_t MAX_REUSED_ROUTES = 20;
 constexpr int64_t GROUP_SIZE = 128;
 constexpr int64_t OUTPUT_TILE = 32;
 constexpr int64_t MIN_K = 256;
@@ -46,12 +45,11 @@ static ge::graphStatus TileQwenW4Routed(gert::TilingContext* context) {
   auto workspace = context->GetWorkspaceSizes(1);
   OP_CHECK_NULL_WITH_CONTEXT(context, workspace);
   workspace[0] = device.GetLibApiWorkSpaceSize() + rows * n * k * sizeof(uint16_t);
-  if (rows <= MAX_REUSED_ROUTES) {
-    // Private batched output for each possible first owner of an expert.
-    // Weight banks stay packed; scratch lasts only for this projection.
-    workspace[0] += rows * rows * n * sizeof(uint16_t);
-  }
-  context->SetBlockDim((rows <= MAX_REUSED_ROUTES ? 1 : rows) * (n / OUTPUT_TILE));
+  // Private batched output for each possible first owner of an expert.
+  // This is at most 32,768,000 bytes at R=80,N=2560, not a resident bank.
+  // Weight banks stay packed; scratch lasts only for this projection.
+  workspace[0] += rows * rows * n * sizeof(uint16_t);
+  context->SetBlockDim(n / OUTPUT_TILE);
   context->SetTilingKey(0);
   data.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
   context->GetRawTilingData()->SetDataSize(data.GetDataSize());

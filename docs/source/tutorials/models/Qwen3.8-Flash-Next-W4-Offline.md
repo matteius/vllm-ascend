@@ -29,11 +29,11 @@ speed or broad model quality; see the hardware results below.
 | PLE disk-backed lazy lookup | Preserved; W4 explicitly selects the standard HF index |
 | W8 runtime, MTP and graph defaults | Unchanged unless W4 checkpoint metadata is present |
 | W4 NPU inference | Full checkpoint loaded on TP4/310P; three completed correct answers and seven operator regressions passed |
-| Experimental W4 Cube projection | Separate group/routed 310P operators; 82 NPU regressions and real-weight TP4 smokes passed |
+| Experimental W4 Cube projection | Separate group/routed 310P operators; 122 NPU regressions and real-weight TP4 smokes passed |
 | W4 ACLGraph | FULL_DECODE_ONLY verified with cube_310_routed; older backends still require eager |
-| W4 MTP | k=1 verified with real weights, three correct completed answers and increasing acceptance counters |
+| W4 MTP | k=1/k=2/k=4 real-weight smokes and FULL replay verified; sustained speed depends on workload |
 | W4 multimodal / flashcomm1 / EPLB | Not validated; language-model-only with existing collectives |
-| Long context / concurrent sessions | Not validated for W4 |
+| Long context / concurrent sessions | ~23.4k batch-one k=1 benchmark complete; maximum capacity and concurrency unvalidated |
 
 Uneven expert ownership is not proof of whole-model TP3/TP6 support: attention,
 shared-expert and MTP divisibility constraints still apply.
@@ -132,6 +132,12 @@ the model-specific metadata selects W4, and generic quantization is rejected.
 Never raise memory utilization above the established 0.965 cap. The model config
 advertises 262,144 positions; W4's usable maximum has **not** been measured.
 
+较大的 MTP draft count 需要同时修改两个参数：k=2 使用
+`num_speculative_tokens=2` / `cudagraph_capture_sizes=[1,3]`，k=4 使用
+`num_speculative_tokens=4` / `cudagraph_capture_sizes=[1,5]`。本轮两者均已
+通过真实 smoke 和相应 FULL replay；更大的 k 不保证更快，需看实际接受率。
+保留上述 k=1 已验证长请求基线，未自动替换生产 W8 的参数。
+
 The command requires an isolated installation rebuilt with both
 `QwenW4GroupMatmulV310` and `QwenW4RoutedMatmulV310` plus matching Torch bindings.
 It leaves the checkpoint's default and the W8 runtime unchanged. Detailed
@@ -145,8 +151,9 @@ uses the CPU. The new `cube_310_routed` variant reads expert IDs on device and
 supports bounded decode graphs up to 80 routes (8 tokens for this top-k=10 model).
 Larger prefill uses the existing grouped host route; oversized capture fails
 explicitly. Workspace is bounded by `routes*N*K*2 + CANN reserve`, plus
-`routes*routes*N*2` for at most 20 routes to reuse a repeated expert's unpacking
-within a verification batch. It is not a persistent expanded expert bank.
+`routes*routes*N*2` for at most 80 routes to reuse a repeated expert's unpacking
+within a verification batch (31.25 MiB additional scratch at R=80/N=2560).
+It is not a persistent expanded expert bank.
 For eager isolation, select `cube_310_tiled`
 or remove the overrides, add `--enforce-eager`, and remove speculative and
 compilation configuration. Do not use `TORCHDYNAMO_DISABLE=1` as graph evidence.
@@ -243,7 +250,15 @@ replay 的瓶颈 profile；仍未达到 W8 的 19.073/18.091 tok/s。
 更宽 unpack 候选已通过 101 项 NPU 回归、真实权重 layer replay 和三个
 整模型 smoke；短/23.4k coding 中位数为 **11.310 / 11.239 tok/s**。
 后续 persistent N-tile 调度通过 107 项 NPU 回归与整模型 smoke；
-MTP k=1 + FULL graph 短 coding 中位数为 **11.830 tok/s**，长请求运行中。
+MTP k=1 + FULL graph 短/23.4k coding 中位数为 **11.830 / 11.052 tok/s**。
+长请求低于 wide 的 11.239，且 acceptance 不同，不声称普遍提速。
 其两-token 单层 replay 更快，五-token 单层没有改善；不推广到其它 MTP k。
+下一 80-route 候选通过 122 项 NPU tests；修正输入对齐后，五-token
+partial-layer replay 为 3.524 ms，不使用输入不同的 2.136 ms 作 A/B。
+MTP k=2 的三个真实 smoke 与三-token FULL replay 通过；短 coding 中位数
+为 **11.972 tok/s**，并非 counting 的 14.600 tok/s。
+MTP k=4 的真实 smoke、五-token FULL replay 也通过，但短 coding 中位数
+回落至 **10.155 tok/s**（三题 12.377/9.877/10.155）；不能用 counting 的
+16.179 tok/s 宣称 coding 提速。k=4 长请求仍在验证，不自动升级生产配置。
 各候选、原始样本、kernel SHA 和边界说明见
 `artifacts/qwen38-w4-offline/REPLAY_PROFILE.md`。

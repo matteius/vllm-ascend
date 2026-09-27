@@ -52,16 +52,38 @@ smokes. Its completed short/23.4k coding medians are 11.310/11.239 tok/s.
 See [REPLAY_PROFILE.md](REPLAY_PROFILE.md). No production parity claim.
 
 Persistent N-tile route scheduling now passes 107 NPU tests and real-weight
-layer/full-model smokes. Its MTP k=1 + FULL graph short median is 11.830 tok/s;
-the matched long run is still active. There is no resident-memory increase.
+layer/full-model smokes. Its MTP k=1 + FULL graph short/long medians are
+11.830/11.052 tok/s. The long median is below wide's 11.239, with different
+acceptance; this is not a universal throughput win. There is no resident-weight
+memory increase.
 The five-token synthetic layer diagnostic has not improved (3.570 vs 3.484 ms),
 so do not extrapolate the two-token diagnostic's 24.93% gain to all batch sizes.
-After collecting the long run, evaluate bounded expert reuse for 30/50-route
-verification and a controlled MTP k=2/k=4 sweep; the current reuse/scheduling
-optimization only covers at most 20 routes. Larger draft counts need their own
-full-model correctness, graph replay, workspace-memory and throughput gates.
+The next candidate extends bounded expert reuse/scheduling to 80 routes. All
+122 NPU tests pass. The corrected matched five-token partial-layer replay is
+3.524 ms versus 3.570; an earlier 2.136 ms sample used different synthetic
+inputs and is not a matched speedup measurement. MTP k=2 passes all three real
+smokes and three-token FULL replay; its short coding median is 11.972 tok/s
+(13.482/11.259/11.972), only 1.20% above k=1. Lower acceptance limits the gain.
+MTP k=4 also passes all three real smokes and five-token FULL replay, but its
+completed short median regresses to 10.155 tok/s (12.377/9.877/10.155), versus
+the misleadingly faster 16.179 tok/s counting smoke. Its long-context gate is
+running; do not promote k=4 as a coding acceleration. Graph capture reports
+0.38 GiB for k=2 and 0.50 GiB for k=4, with model-load still 19.3821 GiB/rank.
+Additional projection-output scratch is bounded at 31.25 MiB
+for 80 routes and N=2560, without a resident expanded expert bank.
 Independent next trace lead: reuse Q/K/index-query RoPE tables, preserving
 FP32/FP64 policy and MRoPE coordinates instead of narrowing position integers.
+
+The larger kernel hypothesis to test next is removing the dequantized tile's
+UB→GM→L1 round trip. `DequantTileToNz` currently writes a full FP16 N=32 tile to
+per-route global scratch before CATLASS reloads it. The installed CANN 9.1
+`dav_m200/kernel_operator_data_copy_impl.h` supplies `DataCopyUB2L1Impl` through
+`copy_ubuf_to_cbuf` outside the vector-only build. This is an API lead, not
+evidence that the proposed kernel works or is faster. A private Qwen-only
+prototype must bound L1 alongside the activation tiles, preserve exact NZ
+layout and MTE3/MTE1/M lifetimes, and pass the full numerical/replay suite
+before a full-model MTP/graph benchmark. Do not modify the shared W8/GLM block
+kernel speculatively or count theoretical traffic savings as a tok/s result.
 
 ## Acceptance criteria
 

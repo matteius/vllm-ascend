@@ -144,7 +144,70 @@ batch 都提速，也不把单层结果当整模型 tok/s。
 acceptance 也上升，不能把全部中位数差异归因于 kernel。第一题输出 SHA
 与 wide 相同，accepted 少一个，decode 从 42.330 降到 41.589 s；第二题
 drafted/accepted 同为 288/223，decode 从 46.442 降到 45.361 s。
-当前仍明显低于 W8 的 19.073 tok/s，约 23.4k 长上下文 benchmark 在执行。
+约 23.4k 热前缀三题为 **12.150 / 11.052 / 10.743 tok/s**，中位数
+**11.052 tok/s**，低于 wide 的 11.239；acceptance 分别为
+96.17% / 79.65% / 75.34%。三题均正常完成 512 tokens，cached_tokens=23168。
+冷 warmup TTFT=364.375 s；该段 prefill 与下一候选的 CPU 编译有短暂重叠，
+不能作为严格隔离的冷 prefill A/B。编译在 decode 前完成，NPU tests 在
+所有吞吐请求结束后才运行。短/长结果均仍明显低于 W8，不声称普遍提速。
+
+## 第四个候选：80-route persistent 与 MTP draft-count sweep
+
+将相同 owner/peer/重复 expert 调度扩展至现有上限 80 routes（八个
+top-k=10 tokens）。保留每个 logical route/tile 的独立 unpack workspace，
+额外 `[R,R,N]` projection-output scratch 在 R=80/N=2560 为
+32,768,000 bytes（31.25 MiB）。不新增常驻 expanded expert bank，不改变 W8。
+新增 30/50/80 routes 的 owner、unique experts 和动态 replay 回归。
+
+**122 NPU tests passed / 107.28 s**；37 CPU/build tests passed / 4.79 s。
+真实 layer0、synthetic activations、TP4 rank0、无 collective 的 replay
+在 tokens=1/2/3/5/8 为 **0.590 / 0.421 / 2.681 / 2.136 / 6.465 ms**。
+新增三-token case 会推进 synthetic-input RNG，因此五-token 的 local
+experts 从旧样例的 14 变成 8；2.136 与旧 3.570 ms **不是 matched A/B**，
+不能据此声称提速。随后在服务空闲并完全停止后以相同 `[1,2,5]` 列表
+重跑：0.593 / 0.423 / **3.524 ms**；五-token 同为 14 个 local experts，
+比旧 3.570 ms 仅降低 1.29%。allocator reserved 由旧 683,671,552 增至
+1,048,576,000 bytes，这是单层诊断的 allocator 高水位，不是新增常驻权重。
+不能按单层结果估计整模型 MTP k=2/k=4 的收益。
+
+构建记录 `build-persistent-r3.log`，独立 vendor `ops-persistent-r3`，
+group SHA 与上一版相同；routed SHA256：
+`e667ab7e366d4bfba0291364d7a097a64bafc6d7548a9fe9bba163aebb01ad37`。
+测量顺序为先结束上一服务的全部吞吐请求，确认空闲并停掉准确 PID，
+再运行 NPU tests/layer checks，最后启动 MTP k=2、FULL_DECODE_ONLY `[1,3]`。
+后续 k=4 必须单独通过真实 smoke 与五-token FULL replay；启动成功不算通过。
+
+k=2 已通过全部三个真实 smoke，1–50 为 **14.600 tok/s**。
+runtime 表明确显示三-token batch `FULL`；model-load 仍为
+19.3821 GiB/rank，capture 报告 0.38 GiB。三题 coding 为
+**13.482 / 11.259 / 11.972 tok/s**，中位数 **11.972 tok/s**，
+仅比 k=1 的 11.830 高 1.20%。drafted/accepted 分别为 378/322、448/289、
+424/299，即 acceptance=85.19% / 64.51% / 70.52%。三题都完成 512 tokens。
+不能把更高的 counting 速度当成 coding 的典型速度，也不声称达到 W8。
+证据为 `server-routed-mtp-mtp2-r1.log`、`w4-mtp2-r1-short.jsonl`。
+
+k=4 也通过三个真实 smoke：323、1–50、`[0,4,16]` 正确终止，
+counting 为 **16.179 tok/s**。runtime 表确认五-token `FULL`；capture
+报告 0.50 GiB，常驻 model-load 仍为 19.3821 GiB/rank。首题 512-token
+coding 为 12.377 tok/s，低于 k=2 同题的 13.482；不能用 counting 替代
+实际 coding 结果。三题最终为 **12.377 / 9.877 / 10.155 tok/s**，
+中位数 **10.155 tok/s**，比 k=2 慢 15.18%；全部完成 512 tokens。
+drafted/accepted=548/375、680/344、660/346，acceptance 分别为
+68.43% / 50.59% / 52.42%。更长 verification 加上更低接受率抵消了
+每步生成更多 tokens 的收益；不推荐把 k=4 当成 coding 提速配置。
+约 23.4k 的 k=4 长 benchmark 已开始，独立记录稳定性与长请求速度，
+不改写这个短请求回归结论。
+
+| 已完成短 coding sweep | 中位 tok/s | FULL verification tokens | capture 报告 GiB |
+| --- | ---: | ---: | ---: |
+| W4 k=1 / 20-route persistent | 11.830 | 2 | 0.30 |
+| W4 k=2 / 80-route persistent | 11.972 | 3 | 0.38 |
+| W4 k=4 / 80-route persistent | 10.155 | 5 | 0.50 |
+| 生产 W8 k=1 基线 | 19.073 | 2 | 不在本轮重测 |
+
+W4 k=1 与更大 k 同时改变了大 batch kernel 分支；不是单独改变 k 的
+纯 causal A/B。k=2/k=4 使用同一 binary，prompt/sampling/长度协议相同。
+小样本不能说明 k=2 的 1.20% 中位数优势显著。当前目标仍未达成。
 
 ## 复现与交接
 
@@ -162,10 +225,17 @@ bash qwen38-w4-wide-benchmark-r1.sh
 bash qwen38-w4-server-routed-check-r1.sh persistent-r1 \
   /srv/ai/src/qwen38-w4-operator-build-r1/ops-persistent-r2/vendors/qwen_w4_probe_transformer
 bash qwen38-w4-persistent-benchmark-r1.sh
+
+# 80-route kernel 与更大 MTP verification（重跑必须使用新的 label）：
+bash qwen38-w4-server-routed-check-r1.sh mtp2-r1 \
+  /srv/ai/src/qwen38-w4-operator-build-r1/ops-persistent-r3/vendors/qwen_w4_probe_transformer 2
+bash qwen38-w4-mtp-short-benchmark.sh mtp2-r1
+# k=4 对应最后一个参数 4，capture sizes 自动配为 [1,5]。
 ```
 
-服务配置见本页开头和 tutorial，仍为 :8002 / TP4 / EP / MTP k=1 /
-FULL_DECODE_ONLY；不将启动成功当作验证通过。
+服务配置见本页开头和 tutorial，仍为 :8002 / TP4 / EP /
+FULL_DECODE_ONLY；本轮增加 k=2/k=4（分别 `[1,3]` / `[1,5]`），
+不将启动成功当作验证通过。所有候选均保留 packed W4 bank。
 
 本轮 scoped manual pre-commit 的 Ruff、codespell、typos、markdownlint、
 secret scan 等均通过；全局 `check-symbolic-meta` 仍因未改动的
@@ -199,8 +269,10 @@ imports 等。自动格式修改只留在临时快照，没有污染任务 workt
 
 已验证的基线及专家复用版本为真实权重、MTP、decode ACLGraph、EP；
 没有用 dummy 代替真实权重。更宽 unpack 也已通过真实 smoke 与短/长请求。
-persistent 候选已完成算子、真实权重单层和整模型 smoke，coding benchmark
-已完成短请求，长请求仍在执行。
+persistent 20-route 候选已完成算子、真实权重单层和整模型 smoke，
+短/长 coding benchmark 均完成；80-route 候选也已完成 MTP k=2 的真实
+smoke、三-token FULL replay 和短 coding；k=4 的真实 smoke 与五-token
+FULL replay、短 coding 也完成，长 coding 仍在执行。
 本轮只隔离 batch-one decode，不声称 W4 已验证 128k×16、双 160k 或
 完整任务质量。flashcomm1 和多模态未在本轮验证；容量和量化质量仍需后续
 独立评测，不能伪造 accuracy YAML 分数。

@@ -246,7 +246,7 @@ def test_routed_graph_changes_experts_in_both_directions(routes, outputs, inputs
         )
 
 
-@pytest.mark.parametrize("routes", [2, 3, 19, 20, 21])
+@pytest.mark.parametrize("routes", [2, 3, 19, 20, 21, 30, 50, 80])
 @pytest.mark.parametrize("outputs,inputs", [(128, 256), (640, 2560), (2560, 640)])
 def test_routed_reuse_owner_changes_on_graph_replay(routes, outputs, inputs):
     values, canonical = routed_values(routes, outputs, inputs)
@@ -299,11 +299,11 @@ def test_routed_invalid_input_fails_before_launch(bad):
 
 
 @pytest.mark.parametrize("outputs,inputs", [(640, 2560), (2560, 640)])
-@pytest.mark.parametrize("routes", [10, 20, 21])
+@pytest.mark.parametrize("routes", [10, 20, 21, 30, 50, 80])
 def test_routed_many_unique_owners_and_peer_transitions(routes, outputs, inputs):
     # Persistent N-tile tasks must refresh every expert's metadata and drain
     # their UB/Cube stores before processing the next local or peer row.
-    # Three-expert duplicate tests alone do not exercise twenty unique owners.
+    # Three-expert duplicate tests alone do not exercise eighty unique owners.
     values, canonical = routed_values(routes, outputs, inputs, experts=routes)
     values[-1] = torch.arange(routes, dtype=torch.int32)
     device_values = [value.npu() for value in values]
