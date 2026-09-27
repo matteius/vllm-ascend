@@ -1,0 +1,149 @@
+diff --git a/csrc/gmm/qwen_w4_group_matmul_v310/op_kernel/qwen_w4_group_matmul_v310.h b/csrc/gmm/qwen_w4_group_matmul_v310/op_kernel/qwen_w4_group_matmul_v310.h
+index 76180c3cc..e1a91b442 100644
+--- a/csrc/gmm/qwen_w4_group_matmul_v310/op_kernel/qwen_w4_group_matmul_v310.h
++++ b/csrc/gmm/qwen_w4_group_matmul_v310/op_kernel/qwen_w4_group_matmul_v310.h
+@@ -65,6 +65,8 @@ constexpr uint32_t QW4_ROUTE_GATHER_ROWS = 16;
+ // Per packed byte: uint8 input, FP16 input, int16 cast, two FP16 outputs.
+ constexpr uint32_t QW4_TILED_BYTES_PER_PACKED = 9;
+ constexpr uint32_t QW4_BUFFER_ALIGNMENT = 512;
++constexpr uint32_t QW4_MAX_ROUTED_ROWS = 80;
++constexpr uint32_t QW4_ROUTE_ID_BYTES = QW4_BUFFER_ALIGNMENT;
+ constexpr uint32_t QW4_DMA_BLOCK_BYTES = 32;
+ constexpr uint32_t QW4_HALF_VECTOR_ELEMENTS = 128;
+ constexpr uint32_t QW4_VECTOR_BLOCKS = 8;
+@@ -94,7 +96,8 @@ class QwenW4GroupMatmulV310Cube {
+   // packed buffers are all aligned at this batch size. Canonical uses
+   // its original small K tile and independent scratch layout.
+   static_assert(QW4_WIDE_TILED_K_BATCH * QW4_TILE_N / 2 * QW4_TILED_BYTES_PER_PACKED +
+-                        QW4_TILE_N * (QW4_WIDE_INPUT_DIM / QW4_GROUP_SIZE) * 5 + 3 * QW4_BUFFER_ALIGNMENT <=
++                        QW4_TILE_N * (QW4_WIDE_INPUT_DIM / QW4_GROUP_SIZE) * 5 + 3 * QW4_BUFFER_ALIGNMENT +
++                        QW4_ROUTE_ID_BYTES <=
+                     ArchTag::UB_SIZE,
+                 "Qwen W4 wide unpack must fit the allocated UB");
+   using DispatchPolicyTla = Gemm::MmadPingpongTlaMulti<ArchTag, true, false>;
+@@ -106,7 +109,9 @@ class QwenW4GroupMatmulV310Cube {
+       Gemm::Block::BlockMmadTla<DispatchPolicyTla, L1TileShapeTla, L0TileShapeTla, half, half, half, void, TileCopy>;
+   static_assert(QW4_L1_WEIGHT_BYTES + QW4_CUBE_STAGES * QW4_L1_ACTIVATION_BYTES <= ArchTag::L1_SIZE,
+                 "Qwen W4 decoded tile and activation stages must fit L1");
+-  static_assert(QW4_ROUTE_GATHER_ROWS * QW4_WIDE_INPUT_DIM * sizeof(half) <= ArchTag::UB_SIZE,
++  static_assert(QW4_MAX_ROUTED_ROWS * sizeof(int32_t) <= QW4_ROUTE_ID_BYTES,
++                "Qwen W4 route IDs must fit their reserved UB region");
++  static_assert(QW4_ROUTE_GATHER_ROWS * QW4_WIDE_INPUT_DIM * sizeof(half) + QW4_ROUTE_ID_BYTES <= ArchTag::UB_SIZE,
+                 "Qwen W4 route gather must fit the allocated UB");
+ 
+   __aicore__ inline QwenW4GroupMatmulV310Cube() {}
+@@ -167,6 +172,29 @@ class QwenW4GroupMatmulV310Cube {
+     coreNzBase_ = static_cast<int64_t>(logicalTile) * QW4_TILE_N * K_;
+   }
+ 
++  // The bounded route list is reused by owner detection, compaction and
++  // output scatter. Read it once per persistent N tile instead of issuing
++  // GM scalar loads on every scan. Reserve the UB tail so unpacking, gather,
++  // output zeroing and accumulator stores cannot overwrite these IDs.
++  __aicore__ inline LocalTensor<int32_t> LoadRouteIds(GM_ADDR expertIds, uint32_t rows) {
++    auto ids = resource.ubBuf.template GetBufferByByte<int32_t>(ArchTag::UB_SIZE - QW4_ROUTE_ID_BYTES);
++    GlobalTensor<int32_t> source;
++    source.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(expertIds));
++    constexpr uint32_t idsPerBlock = QW4_DMA_BLOCK_BYTES / sizeof(int32_t);
++    const uint32_t alignedRows = rows / idsPerBlock * idsPerBlock;
++    if (alignedRows != 0) {
++      DataCopy(ids, source, alignedRows);
++      SetFlag<HardEvent::MTE2_S>(EVENT_ID3);
++      WaitFlag<HardEvent::MTE2_S>(EVENT_ID3);
++    }
++    // Do not round the DMA up: the final (at most seven) IDs can end at
++    // the allocation boundary. Graph replay must load the new IDs each time.
++    for (uint32_t row = alignedRows; row < rows; ++row) {
++      ids.SetValue(row, source.GetValue(row));
++    }
++    return ids;
++  }
++
+   // One persistent block owns this N tile across all routes. Initialize
+   // every row once, then let local experts overwrite their rows. This also
+   // erases local->peer graph replays without draining the pipe per peer.
+@@ -197,14 +225,12 @@ class QwenW4GroupMatmulV310Cube {
+   // workspace, which the resident-L1 tiled path no longer reads or writes.
+   // At most sixteen rows are staged in UB; wider route batches flush in
+   // chunks, keeping the gather bounded for the eighty-route graph limit.
+-  __aicore__ inline uint32_t GatherMatchingRows(GM_ADDR input, GM_ADDR scratch, GM_ADDR expertIds, int32_t expert,
++  __aicore__ inline uint32_t GatherMatchingRows(GM_ADDR input, GM_ADDR scratch, LocalTensor<int32_t> ids, int32_t expert,
+                                                 uint32_t rows, int64_t inputs) {
+     GlobalTensor<half> source;
+     source.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(input));
+     GlobalTensor<half> destination;
+     destination.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(scratch));
+-    GlobalTensor<int32_t> ids;
+-    ids.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(expertIds));
+     auto staging = resource.ubBuf.template GetBufferByByte<half>(0);
+     PipeBarrier<PIPE_ALL>();
+     SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID4);
+@@ -286,12 +312,10 @@ class QwenW4GroupMatmulV310Cube {
+   // Routed decode can evaluate several rows with one decoded expert tile.
+   // The temporary output is private to the first route owning that expert;
+   // publish only matching rows so unrelated experts never race on y.
+-  __aicore__ inline void CopyMatchingRows(GM_ADDR output, GM_ADDR expertIds, int32_t expert, uint32_t tile,
++  __aicore__ inline void CopyMatchingRows(GM_ADDR output, LocalTensor<int32_t> ids, int32_t expert, uint32_t tile,
+                                           uint32_t originalRows) {
+     GlobalTensor<half> destination;
+     destination.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(output));
+-    GlobalTensor<int32_t> ids;
+-    ids.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(expertIds));
+     auto rowBuffer = resource.ubBuf.template GetBufferByByte<half>(0);
+     // BlockMmad's finalWaitFlags completes its output stores. Explicitly
+     // order the subsequent GM read and each reuse of this 64-byte buffer.
+diff --git a/csrc/gmm/qwen_w4_routed_matmul_v310/op_kernel/qwen_w4_routed_matmul_v310.cpp b/csrc/gmm/qwen_w4_routed_matmul_v310/op_kernel/qwen_w4_routed_matmul_v310.cpp
+index 7c3b6b81e..d3db2d5fb 100644
+--- a/csrc/gmm/qwen_w4_routed_matmul_v310/op_kernel/qwen_w4_routed_matmul_v310.cpp
++++ b/csrc/gmm/qwen_w4_routed_matmul_v310/op_kernel/qwen_w4_routed_matmul_v310.cpp
+@@ -18,9 +18,8 @@ extern "C" __global__ __aicore__ void qwen_w4_routed_matmul_v310(GM_ADDR x, GM_A
+   // Host validation bounds this to at most 80 routes (eight top-k=10 rows),
+   // allowing MTP verification with more than two tokens to reuse experts too.
+   const uint32_t tile = AscendC::GetBlockIdx();
+-  AscendC::GlobalTensor<int32_t> ids;
+-  ids.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(expert_ids));
+   NsQwenW4::QwenW4GroupMatmulV310Cube op;
++  auto ids = op.LoadRouteIds(expert_ids, td->numRows);
+   GM_ADDR user = AscendC::GetUserWorkspace(workspace);
+   op.ZeroOutputRows(y, td->numRows, n, tile);
+   for (uint32_t route = 0; route < td->numRows; ++route) {
+@@ -54,7 +53,7 @@ extern "C" __global__ __aicore__ void qwen_w4_routed_matmul_v310(GM_ADDR x, GM_A
+       // Reserve R*32*K elements per N tile; compact input needs only R*K.
+       // This is disjoint across persistent blocks and from output scratch.
+       projectionInput = user + static_cast<int64_t>(tile) * td->numRows * NsQwenW4::QW4_TILE_N * k * sizeof(half);
+-      projectionRows = op.GatherMatchingRows(x, projectionInput, expert_ids, expert, td->numRows, k);
++      projectionRows = op.GatherMatchingRows(x, projectionInput, ids, expert, td->numRows, k);
+       projectionOutput = user + (td->numRows * n * k + route * td->numRows * n) * sizeof(half);
+     }
+     const int64_t metadataOffset = static_cast<int64_t>(expert) * n * (k / NsQwenW4::QW4_GROUP_SIZE);
+@@ -67,7 +66,7 @@ extern "C" __global__ __aicore__ void qwen_w4_routed_matmul_v310(GM_ADDR x, GM_A
+     op.SetWorkspaceTile(route * nTiles + tile);
+     op.Process();
+     if (reuse) {
+-      op.CopyMatchingRows(y, expert_ids, expert, tile, td->numRows);
++      op.CopyMatchingRows(y, ids, expert, tile, td->numRows);
+     }
+     AscendC::PipeBarrier<PIPE_ALL>();
+   }
+diff --git a/tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_group_matmul_310.py b/tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_group_matmul_310.py
+index c76f5aec6..86c5629f9 100644
+--- a/tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_group_matmul_310.py
++++ b/tests/e2e/nightly/310p/single_node/ops/test_qwen_w4_group_matmul_310.py
+@@ -271,7 +271,7 @@ def test_routed_graph_changes_experts_in_both_directions(routes, outputs, inputs
+         )
+ 
+ 
+-@pytest.mark.parametrize("routes", [1, 2, 3, 19, 20, 21, 30, 50, 80])
++@pytest.mark.parametrize("routes", [1, 2, 3, 7, 8, 9, 15, 16, 17, 19, 20, 21, 30, 31, 32, 33, 50, 79, 80])
+ @pytest.mark.parametrize("outputs,inputs", [(128, 256), (640, 2560), (2560, 640)])
+ def test_routed_reuse_owner_changes_on_graph_replay(routes, outputs, inputs):
+     values, canonical = routed_values(routes, outputs, inputs)
+@@ -290,6 +290,8 @@ def test_routed_reuse_owner_changes_on_graph_replay(routes, outputs, inputs):
+     # Poison the output before every replay: batched strided zeroing must
+     # cover every peer tile, including a single row and the maximum batch.
+     # Row activations differ, so copying the owner's result to peers is wrong.
++    # Cover both sides of the eight-ID DMA boundary and the largest scalar
++    # tail; the on-chip IDs must survive unpack/gather/store and refresh.
+     for phase in range(5):
+         ids = torch.full((routes,), 2, dtype=torch.int32)
+         if phase == 1:

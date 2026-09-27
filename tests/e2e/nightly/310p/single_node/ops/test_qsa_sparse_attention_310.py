@@ -469,6 +469,59 @@ def test_matmul_prefill_selects_same_groups_as_native_index_score(
     torch.testing.assert_close(selected.group_counts, torch.full_like(selected.group_counts, 512))
 
 
+@pytest.mark.parametrize("num_tokens", [3, 5, 8])
+@pytest.mark.parametrize("heads", [4, 16])
+@pytest.mark.parametrize("capacity", [2048, 5856])
+def test_w4_mtp_matmul_score_tracks_changing_query_pages_and_positions(num_tokens, heads, capacity):
+    if not torch_npu.npu.is_available() or "310" not in torch_npu.npu.get_device_name(0):
+        pytest.skip("requires an Ascend 310P NPU")
+    enable_custom_op()
+    torch_npu.npu.set_compile_mode(jit_compile=False)
+    generator = torch.Generator().manual_seed(723)
+    pages = capacity // 16
+    device = "npu:0"
+    query = torch.empty((num_tokens, heads, 128), dtype=torch.float16, device=device)
+    cache = torch.empty((pages + 7, 19, 128), dtype=torch.float16, device=device)
+    table = torch.empty((1, pages), dtype=torch.int32, device=device)
+    boundaries = torch.tensor([0, num_tokens], dtype=torch.int32, device=device)
+    positions = torch.empty(num_tokens, dtype=torch.int32, device=device)
+    # Selection intentionally runs eagerly between breakable graph segments:
+    # visible table width can grow, while downstream selection buffers stay
+    # fixed. Match that runtime contract instead of capturing the selector.
+    for phase, visible_groups in enumerate([0, 511, 512, capacity - 1, capacity]):
+        query.copy_(torch.randn(query.shape, generator=generator).half())
+        cache.copy_(torch.randn(cache.shape, generator=generator).half())
+        table.copy_(torch.randperm(pages + 7, generator=generator)[:pages].to(torch.int32).unsqueeze(0))
+        positions.copy_(visible_groups * 4 - 1 + torch.arange(num_tokens, dtype=torch.int32) % 4)
+        if phase == 4:
+            query.zero_()  # Exact ties must keep the lowest group IDs.
+        scores = torch.ops._C_ascend.npu_qsa_indexer_score_310(query, cache, table, boundaries, positions, 4)
+        visible = ((positions.long() + 1) // 4).clamp_max(capacity)
+        expected = _repair_native_group_indices(_stable_topk_indices(scores, 512), visible)
+        selected = qsa_indexer_select_groups_310(
+            query,
+            cache,
+            table,
+            boundaries,
+            positions,
+            compress_ratio=4,
+            token_topk=2048,
+            max_matmul_decode_tokens=8,
+        )
+        # FP32 GEMM can reorder near ties inside the same selected set; it
+        # must not replace a selected group or leak a future cache group.
+        torch.testing.assert_close(
+            selected.group_indices.sort(dim=1).values, expected.sort(dim=1).values, rtol=0, atol=0
+        )
+        torch.testing.assert_close(selected.group_counts, visible.clamp_max(512), rtol=0, atol=0)
+        torch.testing.assert_close(selected.tail_starts, ((positions.long() + 1) // 4) * 4, rtol=0, atol=0)
+        torch.testing.assert_close(selected.tail_counts, (positions.long() + 1) % 4, rtol=0, atol=0)
+        if phase == 4:
+            torch.testing.assert_close(
+                selected.group_indices, torch.arange(512, device=device).expand(num_tokens, -1), rtol=0, atol=0
+            )
+
+
 def test_native_index_cache_norm_reduces_all_128_dimensions() -> None:
     if not torch_npu.npu.is_available() or "310" not in torch_npu.npu.get_device_name(0):
         pytest.skip("requires an Ascend 310P NPU")

@@ -1572,6 +1572,7 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
                         compress_ratio=self.indexer.compress_ratio,
                         token_topk=self.indexer.token_topk,
                         max_visible_groups=current_max_groups,
+                        max_matmul_decode_tokens=self._batched_qsa_max_decode_tokens,
                     )
                     copy_group_selection_into(weak_selection, current)
 
@@ -1586,6 +1587,7 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
                     compress_ratio=self.indexer.compress_ratio,
                     token_topk=self.indexer.token_topk,
                     max_visible_groups=max_visible_groups,
+                    max_matmul_decode_tokens=self._batched_qsa_max_decode_tokens,
                 )
             sparse_attention = qsa_sparse_attention_310
             use_batched_prefill = (

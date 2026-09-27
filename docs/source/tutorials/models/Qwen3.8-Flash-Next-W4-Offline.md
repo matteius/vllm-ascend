@@ -318,3 +318,19 @@ QSA-only graph 从 2.071 降到 0.297 ms，不能视为整模型同比提速。
 高 11.82%）；每题生成 512 tokens、复用 23,168 prefix tokens，输出
 SHA 均变化。cold TTFT 357.285 秒，未宣称 W8 parity 或生产等价。
 下一步采集保留 MTP/graphs 的新整模型 trace，不能沿用旧 profile 比例。
+
+该新 trace 已完成：W4 projections 和 QSA index scoring 分别占每 rank
+累计 task time 的 30.64–32.83% / 23.28–24.24%，不是可相加的
+critical-path 占比。进一步仅对 routed-W4 放宽 score GEMM 的两-token
+上限到八-token；W8/default 和其它安全 guards 不变。63 项 CPU、84 项
+NPU QSA tests 通过，包含动态 query/页表/positions 与精确 ties。
+
+`mtp2-r7` 仍保留 MTP k=2、FULL `[1,3]`、TP4/EP，三个真实 smoke
+全部正确。短三题中位数 **13.363 tok/s**（旧 13.601）；约 23.4k
+长三题 **14.440/13.683/12.241 tok/s**，中位数 **13.683**（旧 10.933，
++25.15%）。全部六题完成 512 tokens，长题均复用 23,168 tokens。
+输出与 acceptance 有变化，不将全部差异归因于单个算子。cold TTFT
+356.843 秒，仍未改善。权重内存仍 19.3821 GiB/rank、graph 0.38 GiB；
+W8 launcher 未修改。无 profiler 的实际 tok/s 仍低于 W8 的
+19.073/18.091；不声称完整任务质量、生产速度等价或更大容量已验证。
+证据见 `artifacts/qwen38-w4-offline/replay-r4/` 与 `REPLAY_PROFILE.md`。

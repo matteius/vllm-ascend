@@ -195,6 +195,30 @@ the compact kernel, shared RoPE and expanded QSA dispatch together. The
 older k=1 trace predates these optimizations; do not assume its percentages
 still describe the current bottleneck. Profiled requests are not speed tests.
 
+## 最新整模型 profile 与 QSA score 修复
+
+新的八-step、三-token MTP FULL replay trace 已完成。W4 projections 占
+每 rank 累计 task time 的 30.64–32.83%，QSA index scoring 占
+23.28–24.24%；这些不是可相加的 critical-path 百分比。W4 内部 scalar
+计数明显高于 Cube 计数，但尝试 route-ID UB 缓存后，193 项 NPU tests
+通过、真实 partial-layer A/B 却无有效提速，因此候选未保留。
+
+另一个独立两-token bound 位于 QSA score GEMM dispatch。现仅对
+routed-W4 扩到八-token，W8/default 保持两-token；保留单 request、
+至少 2,048 groups 和原 intermediate-size guards。63 项 CPU、84 项
+NPU QSA tests 通过。T=3/5,856 groups 的真实调用模式局部 selection
+从 2.922 降到 0.506 ms，但最终以无 profiler 整模型结果为准。
+
+`mtp2-r7` 三个真实 smoke、三-token FULL replay、六个 512-token
+coding 请求均完成。短中位数 **13.363 tok/s**（旧 13.601，-1.74%）；
+23.4k 中位数 **13.683 tok/s**（旧 10.933，+25.15%）。长题三次为
+14.440/13.683/12.241，均缓存 23,168 tokens，输出 SHA 和 acceptance
+变化，不能声称纯因果或 bitwise workload 等价。冷 TTFT=356.843 秒，
+仍明显慢于 W8；完整质量及更大容量未验证。下一优先项仍是 W4
+projection 的 copy/event/scalar 开销，必须先通过数值、动态 replay、
+真实 partial-layer A/B，再进入完整模型 benchmark。生产 W8 未修改，
+19.073/18.091 tok/s 的目标仍未达到。
+
 ## Acceptance criteria
 
 - Compare against a freshly measured W8 baseline on the same four NPUs,

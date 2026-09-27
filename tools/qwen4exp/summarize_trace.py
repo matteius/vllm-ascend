@@ -12,8 +12,43 @@ import csv
 import json
 import statistics
 from collections import defaultdict
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
+
+PIPELINE_TIME_COLUMNS = (
+    "aicore_time(us)",
+    "vec_time(us)",
+    "mac_time(us)",
+    "scalar_time(us)",
+    "mte1_time(us)",
+    "mte2_time(us)",
+    "mte3_time(us)",
+)
+
+
+def optional_metric(value: str | None) -> float | None:
+    """Missing profiler counters are not measured zeroes."""
+    try:
+        parsed = Decimal(value.strip()) if value is not None else Decimal("NaN")
+    except InvalidOperation:
+        return None
+    return float(parsed) if parsed.is_finite() and parsed >= 0 else None
+
+
+def projection_shape_summary(rows: list[dict]) -> dict:
+    result = {
+        "name": rows[0]["Name"],
+        "input_shapes": rows[0].get("Input Shapes", ""),
+        "count": len(rows),
+        "median_task_us": statistics.median(to_ns(row["Duration(us)"]) / 1000 for row in rows),
+        "block_counts": sorted({int(row["Block Num"]) for row in rows if row.get("Block Num", "").isdigit()}),
+        "pipeline_counters": {},
+    }
+    for column in PIPELINE_TIME_COLUMNS:
+        values = [value for row in rows if (value := optional_metric(row.get(column))) is not None]
+        if values:
+            result["pipeline_counters"][column] = {"samples": len(values), "median_us": statistics.median(values)}
+    return result
 
 
 def to_ns(microseconds: str) -> int:
@@ -57,6 +92,7 @@ def summarize_file(path: Path, top: int = 30) -> dict:
     intervals = []
     names = defaultdict(list)
     buckets = defaultdict(list)
+    projection_shapes = defaultdict(list)
     devices = set()
     with path.open(newline="") as source:
         for row in csv.DictReader(source):
@@ -67,6 +103,8 @@ def summarize_file(path: Path, top: int = 30) -> dict:
             intervals.append((start, start + duration))
             names[name].append(duration)
             buckets[category(name)].append(duration)
+            if category(name) in {"w4_routed_projection", "w4_group_projection"}:
+                projection_shapes[(name, row.get("Input Shapes", ""))].append(row)
             devices.add(row["Device_id"])
     if len(devices) > 1:
         raise ValueError(f"multiple devices in {path}; cannot union unrelated device timelines")
@@ -92,6 +130,7 @@ def summarize_file(path: Path, top: int = 30) -> dict:
         "task_span_ms": span / 1e6,
         "task_union_ms": union_ns(intervals) / 1e6,
         "summed_task_ms": total / 1e6,
+        "projection_shapes": [projection_shape_summary(rows) for _, rows in sorted(projection_shapes.items())],
         "categories": [entry(name, values) for name, values in sorted(buckets.items())],
         "top_operations": [
             entry(name, values)
@@ -110,7 +149,10 @@ def main():
     if not paths:
         parser.error("no exported kernel_details.csv found")
     report = {
-        "metric_warning": "Summed task times may overlap; not critical-path latency or unprofiled throughput.",
+        "metric_warning": (
+            "Summed task times and reported hardware pipeline counters may overlap; "
+            "neither is an additive critical-path latency or unprofiled throughput measurement."
+        ),
         "traces": [summarize_file(path, args.top) for path in paths],
     }
     result = json.dumps(report, indent=2) + "\n"

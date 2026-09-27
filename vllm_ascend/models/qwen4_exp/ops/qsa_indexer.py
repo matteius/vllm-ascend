@@ -94,7 +94,13 @@ def _repair_native_group_indices(selected: torch.Tensor, visible_groups: torch.T
     return torch.where(use_fallback.unsqueeze(1), fallback, selected)
 
 
-def _use_qsa_matmul_score(num_tokens: int, capacity: int, num_requests: int, query_start_loc_size: int) -> bool:
+def _use_qsa_matmul_score(
+    num_tokens: int,
+    capacity: int,
+    num_requests: int,
+    query_start_loc_size: int,
+    max_decode_tokens: int = _QSA_MATMUL_DECODE_MAX_TOKENS,
+) -> bool:
     """Use GEMM where measured 310P scoring beats the native group kernel."""
     return (
         capacity > 0
@@ -102,7 +108,7 @@ def _use_qsa_matmul_score(num_tokens: int, capacity: int, num_requests: int, que
         and query_start_loc_size == 2
         and (
             num_tokens >= _QSA_MATMUL_PREFILL_MIN_TOKENS
-            or (num_tokens <= _QSA_MATMUL_DECODE_MAX_TOKENS and capacity >= _QSA_MATMUL_DECODE_MIN_GROUPS)
+            or (num_tokens <= max_decode_tokens and capacity >= _QSA_MATMUL_DECODE_MIN_GROUPS)
         )
     )
 
@@ -326,6 +332,7 @@ def qsa_indexer_select_groups_310(
     compress_ratio: int,
     token_topk: int,
     max_visible_groups: int | None = None,
+    max_matmul_decode_tokens: int = _QSA_MATMUL_DECODE_MAX_TOKENS,
 ) -> QSAGroupSelection:
     """Select learned QSA groups on 310P.
 
@@ -337,6 +344,8 @@ def qsa_indexer_select_groups_310(
     kernel. The host-visible sequence limit removes the unused padded
     block-table suffix before scoring and stable sorting. Equal scores retain
     the reference's lower-group-id tie break.
+    ``max_matmul_decode_tokens`` lets the routed-W4 MTP runtime opt in to
+    wider verification batches without changing the W8/default crossover.
     """
     if query.device.type != "npu":
         raise RuntimeError("qsa_indexer_select_groups_310 is an Ascend NPU-only path")
@@ -368,7 +377,9 @@ def qsa_indexer_select_groups_310(
 
     groups_per_block = compressed_key_cache.shape[1] - _QSA_INDEX_CACHE_SCRATCH_ROWS
     capacity = block_table.shape[1] * groups_per_block
-    if _use_qsa_matmul_score(query.shape[0], capacity, block_table.shape[0], query_start_loc.numel()):
+    if _use_qsa_matmul_score(
+        query.shape[0], capacity, block_table.shape[0], query_start_loc.numel(), max_matmul_decode_tokens
+    ):
         # Reuse the paged-key GEMM for long prefills and wide single-request
         # decode. At 7K visible groups and two decode queries on 310P, it
         # scores about four times faster than the native per-group kernel.

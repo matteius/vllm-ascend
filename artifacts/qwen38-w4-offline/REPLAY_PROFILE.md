@@ -520,6 +520,155 @@ cold TTFT **357.285 秒**，三个热 TTFT 4.566/4.716/5.270 秒。
 128-token profiled 请求必须完整结束。profiled tok/s 不作为性能基准；
 旧 r3 k=1 trace 的各类比例不能直接当成当前归因。
 
+## Current k=2 trace: replay-profile-r4
+
+The fresh long-context trace completed on all four ranks with the compact
+projection kernel, shared RoPE, and W4 grouped-QSA dispatch. All three HTTP
+smokes passed. The profiling request completed 128 tokens after a 32-token
+warmup, with 23,168 cached tokens out of a 23,407-token prompt. Runtime graph
+metrics report three-token `FULL` replay. The profiled request's 11.289 tok/s
+is **not** an unprofiled performance result.
+
+Each rank contains exactly 1,152 routed projections: eight captured iterations
+times 48 main-model layers times three projections. The inputs contain 30
+routes, consistent with MTP k=2. Offline export was run after collection;
+`profile-analysis-r4.log` ends with `QWEN_W4_PROFILE_R4_ANALYSIS_COMPLETE`.
+
+| Attribution across ranks | Summed task time / eight iterations | Share of summed task time |
+| --- | --- | --- |
+| W4 routed projections | 394.027–434.678 ms | 30.64–32.83% |
+| QSA index scoring | 307.785–311.666 ms | 23.28–24.24% |
+| NZ matmul (`MatMulV2`) | 189.119–191.182 ms | 14.34–14.87% |
+| AI-CPU `Cast` | 27.337–30.884 ms | 2.06–2.36% |
+
+This is work attribution, not an additive critical-path model. The device task
+spans are 1.792–1.801 seconds; task unions are 1.285–1.319 seconds. Neither
+uncovered time nor a pipeline counter is by itself proof of a host bottleneck.
+The 192 AI-CPU casts are still present, but the old r3 cast count/time cannot
+be reused for the changed runtime.
+
+For gate/up, median task duration is 305.547–346.081 us, with 20 blocks.
+Reported median scalar time is 126.422–144.559 us, vector 87.786–106.640 us,
+and Cube 6.887–8.609 us. Down projection uses 80 blocks with task duration
+391.224–413.854 us, scalar 186.877–197.938 us, vector 78.531–95.549 us, and
+Cube 5.739–7.174 us. Hardware pipeline counters can overlap and are not
+summed to predict acceleration. Missing counters are preserved as missing,
+not converted to zero; the summary parser has 11 passing CPU tests.
+
+Evidence: `replay-r4/kernel-summary.json`, `replay-r4/profile-request.jsonl`,
+and `replay-r4/http-smoke.jsonl`. Raw trace files remain under the isolated
+host's `replay-profile-r4/` directory. No W8 launcher or runtime was changed.
+
+The next isolated candidate caches the at-most-80 route IDs in 512 bytes at
+the tail of each persistent block's UB. Owner detection, matching-input
+gather and output scatter reuse this list. IDs are loaded on every kernel
+execution, with aligned DMA plus a bounded scalar tail, rather than rounded-up
+reads beyond the input. The projection math and order, weights, scratch ABI,
+MTP settings and QSA dispatch are unchanged. This is a testable scalar-load
+hypothesis, not a claim that it removes all the reported scalar time.
+
+An independent follow-up is the index scorer's repeated query loads/casts.
+Rank 0 records 112 calls: 104 have `[3,4,128]` queries with one request and
+eight have the same query shape with a three-request metadata layout. The
+one-request calls have median duration about 2.72 ms, versus about 3.47 ms
+for the latter; the shape alone does not establish the Python call site.
+In `QsaIndexerScoreV310::Compute`, each visible compressed-key group reloads
+and casts every head of the same query. Caching those query heads per token
+inside a core is a plausible arithmetic-preserving candidate, but has not
+been implemented, measured or applied to W8. Keep it separate from route-ID
+cache A/B evidence.
+
+### 被拒绝的 route-ID cache 候选
+
+`ops-route-ids-r1` 编译成功，193 项 NPU tests 全通过（175.80 秒，15 条
+已有 warnings），其中增加了 DMA 八-ID 边界及 scalar tail 的动态 replay
+覆盖。group kernel SHA 没变；routed SHA 为
+`1074c9e241ce4d86bbaf3e18a4700a08b0b704bab90cf95e506e084d0787849c`。
+但相同真实 layer-0 权重、seed、input 顺序的 partial-layer graph A/B
+没有实际收益：
+
+| tokens | compact 基线 ms | route-ID UB ms | 延迟变化 |
+| --- | --- | --- | --- |
+| 1 | 0.506741 | 0.510981 | +0.84% |
+| 2 | 0.338894 | 0.341191 | +0.68% |
+| 3 | 2.387205 | 2.394501 | +0.31% |
+| 5 | 1.873130 | 1.867247 | -0.31% |
+| 8 | 4.508377 | 4.565189 | +1.26% |
+
+因此不启动这个 kernel 的整模型 A/B、不合入 runtime 源码，也不宣称
+tok/s 增益。候选补丁及新增测试保存在
+`replay-r4/route-id-cache-rejected.patch`，原始记录为
+`replay-r4/layer-route-ids-{before-r1,r1}.jsonl`。已验证的 compact kernel
+仍被后续服务使用；不是恢复或改动 W8 production。
+
+### 第十个候选：W4 三/五-token QSA score GEMM
+
+进一步源码检查发现 index scoring 也有独立的两-token dispatch 上限：
+`_QSA_MATMUL_DECODE_MAX_TOKENS=2`。k=2 的三-token target verification
+因此走 native per-group score，而旧 k=1 可以走已实现的 FP32 GEMM。
+这一发现优先于新写 native query-cache kernel。
+
+为 selector 添加 keyword-only `max_matmul_decode_tokens`，默认仍为 2。
+只从 routed-W4 attention 传入已有八-token bound；W8/其它 backend
+仍传 2。eager 路径及 breakable-graph 的 `select_current_groups` 回调
+都传入相同值。单 request、至少 2,048 groups、现有长 prefill dispatch
+和中间 tensor 大小限制均保留；没有新增环境变量、NPU kernel、host
+routing 或改变缓存格式。score/select 仍按原设计在 graph segments
+之间执行，以处理不断增长的 visible table，不能把它描述成无 graph
+的模型。query/weight projection 和 decode graph 继续保留。
+
+63 项本地 CPU tests 通过（3.93 秒，16 条已有 warnings）。最初误用
+仅 ModelSlim 的 CPU venv 缺少 vLLM/zmq；切换到已有 vLLM venv、pytest
+临时 overlay 和本地 vLLM checkout 后通过，并未更改生产依赖。
+NPU QSA 文件 **84 passed / 50.33 秒**（2,207 条已有 warnings），包括
+12 个新 cases：T=3/5/8、index heads=4/16、2,048/5,856 groups；逐轮
+改变 query、cache、物理页表及 visible count，覆盖 0/511/512/最大值、
+tail 和全零 query 的精确 tie。与 native scorer 比较同一 group set，
+允许集合内近似相等 score 的 FP32 reduction 排序差异，不宣称 bitwise
+输出一致。原有 downstream QSA dynamic graph tests 也全部通过。
+
+15 个 score+stable-selection 局部 A/B 均完成，30 iterations × 5 trials；
+符合真实 eager-between-segments 调用方式，不是全模型 throughput：
+
+| groups | query tokens | 默认 selection ms | W4 MTP selection ms |
+| --- | --- | --- | --- |
+| 2048 | 3 | 1.121252 | 0.605082 |
+| 2048 | 5 | 1.740284 | 0.502085 |
+| 2048 | 8 | 2.666677 | 0.553600 |
+| 5856 | 3 | 2.921905 | 0.506435 |
+| 5856 | 5 | 4.698810 | 0.504334 |
+| 5856 | 8 | 7.335426 | 0.505778 |
+| 8192 | 3 | 4.000451 | 0.510273 |
+| 8192 | 5 | 6.408426 | 0.590703 |
+| 8192 | 8 | 10.217293 | 0.586686 |
+
+1/2-token 两列是同一个 dispatch，只反映测量波动，不能计作算法收益。
+工具为 `tools/qwen4exp/benchmark_qsa_score_mtp_310.py`，原始记录
+`replay-r4/qsa-score-mtp-r1.jsonl`。新的真实模型 run `mtp2-r7` 继续使用
+compact kernel、MTP k=2、FULL `[1,3]`、TP4/EP、32,768 context、.90
+memory fraction。三个真实 smoke 均正确终止：323、1–50、`[0,4,16]`，
+计数 16.305 tok/s。runtime 表确认三-token `FULL`，MTP counters 递增。
+短三题为 **14.907/12.977/13.363 tok/s**，中位数 **13.363**，比旧
+13.601 低 1.74%；该修复不在短前缀的评分 dispatch 生效，不宣称短题提速。
+长三题为 **14.440/13.683/12.241 tok/s**，中位数 **13.683**，比旧
+10.933 高 **25.15%**。全部六题生成 512 tokens；长题均复用 23,168
+prefix tokens，prompt tokens 为 23,407/23,418/23,424。长题
+drafted/accepted=384/320、402/310、446/288，三个输出 SHA 都变化，
+不能把整个中位数差异归因于单一算子。短题 drafted/accepted=
+388/318、442/291、428/298。冷 warmup TTFT **356.843 秒**仍未改善；
+长题热 TTFT=4.431/4.661/4.971 秒。
+
+model-load 仍为 19.3821 GiB/rank，graph capture 0.38 GiB；没有新增
+常驻 expanded expert bank。最高记录温度 75°C，W8 launcher SHA256
+仍为 `ae81d75eec7516fc6f455a3a071e52410ba6c477c34e0114df647f4c125c77df`。
+本地原始 smoke、短/长请求记录保存在 `replay-r4/`。六题和 final marker
+完成、确认无运行/等待请求后，才向准确 API PID 3377501 发 TERM，
+开始下一项隔离 kernel 实验；关闭期间的 EngineDeadError 保留，不把
+主动关闭与 benchmark 运行故障混为一谈。本轮 CPU gate 重跑为
+63 passed / 3.79 秒，另两个 build-manifest tests 通过。
+W8 的 19.073/18.091 tok/s 仍未达到；32k 单会话结果不是容量或完整
+coding accuracy 评测，不能据此给 W4 生产等价结论。
+
 ## 复现与交接
 
 简短 runbook（仅已授权的隔离 host 环境，不替换 W8）：
@@ -568,6 +717,11 @@ bash qwen38-w4-mtp-short-benchmark.sh mtp2-r5
 bash qwen38-w4-server-routed-check-r1.sh mtp2-r6 \
   /srv/ai/src/qwen38-w4-operator-build-r1/ops-compact-r1/vendors/qwen_w4_probe_transformer 2
 bash qwen38-w4-mtp-short-benchmark.sh mtp2-r6
+
+# same kernel, W4-only QSA score GEMM for wider verification batches
+bash qwen38-w4-server-routed-check-r1.sh mtp2-r7 \
+  /srv/ai/src/qwen38-w4-operator-build-r1/ops-compact-r1/vendors/qwen_w4_probe_transformer 2
+bash qwen38-w4-mtp-short-benchmark.sh mtp2-r7
 ```
 
 服务配置见本页开头和 tutorial，仍为 :8002 / TP4 / EP /
@@ -628,6 +782,9 @@ k=2 三-token FULL replay 与短/长 coding 均完成。批量清零版本也完
 W4 grouped-QSA 候选通过 128 项 CPU、72 项 NPU tests 和三个真实
 smoke，三-token FULL replay 与六个 512-token coding 请求全部完成；
 短/长中位数 **13.601 / 10.933 tok/s**，仍未达到 W8。
+进一步的 W4-only score-GEMM bound 通过 84 项 NPU QSA tests 和完整
+smoke、MTP k=2、三-token FULL replay；短/长中位数为
+**13.363 / 13.683 tok/s**，长题有所改善，但仍低于 W8。
 本轮只隔离 batch-one decode，不声称 W4 已验证 128k×16、双 160k 或
 完整任务质量。flashcomm1 和多模态未在本轮验证；容量和量化质量仍需后续
 独立评测，不能伪造 accuracy YAML 分数。

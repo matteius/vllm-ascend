@@ -9,6 +9,7 @@ import torch
 
 from vllm_ascend.models.qwen4_exp.dtype_policy import ASCEND_QWEN4EXP_DTYPE_POLICY
 from vllm_ascend.models.qwen4_exp.model import _QSAAttention
+from vllm_ascend.models.qwen4_exp.ops.qsa_indexer import _use_qsa_matmul_score
 from vllm_ascend.models.qwen4_exp.w4_moe import FORMAT
 
 
@@ -50,6 +51,7 @@ def test_batched_qsa_limit_and_group_list_are_scoped_to_routed_w4(backend, tp_si
     for tokens in (1, 2, 3, 5, 8, 9):
         assert module._can_use_batched_qsa_decode(metadata, tokens, 512) == (tokens <= limit)
         assert not module._can_use_batched_qsa_decode(metadata, tokens, 255)
+        assert _use_qsa_matmul_score(tokens, 5856, 1, 2, module._batched_qsa_max_decode_tokens) == (tokens <= limit)
     assert module._can_use_batched_qsa_decode(metadata, limit, 256)
     for prefills, decodes in ((1, 0), (1, 1), (0, 0)):
         metadata.num_prefills, metadata.num_decodes = prefills, decodes

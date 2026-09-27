@@ -261,6 +261,16 @@ def test_prefill_matmul_gate_preserves_existing_long_prefill_path():
     assert not _use_qsa_matmul_score(3, 2048, 1, 2)
 
 
+@pytest.mark.parametrize("num_tokens", [3, 5, 8])
+def test_w4_mtp_score_opt_in_keeps_default_and_request_boundaries(num_tokens):
+    assert not _use_qsa_matmul_score(num_tokens, 5856, 1, 2)
+    assert _use_qsa_matmul_score(num_tokens, 5856, 1, 2, max_decode_tokens=8)
+    assert not _use_qsa_matmul_score(num_tokens, 2047, 1, 2, max_decode_tokens=8)
+    assert not _use_qsa_matmul_score(num_tokens, 5856, 2, 3, max_decode_tokens=8)
+    assert not _use_qsa_matmul_score(num_tokens, 5856, 1, 3, max_decode_tokens=8)
+    assert not _use_qsa_matmul_score(9, 5856, 1, 2, max_decode_tokens=8)
+
+
 def test_graph_selection_buffer_tracks_growing_width_and_clears_stale_groups():
     destination = QSAGroupSelection(
         torch.full((1, 4), 99, dtype=torch.int64),
