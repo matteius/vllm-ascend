@@ -152,8 +152,8 @@ from .qwen4exp_gdn import (
     gdn_gating,
     gdn_short_conv,
 )
+from .w4_moe import CUBE_DEVICE_ROUTED_BACKENDS, W4SparseMoE, require_eager_w4, validate_w4_inventory, w4_config
 from .w4_moe import EXPERT_NAME as W4_EXPERT_NAME
-from .w4_moe import W4SparseMoE, require_eager_w4, validate_w4_inventory, w4_config
 from .weight_mapping import (
     TensorDtypeError,
     TensorShapeError,
@@ -1158,7 +1158,7 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
         self.compute_dtype = dtype_policy.accumulation_dtype
         self.params_dtype = dtype_policy.qsa_main_dtype
         expert_quant = w4_config(config)
-        self.reuse_query_rope = expert_quant is not None and expert_quant["backend"] == "cube_310_routed"
+        self.reuse_query_rope = expert_quant is not None and expert_quant["backend"] in CUBE_DEVICE_ROUTED_BACKENDS
         # Routed W4 verifies several MTP tokens in one replay. Preserve the
         # production W8 bound, but cover W4's three/five-token verification
         # batches and its eight-token (80-route) graph limit.

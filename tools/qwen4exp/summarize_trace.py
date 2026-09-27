@@ -73,6 +73,10 @@ def union_ns(intervals: list[tuple[int, int]]) -> int:
 
 def category(name: str) -> str:
     compact = name.lower().replace("_", "")
+    if "qwenw4a8int4matmul" in compact:
+        return "w4a8_native_int4_projection"
+    if "qwenw4groupedmatmul" in compact:
+        return "w4_device_grouped_projection"
     if "qwenw4routedmatmul" in compact:
         return "w4_routed_projection"
     if "qwenw4groupmatmul" in compact:
@@ -103,7 +107,12 @@ def summarize_file(path: Path, top: int = 30) -> dict:
             intervals.append((start, start + duration))
             names[name].append(duration)
             buckets[category(name)].append(duration)
-            if category(name) in {"w4_routed_projection", "w4_group_projection"}:
+            if category(name) in {
+                "w4_routed_projection",
+                "w4_group_projection",
+                "w4_device_grouped_projection",
+                "w4a8_native_int4_projection",
+            }:
                 projection_shapes[(name, row.get("Input Shapes", ""))].append(row)
             devices.add(row["Device_id"])
     if len(devices) > 1:

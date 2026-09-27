@@ -10,10 +10,10 @@ import torch
 from vllm_ascend.models.qwen4_exp.dtype_policy import ASCEND_QWEN4EXP_DTYPE_POLICY
 from vllm_ascend.models.qwen4_exp.model import _QSAAttention
 from vllm_ascend.models.qwen4_exp.ops.qsa_indexer import _use_qsa_matmul_score
-from vllm_ascend.models.qwen4_exp.w4_moe import FORMAT
+from vllm_ascend.models.qwen4_exp.w4_moe import CUBE_DEVICE_ROUTED_BACKENDS, FORMAT
 
 
-@pytest.mark.parametrize("backend", [None, "eager_dequant", "cube_310", "cube_310_tiled", "cube_310_routed"])
+@pytest.mark.parametrize("backend", [None, "eager_dequant", "cube_310", "cube_310_tiled", *CUBE_DEVICE_ROUTED_BACKENDS])
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
 def test_batched_qsa_limit_and_group_list_are_scoped_to_routed_w4(backend, tp_size):
     config = SimpleNamespace(
@@ -41,7 +41,7 @@ def test_batched_qsa_limit_and_group_list_are_scoped_to_routed_w4(backend, tp_si
     module = _QSAAttention(
         config=config, layer_idx=0, dtype_policy=ASCEND_QWEN4EXP_DTYPE_POLICY, expert_sharding=(0, tp_size)
     )
-    limit = 8 if backend == "cube_310_routed" else 2
+    limit = 8 if backend in CUBE_DEVICE_ROUTED_BACKENDS else 2
     assert module._batched_qsa_max_decode_tokens == limit
     expected = torch.arange(1, limit * module.num_kv_heads + 1, dtype=torch.int64)
     expected *= module.num_heads // module.num_kv_heads

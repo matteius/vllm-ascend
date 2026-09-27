@@ -678,6 +678,15 @@ at::Tensor npu_qwen_w4_routed_matmul_310_meta(
     return at::empty_symint(shape, x.options());
 }
 
+at::Tensor npu_qwen_w4_a8_int4_matmul_310_meta(
+    const at::Tensor& low, const at::Tensor& high, const at::Tensor& activation_scale,
+    const at::Tensor& activation_sum, const at::Tensor& codes, const at::Tensor& scale,
+    const at::Tensor& offset, const at::Tensor& weight_sum, const at::Tensor& group_ends)
+{
+    c10::SymDimVector shape{low.sym_size(0), codes.sym_size(1)};
+    return at::empty_symint(shape, low.options().dtype(at::kHalf));
+}
+
 at::Tensor npu_recurrent_gated_delta_rule_310_meta(
     const at::Tensor& query,
     const at::Tensor& key,
@@ -2165,6 +2174,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_w2_blocked_dequant_matmul_310", &vllm_ascend::meta::npu_w2_blocked_dequant_matmul_310_meta);
     ops.impl("npu_qwen_w4_group_matmul_310", &vllm_ascend::meta::npu_qwen_w4_group_matmul_310_meta);
     ops.impl("npu_qwen_w4_routed_matmul_310", &vllm_ascend::meta::npu_qwen_w4_routed_matmul_310_meta);
+    ops.impl("npu_qwen_w4_grouped_matmul_310", &vllm_ascend::meta::npu_qwen_w4_routed_matmul_310_meta);
+    ops.impl("npu_qwen_w4_a8_int4_matmul_310", &vllm_ascend::meta::npu_qwen_w4_a8_int4_matmul_310_meta);
     // npu_recurrent_gated_delta_rule_310
     ops.impl("npu_recurrent_gated_delta_rule_310", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_310_meta);
     // npu_qsa_sparse_attention_310

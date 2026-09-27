@@ -1,0 +1,17 @@
+{
+  "phase": "cold-prefill",
+  "profiled_not_benchmark_baseline": true,
+  "profiler_config": {
+    "profiler": "torch",
+    "torch_profiler_dir": "/srv/ai/src/qwen38-w4-native-build.zHZtEd/server-traces-r1",
+    "torch_profiler_with_stack": false,
+    "torch_profiler_with_memory": false,
+    "ignore_frontend": true,
+    "delay_iterations": 0,
+    "max_iterations": 6
+  },
+  "npu_trace_requested": true,
+  "client_command_sha256": "d0ae9b611e45bdcd93dc5d7369cef4e72fe43379af73fd4d248ad43562109ab5",
+  "cpu_pid": null,
+  "success": true
+}

@@ -9,6 +9,7 @@ use an external temperature watchdog when running this diagnostic.
 """
 
 import argparse
+import cProfile
 import hashlib
 import json
 from collections import defaultdict
@@ -21,10 +22,12 @@ import torch_npu
 from safetensors import safe_open
 
 from tools.qwen4exp.benchmark_w4_projection_310 import timed_ms
+from tools.qwen4exp.profile_runtime import export_cprofile
 from vllm_ascend.models.qwen4_exp.dtype_policy import Qwen4ExpDtypePolicy
 from vllm_ascend.models.qwen4_exp.model import _format_eager_linear_weights_npu
 from vllm_ascend.models.qwen4_exp.moe import route_topk
-from vllm_ascend.models.qwen4_exp.w4_moe import EXPERT_NAME, W4SparseMoE
+from vllm_ascend.models.qwen4_exp.w4_moe import CUBE_BACKENDS, CUBE_DEVICE_ROUTED_BACKENDS, EXPERT_NAME, W4SparseMoE
+from vllm_ascend.models.qwen4_exp.w4a8_int4 import NATIVE_INT4_BACKEND
 from vllm_ascend.utils import enable_custom_op
 
 
@@ -80,21 +83,24 @@ def main():
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--trace-dir", type=Path)
+    parser.add_argument("--python-profile-dir", type=Path, help="separate cProfile window and DOT call graph")
     parser.add_argument("--layer", type=int, default=0)
     parser.add_argument("--rank", type=int, default=0)
     parser.add_argument("--tp-size", type=int, default=4)
     parser.add_argument("--tokens", type=int, nargs="+", default=[1, 2, 5])
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument(
-        "--backend", choices=["eager_dequant", "cube_310", "cube_310_tiled", "cube_310_routed"], default="cube_310"
-    )
+    parser.add_argument("--backend", choices=["eager_dequant", *CUBE_BACKENDS], default="cube_310")
     parser.add_argument("--graph", action="store_true", help="validate and time device-routed layer replay")
     args = parser.parse_args()
-    if args.output.exists() or (args.trace_dir and args.trace_dir.exists()):
+    if (
+        args.output.exists()
+        or (args.trace_dir and args.trace_dir.exists())
+        or (args.python_profile_dir and args.python_profile_dir.exists())
+    ):
         parser.error("choose new output/trace paths; preserve earlier evidence")
-    if args.graph and args.backend != "cube_310_routed":
-        parser.error("only cube_310_routed permits layer graph capture")
+    if args.graph and args.backend not in CUBE_DEVICE_ROUTED_BACKENDS:
+        parser.error("only device-routed backends permit layer graph capture")
     if not torch_npu.npu.is_available() or "310" not in torch_npu.npu.get_device_name(0):
         raise RuntimeError("requires Ascend 310P")
     torch.npu.set_device(0)
@@ -104,6 +110,13 @@ def main():
     if args.graph:
         _format_eager_linear_weights_npu(layer)
     generator = torch.Generator().manual_seed(1024)
+    if args.python_profile_dir:
+        args.python_profile_dir.mkdir(parents=True)
+    exact_layer = None
+    if args.backend == NATIVE_INT4_BACKEND:
+        exact_layer = load_layer(args.model, args.layer, args.rank, args.tp_size, "cube_310_grouped")
+        if args.graph:
+            _format_eager_linear_weights_npu(exact_layer)
     with args.output.open("x") as output:
         for tokens in args.tokens:
             inputs = (torch.randn(tokens, layer.gate.shape[1], generator=generator) * 0.1).half().npu()
@@ -119,12 +132,25 @@ def main():
             if not torch.isfinite(result).all():
                 raise RuntimeError("non-finite partial MoE output")
             comparison = None
-            if layer.device_routing:
-                layer.device_routing = False
-                reference = layer(inputs).cpu()
-                torch.testing.assert_close(result, reference, rtol=0.01, atol=0.003)
-                comparison = timed_ms(lambda inputs=inputs: layer(inputs), args.iterations, args.repeats)
-                layer.device_routing = True
+            accuracy = None
+            if exact_layer is not None:
+                reference = exact_layer(inputs).cpu().float()
+                error = (result.float() - reference).norm() / reference.norm().clamp_min(1e-12)
+                cosine = F.cosine_similarity(result.float().flatten(), reference.flatten(), dim=0)
+                accuracy = {"relative_l2": error.item(), "cosine": cosine.item(), "real_model_quality_passed": False}
+                # A layer gate, not permission to promote this quantization.
+                if error > 0.05 or cosine < 0.999:
+                    raise AssertionError(f"experimental W4A8 layer accuracy gate failed: {accuracy}")
+                comparison = timed_ms(lambda inputs=inputs: exact_layer(inputs), args.iterations, args.repeats)
+            elif layer.device_routing:
+                device_routing, grouped_routing = layer.device_routing, layer.grouped_routing
+                try:
+                    layer.device_routing = layer.grouped_routing = False
+                    reference = layer(inputs).cpu()
+                    torch.testing.assert_close(result, reference, rtol=0.01, atol=0.003)
+                    comparison = timed_ms(lambda inputs=inputs: layer(inputs), args.iterations, args.repeats)
+                finally:
+                    layer.device_routing, layer.grouped_routing = device_routing, grouped_routing
             replay = None
             graph_output_sha256 = None
             if args.graph:
@@ -161,6 +187,8 @@ def main():
                 "distinct_local_experts": selected.unique().numel(),
                 "latency": timed_ms(lambda inputs=inputs: layer(inputs), args.iterations, args.repeats),
                 "host_route_comparison": comparison,
+                "comparison_backend": "cube_310_grouped" if exact_layer is not None else "host_routed",
+                "activation_quantization_accuracy": accuracy,
                 "graph_replay": replay,
                 "torch_allocated_bytes": torch.npu.memory_allocated(),
                 "torch_reserved_bytes": torch.npu.memory_reserved(),
@@ -169,6 +197,16 @@ def main():
             print(line, flush=True)
             output.write(line + "\n")
             output.flush()
+            if args.python_profile_dir:
+                profile = cProfile.Profile()
+                torch.npu.synchronize()
+                with profile:
+                    for _ in range(3):
+                        layer(inputs)
+                    torch.npu.synchronize()
+                path = args.python_profile_dir / f"tokens-{tokens}.pstats"
+                profile.dump_stats(str(path))
+                export_cprofile(path, path.with_suffix(".dot"))
             if args.trace_dir:
                 with torch_npu.profiler.profile(
                     activities=[torch_npu.profiler.ProfilerActivity.CPU, torch_npu.profiler.ProfilerActivity.NPU],

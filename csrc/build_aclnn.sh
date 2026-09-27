@@ -120,12 +120,14 @@ invalidate_stale_kernel_cache() {
             stale_kernel_cache=1
         elif [[ "${op_name}" == "w2_blocked_dequant_matmul_v310" ||
                 "${op_name}" == "qwen_w4_group_matmul_v310" ||
+                "${op_name}" == "qwen_w4_grouped_matmul_v310" ||
                 "${op_name}" == "qwen_w4_routed_matmul_v310" ]] &&
              find "${ROOT_DIR}/csrc/moe/common/kernel_utils" -type f -newer "${source_stamp}" -print -quit |
                  grep -q .; then
             # The 310P W2 kernel includes the shared CATLASS block helpers.
             stale_kernel_cache=1
-        elif [[ "${op_name}" == "qwen_w4_routed_matmul_v310" ]] &&
+        elif [[ "${op_name}" == "qwen_w4_routed_matmul_v310" ||
+                "${op_name}" == "qwen_w4_grouped_matmul_v310" ]] &&
              find "${ROOT_DIR}/csrc/gmm/qwen_w4_group_matmul_v310/op_kernel" -type f -newer "${source_stamp}" -print -quit |
                  grep -q .; then
             # Routed projections share the group-W4 Cube implementation.
@@ -267,6 +269,8 @@ if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
         "w2_blocked_dequant_matmul_v310"
         "qwen_w4_group_matmul_v310"
         "qwen_w4_routed_matmul_v310"
+        "qwen_w4_grouped_matmul_v310"
+        "qwen_w4_a8_int4_matmul_v310"
         "rms_norm_dynamic_quant"
         "add_rms_norm_dynamic_quant"
     )
