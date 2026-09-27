@@ -1,5 +1,29 @@
 # Qwen W4 离线适配记录
 
+## 后续真实硬件验证
+
+以下“离线”范围描述原始交付。用户随后授权维护窗口，2026-09-26 EDT
+在四个 310P3 上执行了独立 W4 TP4/eager 验证。完整真实 checkpoint 加载
+成功，每 rank 模型占用 18.6917 GiB；三个 HTTP 请求分别正确返回 `323`
+（17×19）、1–50 完整计数和 Python 输出 `[0, 4, 16]`，均正常终止。
+三个请求 decode 为 0.2288–0.2296 tok/s，不能替代原有
+15 tok/s 的 W8 + MTP + graph 路径。
+
+INT4 全部 256 种 packed byte 在 NPU 上精确解包；三个真实 expert
+projection 的反量化与 CPU 精确一致，FP16 matmul 误差通过阈值。
+新增 310P 回归测试 **7 passed**，覆盖真实矩阵尺寸和 1/7/64 token；
+CPU packing/export 专项重跑 **21 passed**。硬件最高观测温度 78°C。
+本次仅新增硬件回归测试及实测文档，没有修改模型运行时代码、W8 权重、
+原环境或原启动脚本。详细配置、原始日志路径和后续验收状态见
+[HARDWARE_SMOKE.md](HARDWARE_SMOKE.md)。
+
+原 W8 启动脚本 SHA256 未变，已恢复端口 8001 的 160k / MTP k=1 / decode
+graph 服务，三个相同 smoke 全部通过。六个 512-token 固定长度实测中，短
+context 中位数为 19.073 tok/s，约 23.4k context 中位数为 18.091 tok/s；
+这些截断请求仅是性能基线，不是完整编码任务验收。W4 尚未执行对应长请求。
+下一目标是达到并超过这组实测 W8 性能，同时保留 W4 内存收益；不以历史
+15 tok/s 或更快的单步延迟代替实际 generation 吞吐验收。
+
 ## 范围与隔离
 
 本次仅在独立 worktree 中开发，并在本机 CPU 上生成独立量化目录。
@@ -26,6 +50,9 @@ W8 未带新 metadata 时，仍进入原 `_EagerSparseMoE` 和原 post-load 路�
 PLE 仅为新格式切换 safetensors index 文件名，继续懒加载 host table。
 
 ## 验证边界
+
+下表保留原始离线交付时的边界；后续已完成的 TP4/310P 短回答和算子验证
+见首节。完整任务质量、MTP、graph 和长上下文/并发仍未验收。
 
 | 项目 | 离线证据 | 仍缺少的真实证据 |
 | --- | --- | --- |
@@ -101,7 +128,8 @@ expert 为 0/255/511，每组检查 gate/up/down，共 45 个真实 projection�
 已执行要求的 `bash format.sh ci`，仓库全量检查存在既有问题，未修改无关文件。
 修改文件的适用 hooks 全部通过；仅跳过全局 `check-symbolic-meta`，其报错来自
 基线已有的 `csrc/torch_binding_meta.cpp:655`，该 hook 不受文件列表限制。
-未调用真实 NPU、HTTP 推理服务或 SSH；没有模型质量和 tok/s 验收结果。
+原始离线交付未调用真实 NPU、HTTP 推理服务或 SSH；后续硬件结果见首节。
+截至硬件 smoke 完成，尚无完整模型质量或生产性能验收结果。
 
 ## 紧凑运行说明
 

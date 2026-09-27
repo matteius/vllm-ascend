@@ -15,18 +15,20 @@ generic Ascend W4A16 fused-MoE format.
 
 The full offline export completed on 2026-09-26: 1,610 shards, 222,746 tensors,
 and 169.1628 GiB of tensor payload including the host PLE table and floating
-MTP weights. This is an artifact-build result, not an NPU inference or quality pass.
+MTP weights. A later authorized TP4/310P hardware smoke loaded the full checkpoint
+and completed three correct arithmetic/counting/Python-output answers. This does not establish production
+speed or broad model quality; see the hardware results below.
 
 ## Supported Features
 
 | Feature | W4 candidate status |
 | --- | --- |
 | ModelSlim conversion and packed checkpoint | Offline path implemented |
-| Strict loader, signed packing, group zero points | CPU tests |
+| Strict loader, signed packing, group zero points | CPU tests and real-weight 310P smoke |
 | Contiguous expert-TP ownership, shared-expert TP | CPU numerical tests, including uneven expert ownership |
 | PLE disk-backed lazy lookup | Preserved; W4 explicitly selects the standard HF index |
 | W8 runtime, MTP and graph defaults | Unchanged unless W4 checkpoint metadata is present |
-| W4 NPU inference | Not validated; requires a separate maintenance-window test |
+| W4 NPU inference | Full checkpoint loaded on TP4/310P; three completed correct answers and seven operator regressions passed |
 | W4 ACLGraph | Unsupported by the initial eager backend; initialization rejects graph mode |
 | W4 MTP / multimodal / flashcomm1 / EPLB | Not validated; leave disabled for the first W4 smoke |
 | Long context / concurrent sessions | Not validated for W4 |
@@ -92,8 +94,8 @@ on disk/host and is not counted as NPU expert memory.
 ## Deployment
 
 **Do not use the W8 production launcher for this checkpoint.** Its quantization
-and graph flags are intentionally incompatible. The following is a future
-maintenance-window smoke command, not a validated serving profile. It does not
+and graph flags are intentionally incompatible. The following is the experimental
+hardware-smoke configuration, not a production serving profile. It does not
 stop another process and uses port 8002 instead of the production port.
 
 After separately activating the pinned Ascend environment and sourcing its CANN
@@ -132,7 +134,7 @@ Offline artifact audit, after conversion completes:
 This checks all tensor names, shapes, dtypes, byte accounting, untouched-tensor
 inventory, and sampled expert reconstruction. It is not full-model inference.
 
-For the later, explicitly authorized NPU test:
+For an explicitly authorized NPU test:
 
 ```bash
 curl --fail http://127.0.0.1:8002/v1/models
@@ -158,10 +160,15 @@ transferred to this RTN artifact.
 
 ## Performance
 
-No W4 tok/s result is available. The initial reference backend keeps only packed
-weights resident and dequantizes selected experts one at a time. It performs a
-host routing synchronization and is expected to be slower than the W8 grouped
-kernel. It must not be advertised as preserving 15 tok/s.
+The three TP4 hardware requests decoded at approximately **0.23 tok/s**, not
+15 tok/s. The reference backend keeps only packed weights resident and
+dequantizes selected experts one at a time, with host routing synchronization.
+Each rank reported **18.6917 GiB** model-load memory with MTP and graphs disabled.
+That is not a measured maximum context or concurrency capacity.
+
+Detailed provenance, timings and limitations are in
+`artifacts/qwen38-w4-offline/HARDWARE_SMOKE.md`. Hardware regression coverage is
+`tests/e2e/nightly/310p/single_node/ops/test_qwen4exp_w4_310.py`.
 
 The next performance gate is a 310P-compatible packed groupwise W4 matmul with
 device-side routing and bounded scratch space, followed by graph-replay and
