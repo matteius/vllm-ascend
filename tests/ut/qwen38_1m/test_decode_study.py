@@ -12,7 +12,7 @@ import torch
 from torch import nn
 
 from tools.qwen38_decode_study import affinity, benchmark, prepare, summarize
-from tools.qwen38_decode_study.grouped_draft import grouped_routed_experts, pack_draft_experts
+from tools.qwen38_decode_study.grouped_draft import grouped_routed_experts, pack_draft_experts, route_local_experts
 from tools.qwen38_decode_study.guard import active_servers
 
 
@@ -59,11 +59,11 @@ def test_affinity_failure_restores_threads(monkeypatch):
     assert calls[0] == (10, {0, 1})
 
 
-def make_bank(offset=0):
+def make_bank(offset=0, num_experts=2):
     generator = torch.Generator().manual_seed(7)
     bank = nn.Module()
     bank.quantized_experts = True
-    bank.num_local_experts = 2
+    bank.num_local_experts = num_experts
     bank.expert_offset = offset
     for name, shape in (("gate_up_proj", (4, 6)), ("down_proj", (3, 4))):
         setattr(
@@ -74,7 +74,7 @@ def make_bank(offset=0):
                     nn.Parameter(
                         torch.randint(-8, 9, shape, dtype=torch.int8, generator=generator), requires_grad=False
                     )
-                    for _ in range(2)
+                    for _ in range(num_experts)
                 ]
             ),
         )
@@ -84,7 +84,7 @@ def make_bank(offset=0):
             nn.ParameterList(
                 [
                     nn.Parameter(torch.full((shape[1],), 0.03125, dtype=torch.float16), requires_grad=False)
-                    for _ in range(2)
+                    for _ in range(num_experts)
                 ]
             ),
         )
@@ -102,15 +102,23 @@ class ReferenceOps:
 
     @staticmethod
     def npu_moe_init_routing_v2(x, ids, **kwargs):
+        expert_count = kwargs["expert_num"]
+        assert ids.dtype == torch.int32
+        assert ((ids >= 0) & (ids < expert_count)).all(), "Routing expert IDs exceed the V2 count buffer"
+        assert kwargs["active_expert_range"] == [0, expert_count]
+        assert kwargs["active_num"] == ids.numel()
         order = ids.flatten().argsort(stable=True)
         inverse = order.argsort().to(torch.int32)
-        groups = torch.stack([(ids < i + 1).sum() for i in range(kwargs["expert_num"])])
+        groups = torch.bincount(ids.flatten().long(), minlength=expert_count).cumsum(0).int()
         return x[order // ids.shape[1]], inverse, groups, None
 
     @staticmethod
     def npu_quant_grouped_matmul_dequant(x, weight, scale, groups):
         assert scale.dtype == torch.float32
         assert groups.dtype == torch.int64
+        assert len(groups) == len(weight) == len(scale), "Virtual expert must not reach matmul"
+        assert ((groups >= 0) & (groups <= len(x))).all()
+        assert (groups[1:] >= groups[:-1]).all()
         output = torch.full((len(x), weight.shape[1]), float("nan"), dtype=x.dtype)
         start = 0
         for expert in range(len(groups)):
@@ -124,6 +132,45 @@ class ReferenceOps:
     def npu_swiglu(x):
         gate, up = x.chunk(2, -1)
         return torch.nn.functional.silu(gate) * up
+
+
+@pytest.mark.parametrize("invalid_id", [-1, 128])
+def test_routing_reference_rejects_ids_outside_declared_experts(invalid_id):
+    with pytest.raises(AssertionError, match="expert IDs"):
+        ReferenceOps.npu_moe_init_routing_v2(
+            torch.ones(1, 4).half(),
+            torch.tensor([[invalid_id]], dtype=torch.int32),
+            expert_num=128,
+            active_expert_range=[0, 128],
+            active_num=1,
+        )
+
+
+@pytest.mark.parametrize("offset", [0, 128, 256, 384])
+@pytest.mark.parametrize("tokens", [1, 2])
+def test_routing_128_experts_preserves_inverse_and_local_counts_across_route_changes(offset, tokens):
+    local_ids = torch.tensor([0, 1, 5, 10, 32, 64, 96, 120, 126, 127]) + offset
+    peer_ids = (local_ids + 128) % 512
+    mixed_ids = torch.where(torch.arange(10) % 2 == 0, local_ids, peer_ids)
+    x = torch.arange(tokens * 2560).reshape(tokens, 2560).half()
+    # Reuse inputs across populated -> empty -> mixed -> populated routing.
+    # This is a CPU contract gate, not a substitute for NPU graph replay.
+    for route_ids in (local_ids, peer_ids, mixed_ids, local_ids):
+        ids = torch.stack([route_ids.roll(token) for token in range(tokens)])
+        sorted_x, inverse, groups = route_local_experts(x, ids, 128, offset, ReferenceOps)
+        assert groups.shape == (128,)
+        assert groups.dtype == torch.int64
+        expected_counts = torch.stack(
+            [((ids >= offset) & (ids <= offset + expert)).sum() for expert in range(128)]
+        )
+        torch.testing.assert_close(groups, expected_counts)
+        restored = sorted_x.index_select(0, inverse).view(tokens, 10, 2560)
+        torch.testing.assert_close(restored, x[:, None, :].expand(-1, 10, -1))
+
+
+def test_routing_requires_a_local_expert_bank():
+    with pytest.raises(ValueError, match="positive"):
+        route_local_experts(torch.ones(1, 4), torch.tensor([[0]]), 0, 0, ReferenceOps)
 
 
 @pytest.mark.parametrize("offset", [0, 2, 6])
@@ -150,6 +197,30 @@ def test_grouped_routes_match_per_route_reference_with_peer_nan_padding(offset, 
             expected[token] += output[0].float() * weights[token, slot]
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, rtol=0, atol=1e-7)
+
+
+@pytest.mark.parametrize("offset", [0, 128, 256, 384])
+def test_grouped_128_experts_keeps_virtual_expert_out_of_matmuls(offset):
+    bank = make_bank(offset, num_experts=128)
+    pack_draft_experts(bank, lambda value: value)
+    x = torch.tensor([[0.3, -0.2, 0.9, -0.7]], dtype=torch.float16)
+    weights = torch.linspace(0.05, 0.15, 10).reshape(1, 10)
+    mixed_ids = torch.tensor([[127, 128, 255, 256, 383, 384, 511, 0, 10, 42]])
+    peer_ids = (torch.arange(10).reshape(1, 10) + offset + 128) % 512
+    for ids in (mixed_ids, peer_ids, mixed_ids):
+        actual = grouped_routed_experts(bank, x, weights, ids, ReferenceOps)
+        expected = torch.zeros_like(actual)
+        for slot, global_id in enumerate(ids[0].tolist()):
+            expert = global_id - offset
+            if not 0 <= expert < bank.num_local_experts:
+                continue
+            gate_up = quantized_linear(x, bank.gate_up_proj[expert].t(), bank.gate_up_proj_scale[expert])
+            output = quantized_linear(
+                ReferenceOps.npu_swiglu(gate_up), bank.down_proj[expert].t(), bank.down_proj_scale[expert]
+            )
+            expected[0] += output[0].float() * weights[0, slot]
+        assert torch.isfinite(actual).all()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=1e-7)
 
 
 def test_packing_reuses_storage_preserves_names_and_rejects_double_pack():
@@ -205,7 +276,7 @@ def test_affinity_patch_is_opt_in_and_keeps_arm_path():
     assert "CpuAlloc().run_all()" in result
 
 
-@pytest.mark.parametrize("draft_eager", [False, True])
+@pytest.mark.parametrize("draft_eager", [None, False, True])
 def test_mtp_patch_selects_capture_boundary_and_packs_after_loading(draft_eager):
     source = """from .dtype_policy import Qwen4ExpDtypePolicy
 class _MTPFP16MoE:
@@ -216,6 +287,7 @@ class _MTPFP16MoE:
         output = self.experts(x)
         if self.local_shared_intermediate:
             output += self.shared(x)
+        output = self._tp_reduce(output)
         return output
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -234,21 +306,62 @@ class Model:
         loaded = set()
         return loaded
 """
-    result = prepare.patch_mtp(source, draft_eager)
+    result = prepare.patch_mtp(source) if draft_eager is None else prepare.patch_mtp(source, draft_eager)
     tree = ast.parse(result)
     bank = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "_MTPFP16MoE")
     forward = next(node for node in bank.body if node.name == "forward")
-    if draft_eager:
+    if draft_eager is not False:
         assert isinstance(forward.body[0], ast.Assign)
         assert "weak_output.copy_(self._forward_grouped(weak_x))" in result
         assert "self._forward_eager(" not in result
+        assert "capture.add_eager(run_experts_eager)" in result
     else:
         assert isinstance(forward.body[0], ast.If)
     assert "grouped_routed_experts(self, x, weights, ids)" in result
     assert "pack_draft_experts(layer.mlp)" in result
     assert result.count("output += self.shared(x)") == 2
+    grouped = next(node for node in bank.body if node.name == "_forward_grouped")
+    assert "self._tp_reduce(output)" in ast.unparse(grouped)
     with pytest.raises(ValueError, match="patch anchor"):
         prepare.patch_mtp(result, draft_eager)
+
+
+def test_target_routing_patch_only_replaces_small_batch_dispatch():
+    source = """from .grouped_expert_dispatch import build_grouped_expert_dispatch
+def _w8a8_packed_grouped_experts_npu(x, topk_ids, w13_weight, expert_offset):
+    if x.device.type == "npu":
+        # The 310P routing kernel computes the expert permutation, inverse
+        num_local_experts = w13_weight.shape[0]
+        local_ids = topk_ids.to(torch.int32)
+        sorted_x, inverse_order, group_list, _ = torch_npu.npu_moe_init_routing_v2(x, local_ids)
+        group_list = group_list.to(torch.int64)
+        local_rows = torch.arange(num_tokens * top_k, device=x.device) < group_list[-1]
+        return sorted_x, inverse_order, group_list, local_rows
+    return build_grouped_expert_dispatch(topk_ids)
+"""
+    result = prepare.patch_target_routing(source)
+    ast.parse(result)
+    assert "npu_moe_init_routing_v2" not in result
+    assert "x, topk_ids, w13_weight.shape[0], expert_offset, torch_npu" in result
+    assert "from vllm_ascend._310p.qwen38_grouped_candidate import route_local_experts" in result
+    assert "return build_grouped_expert_dispatch(topk_ids)" in result
+    with pytest.raises(ValueError, match="routing patch anchor"):
+        prepare.patch_target_routing(result)
+    with pytest.raises(ValueError, match="routing patch anchor"):
+        prepare.patch_target_routing(source + source)
+
+
+@pytest.mark.parametrize("option,expected", [(None, None), ("--draft-eager", True), ("--draft-capture", False)])
+def test_prepare_cli_leaves_draft_capture_opt_in(monkeypatch, capsys, option, expected):
+    calls = []
+    args = ["prepare", "--source", "base", "--destination", "new", "--launcher", "launch", "--arm", "grouped"]
+    if option is not None:
+        args.append(option)
+    monkeypatch.setattr("sys.argv", args)
+    monkeypatch.setattr(prepare, "prepare", lambda *values: calls.append(values) or {})
+    prepare.main()
+    assert calls[0][-1] is expected
+    assert json.loads(capsys.readouterr().out) == {}
 
 
 def test_grouped_forward_does_not_read_device_tensors_on_host():

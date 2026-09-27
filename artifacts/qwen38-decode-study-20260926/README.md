@@ -97,6 +97,11 @@ grouped 停止发送 SIGTERM；日志显示 vLLM 的 abort-mode shutdown 内部�
 后续只读代码审计发现了 310P 路由的非法专家 ID 契约问题，并区分了确定缺陷
 与尚未隔离的 graph/collective 风险，详见 [failure-audit.md](failure-audit.md)。
 
+用户随后要求修复但暂不测试。新候选生成器已改用合法的虚拟 peer 路由槽，
+同时修正 target/draft 的该调用路径，并默认保留 MTP eager callback。
+这些改动尚未测试或部署；历史实验结果不能作为修复验证。
+变更及后续验证说明见 [routing-fix.md](routing-fix.md)。
+
 ## 服务恢复（23:16 UTC）
 
 用户随后要求启动约 19 tok/s 的 affinity 版本。设备仍无法完成简单计算，

@@ -43,7 +43,7 @@ def replace_once(text: str, old: str, new: str) -> str:
     return text.replace(old, new, 1)
 
 
-def patch_mtp(text: str, draft_eager: bool = False) -> str:
+def patch_mtp(text: str, draft_eager: bool = True) -> str:
     tree = ast.parse(text)
     bank = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "_MTPFP16MoE")
     eager = next(node for node in bank.body if isinstance(node, ast.FunctionDef) and node.name == "_forward_eager")
@@ -90,6 +90,34 @@ def patch_mtp(text: str, draft_eager: bool = False) -> str:
     return text
 
 
+def patch_target_routing(text: str) -> str:
+    """Fix the same routing contract in the pinned target's small-batch path."""
+    start = "        # The 310P routing kernel computes the expert permutation, inverse\n"
+    end = "        local_rows = torch.arange(num_tokens * top_k, device=x.device) < group_list[-1]\n"
+    if text.count(start) != 1 or text.count(end) != 1:
+        raise ValueError("Expected exactly one target routing patch anchor")
+    begin = text.index(start)
+    finish = text.index(end)
+    if finish <= begin:
+        raise ValueError("Target routing patch anchors are out of order")
+    text = replace_once(
+        text,
+        text[begin:finish],
+        "        # Include a real routing slot for peers, but no corresponding weights.\n"
+        "        sorted_x, inverse_order, group_list = route_local_experts(\n"
+        "            x, topk_ids, w13_weight.shape[0], expert_offset, torch_npu\n"
+        "        )\n",
+    )
+    text = replace_once(
+        text,
+        "from .grouped_expert_dispatch import build_grouped_expert_dispatch\n",
+        "from vllm_ascend._310p.qwen38_grouped_candidate import route_local_experts\n\n"
+        "from .grouped_expert_dispatch import build_grouped_expert_dispatch\n",
+    )
+    ast.parse(text)
+    return text
+
+
 def patch_affinity(text: str, groups: list[list[int]]) -> str:
     pools = tuple(tuple(group) for group in groups)
     text = replace_once(
@@ -107,7 +135,7 @@ def patch_affinity(text: str, groups: list[list[int]]) -> str:
 
 
 def prepare(
-    source: Path, destination: Path, launcher: Path, arm: str, plan: Path | None, draft_eager: bool = False
+    source: Path, destination: Path, launcher: Path, arm: str, plan: Path | None, draft_eager: bool | None = None
 ) -> dict:
     source = source.resolve(strict=True)
     destination = destination.resolve()
@@ -120,8 +148,10 @@ def prepare(
         raise ValueError("Launcher differs from the reviewed live baseline")
     if arm not in {"control", "affinity", "grouped", "combined"}:
         raise ValueError("Unknown study arm")
-    if draft_eager and arm not in {"grouped", "combined"}:
-        raise ValueError("--draft-eager requires a grouped draft arm")
+    grouped = arm in {"grouped", "combined"}
+    if draft_eager is not None and not grouped:
+        raise ValueError("Draft capture options require a grouped draft arm")
+    grouped_eager = grouped and draft_eager is not False
     helpers = Path(__file__).resolve().parent
     groups = None
     if arm in {"affinity", "combined"}:
@@ -149,12 +179,14 @@ def prepare(
         helper_path = destination / "vllm_ascend/_310p/qwen38_affinity_candidate.py"
         shutil.copy2(helpers / "affinity.py", helper_path)
         changes.extend([path, helper_path])
-    if arm in {"grouped", "combined"}:
+    if grouped:
         path = destination / "vllm_ascend/models/qwen4_exp/mtp.py"
-        path.write_text(patch_mtp(path.read_text(), draft_eager))
+        path.write_text(patch_mtp(path.read_text(), grouped_eager))
+        target_path = destination / "vllm_ascend/models/qwen4_exp/moe.py"
+        target_path.write_text(patch_target_routing(target_path.read_text()))
         helper_path = destination / "vllm_ascend/_310p/qwen38_grouped_candidate.py"
         shutil.copy2(helpers / "grouped_draft.py", helper_path)
-        changes.extend([path, helper_path])
+        changes.extend([path, target_path, helper_path])
     for path in changes:
         ast.parse(path.read_text())
     shutil.copy2(helpers / "guard.py", destination / "candidate_guard.py")
@@ -193,7 +225,8 @@ def prepare(
         "cpu_groups": groups,
         "skipped_dangling_build_links": dangling,
         "draft_activation_quantization": "W8A8 candidate" if arm in {"grouped", "combined"} else "W8A16 baseline",
-        "draft_grouped_eager_callback": draft_eager,
+        "draft_grouped_eager_callback": grouped_eager,
+        "local_expert_routing": "virtual peer expert for target and draft" if grouped else "baseline",
         "device_validation": "NOT_RUN: real-weight gates required before promotion",
     }
     (destination / "candidate-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -207,7 +240,14 @@ def main() -> None:
     parser.add_argument("--launcher", type=Path, required=True)
     parser.add_argument("--arm", choices=("control", "affinity", "grouped", "combined"), required=True)
     parser.add_argument("--cpu-plan", type=Path)
-    parser.add_argument("--draft-eager", action="store_true", help="Retain the draft expert eager callback")
+    capture = parser.add_mutually_exclusive_group()
+    capture.add_argument(
+        "--draft-eager", dest="draft_eager", action="store_true", help="Retain the draft eager callback (default)"
+    )
+    capture.add_argument(
+        "--draft-capture", dest="draft_eager", action="store_false", help="Opt into unvalidated full draft capture"
+    )
+    parser.set_defaults(draft_eager=None)
     args = parser.parse_args()
     print(
         json.dumps(

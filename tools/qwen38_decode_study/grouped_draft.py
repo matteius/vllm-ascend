@@ -5,8 +5,9 @@ Installed only into an isolated snapshot by prepare.py. The existing draft's
 INT8 weights and rounded FP16 weight scales are retained. Real-checkpoint
 acceptance, quality, empty-rank, and graph replay gates are mandatory.
 
-The 2026-09-26 TP4 graph trial stalled with a device-memory fault. This
-candidate is rejected for serving and retained only for failure reproduction.
+The original 2026-09-26 TP4 graph trial stalled. This revision fixes the
+identified routing contract violation but has not been tested or approved
+for serving. The original failure is preserved in the remote trial snapshot.
 """
 
 from __future__ import annotations
@@ -41,6 +42,36 @@ def pack_draft_experts(bank, format_weight=None) -> None:
         bank.register_buffer(packed_name + "_scale", scales, persistent=False)
 
 
+def route_local_experts(x, ids, num_local_experts, expert_offset, ops=None):
+    """Route peers into a valid extra expert slot, returning only local counts.
+
+    On 310P the V2 kernel does not filter active_expert_range. Every input ID
+    must fit expert_num, including peer-owned routes. The extra slot has no
+    weights: exclude its cumulative count before either grouped matmul.
+    """
+    if num_local_experts <= 0:
+        raise ValueError("Local expert count must be positive")
+    if ops is None:
+        import torch_npu
+
+        ops = torch_npu
+    peer_expert_id = num_local_experts
+    routing_expert_count = num_local_experts + 1
+    local_ids = ids.to(torch.int32) - expert_offset
+    local_ids = torch.where((local_ids >= 0) & (local_ids < num_local_experts), local_ids, peer_expert_id)
+    sorted_x, inverse_order, group_list, _ = ops.npu_moe_init_routing_v2(
+        x,
+        local_ids,
+        active_num=ids.numel(),
+        expert_num=routing_expert_count,
+        drop_pad_mode=0,
+        active_expert_range=[0, routing_expert_count],
+        quant_mode=-1,
+        row_idx_type=0,
+    )
+    return sorted_x, inverse_order, group_list[:num_local_experts].to(torch.int64)
+
+
 def grouped_routed_experts(bank, x, weights, ids, ops=None):
     """Return FP32 routed outputs with device-only dispatch, including empty ranks.
 
@@ -53,19 +84,7 @@ def grouped_routed_experts(bank, x, weights, ids, ops=None):
         ops = torch_npu
     num_tokens, hidden = x.shape
     top_k = ids.shape[1]
-    local_ids = ids.to(torch.int32) - bank.expert_offset
-    local_ids = torch.where((local_ids >= 0) & (local_ids < bank.num_local_experts), local_ids, bank.num_local_experts)
-    sorted_x, inverse_order, group_list, _ = ops.npu_moe_init_routing_v2(
-        x,
-        local_ids,
-        active_num=num_tokens * top_k,
-        expert_num=bank.num_local_experts,
-        drop_pad_mode=0,
-        active_expert_range=[0, bank.num_local_experts],
-        quant_mode=-1,
-        row_idx_type=0,
-    )
-    group_list = group_list.to(torch.int64)
+    sorted_x, inverse_order, group_list = route_local_experts(x, ids, bank.num_local_experts, bank.expert_offset, ops)
     valid_rows = torch.arange(num_tokens * top_k, device=x.device) < group_list[-1]
     gate_up = ops.npu_quant_grouped_matmul_dequant(
         sorted_x, bank.draft_gate_up_packed, bank.draft_gate_up_scale, group_list
