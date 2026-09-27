@@ -865,12 +865,83 @@ FULL `[1,3]` 和同一短/23.4k benchmark protocol。三个真实 smoke 已正�
 r8 相同但输出并非 bitwise 相同。不能把全部差异归因于 sampler，
 也不能用 counting smoke 的 16.549 tok/s 代替 coding median。
 `replay-r5/w4-mtp2-r9-short.jsonl` 与相邻 smoke JSONL 保留完整结果。
-长题正在运行，还没有新的长上下文结论，W8 19.073/18.091 目标未达成。
-server 留在隔离 :8002，API PID 3684371、engine 3685195，TP workers
+长三题也完成 512 tokens：**15.510 / 13.689 / 12.834 tok/s**，
+中位数 **13.689**（比 r8 的 12.990 高 5.38%，与 r7 的 13.683
+接近）。均复用 23,168 prefix tokens，cold warmup TTFT 357.555 秒；
+drafted/accepted 为 364/329、408/308、436/293，不能用局部 sampler
+收益直接解释全部差异。完整结果见 `replay-r5/w4-mtp2-r9-long.jsonl`。
+W8 19.073/18.091 目标未达成。完成标记、空闲 metrics 及 PID tree
+复核后正常停止隔离 :8002，以执行下一项 gate/up 合并诊断；未恢复
+或修改 W8。历史 API PID 3684371、engine 3685195、workers
 3685525–3685528；host 日志 `server-routed-mtp-mtp2-r9.log`。
 
 本候选 scoped manual hooks 全部通过，只有同一未改动的
 `check-symbolic-meta` 第 655 行问题需跳过；不是全库 lint 全绿。
+
+## 第十三个候选：合并 packed gate/up projection
+
+gate/up 使用相同激活与 expert IDs，沿 N 合并两个已编码 bank，
+在现有 kernel 中将两次 N=640 调用变成一次 N=1280 调用。N tile
+仍为 32、K reduction 仍为 128，未重编译或修改 kernel，也未增加
+常驻 FP16/W8 shadow。生产分配直接创建 `gate_up_proj`，checkpoint
+的两个原始投影逐 expert 写入对应半区；不存在常驻旧 bank 或完整
+bank 的加载时拼接。只有诊断程序同时保留两种布局用于对照。
+非 routed W4 后端和生产 W8 保持原路径。host-prefill fallback
+也使用合并 bank，但保留现有 FP32 SiLU/乘法及 FP16 down 输入。
+
+CPU 证明 pack(concat) 与 concat(pack) 逐位相同；增加非零 rank、
+不均匀 ownership、up-first 加载、缺少 up checkpoint 必须拒绝、
+真实 model loader 返回参数名及 packed 总字节数测试。focused CPU
+suite **73 passed / 1 skipped**（缺少可选 msmodelslim）。隔离 host
+**38 passed / 1 skipped**，包含 31 个 CPU UT 和 7 个 NPU cases：
+prefill rows 1/8/128，routed rows 10/30/50/80；后者 replay 四种
+不同 ownership，先以 NaN 污染输出，确认 local/peer 切换仍精确覆盖。
+随后完整 `tests/ut/qwen38_1m` suite 为 **950 passed / 7 skipped**，
+50.04 秒；不是全库或多型号硬件测试。
+
+真实 layer-0 / TP-rank-0 partial、synthetic activations、无 collective
+的图回放对照（30 iterations × 5 trials，交错测量顺序）：
+
+| tokens | separate ms | combined ms | 减少 |
+| --- | --- | --- | --- |
+| 1 | 0.503440 | 0.479937 | 4.67% |
+| 2 | 0.342808 | 0.319739 | 6.73% |
+| 3 | 2.379038 | 2.159219 | 9.24% |
+| 5 | 1.858981 | 1.697172 | 8.70% |
+| 8 | 4.498129 | 4.088642 | 9.10% |
+
+每个 shape 的 eager 和四次 changing-input replay 输出均精确一致。
+gate/up 字节数两边均为 219,545,600；这不是整模型吞吐测试。
+集成前 r1 也全部正确、减少 5.86–9.13%。证据为
+`replay-r5/gate-up-r{1,2}.jsonl` 和相邻 test logs。原 routed kernel
+SHA256 为 `1ced910285a0714b09e167fc84dd8490c0c9ea1c68cb397d07847227961efece`，
+新 `w4_moe.py` SHA256 为
+`49d2a6b639ae068d8568819a7bb83d90dabac8285ed3a55a3755d652871fadf1`。
+
+仅在上述 gates 完成后启动 `mtp2-r10`，保持 :8002 / TP4+EP /
+MTP k=2 / FULL `[1,3]` / .90 / 32k / seq1。三个真实 smoke 均正确：
+323、完整 1–50、`[0, 4, 16]`。三-token FULL runtime replay 有计数。
+权重仍为 19.38 GiB/rank；graph memory **0.53–0.54 GiB**，
+相比 r9 的约 0.38 GiB 增加约 150 MiB，不能把 packed-bank 不变
+表述为全部运行显存不变。
+
+短三题各完成 512 tokens：**15.928 / 13.148 / 13.841 tok/s**，
+中位数 **13.841**，比 r9 的 13.729 高 **0.82%**。第一题 draft
+计数与 r9 一致（382/321），但输出 SHA 改变；第二/三题分别为
+460/281、438/292，接受率下降。局部 layer 的 4.67–9.24% gain
+未等比例转化为生成速度，不能宣称已达到 W8 或完整任务质量等价。
+原始记录 `replay-r5/w4-mtp2-r10-short.jsonl` 和相邻 smoke JSONL。
+23.4k 三题也完成 512 tokens：**15.599 / 13.903 / 12.821 tok/s**，
+中位数 **13.903**，比 r9 的 13.689 高 **1.57%**。三题均复用
+23,168 prefix tokens，drafted/accepted 为 374/324、416/304、450/287；
+cold warmup TTFT 324.894 秒。原始记录为
+`replay-r5/w4-mtp2-r10-long.jsonl`。所有六个 coding 请求均为
+`finish_reason=length` 的固定 512-token 吞吐测试，不是完整 coding
+任务正确率评测。完成标记和 running/waiting=0 已复核，无 runtime
+ERROR/Traceback，server 保持运行；API 3782927、engine 3783652、
+TP workers 3784185–3784188，host log
+`server-routed-mtp-mtp2-r10.log`。生产 W8 launcher
+SHA256 仍为 `ae81d75eec7516fc6f455a3a071e52410ba6c477c34e0114df647f4c125c77df`。
 
 ## 复现与交接
 
@@ -925,6 +996,11 @@ bash qwen38-w4-mtp-short-benchmark.sh mtp2-r6
 bash qwen38-w4-server-routed-check-r1.sh mtp2-r7 \
   /srv/ai/src/qwen38-w4-operator-build-r1/ops-compact-r1/vendors/qwen_w4_probe_transformer 2
 bash qwen38-w4-mtp-short-benchmark.sh mtp2-r7
+
+# 当前 gate/up 合并候选：先 stage w4_moe.py，运行独立 NPU/real-layer gate；
+# 此脚本验证结果后启动 MTP k=2、自动执行真实 smoke 和短/长 benchmark。
+# 重跑需更改脚本中的 run label/output，不能覆盖旧证据。
+bash qwen38-w4-gate-up-mtp2-r1.sh
 ```
 
 服务配置见本页开头和 tutorial，仍为 :8002 / TP4 / EP /

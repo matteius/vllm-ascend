@@ -364,4 +364,21 @@ H2D 和动态 boolean indexing，保留 k=1、ragged 与 random fallback。
 `mtp2-r9` 三个真实 smoke 正确、MTP k=2 和 FULL `[1,3]` runtime
 replay 有证据。短三题全部完成 512 tokens，15.358/13.239/13.729
 tok/s，中位数 **13.729**（比 r8 高 3.90%）；输出和 acceptance 改变，
-不将全部差异归因于新 sampler。长题仍在运行，W8 基线尚未达到。
+不将全部差异归因于新 sampler。23.4k 三题也完成 512 tokens，
+15.510/13.689/12.834 tok/s，中位数 **13.689**；均复用 23,168
+prefix tokens，cold TTFT 357.555 秒。W8 基线尚未达到。
+
+进一步将 routed W4 的 gate/up 在加载时写入一个 packed bank，
+以一次 N=1280 projection 替代两次 N=640。无常驻重复 bank，W8
+未改；950 个 Qwen CPU tests 通过（7 skipped），另有 7 个 NPU
+prefill/changing-route replay cases 通过。真实 layer 对照精确一致，
+局部 graph latency 降低 4.67–9.24%，不是同等比例整模型提速。
+`mtp2-r10` 三个 smoke 正确、MTP k=2 / FULL `[1,3]` runtime
+replay 有证据；短三题 15.928/13.148/13.841 tok/s，中位数
+**13.841**（比 r9 高 0.82%）。23.4k 三题也完成 512 tokens，
+15.599/13.903/12.821 tok/s，中位数 **13.903**（比 r9 高 1.57%）；
+三题均复用 23,168 prefix tokens，cold TTFT 324.894 秒。
+这些固定长度请求不等于完整 coding 任务正确率评测。隔离 :8002
+服务保持运行，生产 W8 未改。
+权重仍 19.38 GiB/rank，但 graph memory 从约 0.38 增至
+0.53–0.54 GiB；完整 W8 速度目标仍未达成。

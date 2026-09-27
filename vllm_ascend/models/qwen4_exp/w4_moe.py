@@ -167,8 +167,10 @@ class W4SparseMoE(nn.Module):
         if metadata is None:
             raise ValueError("W4SparseMoE requires explicit checkpoint metadata")
         hidden, intermediate = int(config.hidden_size), int(config.moe_intermediate_size)
+        self.intermediate_size = intermediate
         self.max_chunk_tokens = MAX_CUBE_TOKENS if metadata["backend"] in CUBE_BACKENDS else MAX_EAGER_TOKENS
         self.device_routing = metadata["backend"] == "cube_310_routed"
+        self.fused_gate_up = self.device_routing
         self.num_experts = int(config.num_experts)
         self.top_k = int(config.num_experts_per_tok)
         self.expert_tp_rank, self.expert_tp_size = expert_sharding
@@ -184,16 +186,28 @@ class W4SparseMoE(nn.Module):
         self.renormalize = bool(getattr(config, "norm_topk_prob", True))
         self.routed_scaling_factor = float(getattr(config, "routed_scaling_factor", 1.0) or 1.0)
         self.gate = nn.Parameter(torch.zeros(self.num_experts, hidden, dtype=self.params_dtype))
+        # Gate/up have identical route ownership and input activations. Store
+        # adjacent N tiles in one packed bank, without a shadow or load-time
+        # full-bank concatenation. Other backends keep their reference layout.
+        projection_shapes = (
+            {"gate_up_proj": (2 * intermediate, hidden), "down_proj": (hidden, intermediate)}
+            if self.fused_gate_up
+            else {
+                "gate_proj": (intermediate, hidden),
+                "up_proj": (intermediate, hidden),
+                "down_proj": (hidden, intermediate),
+            }
+        )
         self.projections = nn.ModuleDict(
             {
                 name: PackedExpertBank(
                     self.num_local_experts,
-                    hidden if name == "down_proj" else intermediate,
-                    intermediate if name == "down_proj" else hidden,
+                    outputs,
+                    inputs,
                     metadata["group_size"],
                     backend=metadata["backend"],
                 )
-                for name in PROJECTIONS
+                for name, (outputs, inputs) in projection_shapes.items()
             }
         )
         shared = int(getattr(config, "shared_expert_intermediate_size", 0) or 0)
@@ -219,7 +233,12 @@ class W4SparseMoE(nn.Module):
         local = expert - self.expert_offset
         if not 0 <= local < self.num_local_experts:
             return None
-        target = getattr(self.projections[projection], kind)[local]
+        bank_name = "gate_up_proj" if self.fused_gate_up and projection in ("gate_proj", "up_proj") else projection
+        bank = self.projections[bank_name]
+        target = getattr(bank, kind)[local]
+        if bank_name == "gate_up_proj":
+            start = self.intermediate_size if projection == "up_proj" else 0
+            target = target[start : start + self.intermediate_size]
         if tensor.dtype != target.dtype or tuple(tensor.shape) != tuple(target.shape):
             raise ValueError(
                 f"W4 {projection}.{kind}: expected {target.dtype} {tuple(target.shape)}, "
@@ -231,10 +250,10 @@ class W4SparseMoE(nn.Module):
             if kind == "weight_offset" and not ((tensor >= -8) & (tensor <= 7)).all():
                 raise ValueError("W4 offsets must be signed-int4 zero points")
         with torch.no_grad():
-            if self.projections[projection].backend in CUBE_TILED_BACKENDS:
+            if bank.backend in CUBE_TILED_BACKENDS:
                 tensor = pack_cube_tiles(tensor, kind)
             target.copy_(tensor)
-        return f"projections.{projection}.{kind}"
+        return f"projections.{bank_name}.{kind}"
 
     def forward(self, block_input: torch.Tensor) -> torch.Tensor:
         weights, ids = route_topk(
@@ -255,9 +274,7 @@ class W4SparseMoE(nn.Module):
             # aclop Cast that cannot be captured. Keep the CPU/eager reference
             # unchanged; the routed backend uses its resident FP16 weights.
             operand_dtype = (
-                self.params_dtype
-                if block_input.device.type == "npu" and self.projections["gate_proj"].backend == "cube_310_routed"
-                else self.compute_dtype
+                self.params_dtype if block_input.device.type == "npu" and self.fused_gate_up else self.compute_dtype
             )
             inputs = block_input.to(operand_dtype)
             gate, up = F.linear(inputs, self.shared_gate_up.to(operand_dtype)).chunk(2, -1)
@@ -275,8 +292,7 @@ class W4SparseMoE(nn.Module):
         tokens, hidden = block_input.shape
         inputs = block_input[:, None, :].expand(-1, self.top_k, -1).reshape(-1, hidden).contiguous()
         local_ids = (ids - self.expert_offset).to(torch.int32).flatten().contiguous()
-        gate = self.projections["gate_proj"].routed_linear(inputs, local_ids).to(self.compute_dtype)
-        up = self.projections["up_proj"].routed_linear(inputs, local_ids).to(self.compute_dtype)
+        gate, up = self.projections["gate_up_proj"].routed_linear(inputs, local_ids).to(self.compute_dtype).chunk(2, -1)
         activation = (F.silu(gate) * up).to(self.params_dtype)
         output = self.projections["down_proj"].routed_linear(activation, local_ids).to(self.compute_dtype)
         return (output.reshape(tokens, self.top_k, hidden) * weights.unsqueeze(-1)).sum(dim=1)
@@ -295,8 +311,13 @@ class W4SparseMoE(nn.Module):
                 indices = torch.tensor(selected, dtype=torch.long, device=block_input.device)
                 tokens, slots = indices.unbind(-1)
                 inputs = block_input.index_select(0, tokens)
-                gate = self.projections["gate_proj"].linear(inputs, expert).to(self.compute_dtype)
-                up = self.projections["up_proj"].linear(inputs, expert).to(self.compute_dtype)
+                if self.fused_gate_up:
+                    gate, up = (
+                        self.projections["gate_up_proj"].linear(inputs, expert).to(self.compute_dtype).chunk(2, -1)
+                    )
+                else:
+                    gate = self.projections["gate_proj"].linear(inputs, expert).to(self.compute_dtype)
+                    up = self.projections["up_proj"].linear(inputs, expert).to(self.compute_dtype)
                 activation = (F.silu(gate) * up).to(self.params_dtype)
                 output = self.projections["down_proj"].linear(activation, expert).to(self.compute_dtype)
                 result.index_add_(0, tokens, output * weights[tokens, slots].unsqueeze(-1))

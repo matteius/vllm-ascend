@@ -16,6 +16,7 @@ from vllm_ascend.models.qwen4_exp.model import AscendQwen4ExpForCausalLM, _Eager
 from vllm_ascend.models.qwen4_exp.moe import route_topk
 from vllm_ascend.models.qwen4_exp.w4_moe import (
     FORMAT,
+    KINDS,
     PackedExpertBank,
     W4SparseMoE,
     dequantize,
@@ -56,6 +57,7 @@ def pack(q):
 
 def payloads(cfg):
     generator = torch.Generator().manual_seed(104)
+    group_size = cfg.ascend_expert_quantization["group_size"]
     for layer in range(cfg.num_hidden_layers):
         for expert in range(cfg.num_experts):
             for projection in ("gate_proj", "up_proj", "down_proj"):
@@ -66,8 +68,12 @@ def payloads(cfg):
                 )
                 values = {
                     "weight": pack(torch.randint(-8, 8, (output, inputs), dtype=torch.int8, generator=generator)),
-                    "weight_scale": (torch.rand(output, inputs // 8, generator=generator) * 0.03 + 0.001).half(),
-                    "weight_offset": torch.randint(-3, 4, (output, inputs // 8), generator=generator).to(torch.int8),
+                    "weight_scale": (
+                        torch.rand(output, inputs // group_size, generator=generator) * 0.03 + 0.001
+                    ).half(),
+                    "weight_offset": torch.randint(-3, 4, (output, inputs // group_size), generator=generator).to(
+                        torch.int8
+                    ),
                 }
                 for kind, tensor in values.items():
                     yield f"model.language_model.layers.{layer}.mlp.experts.{expert}.{projection}.{kind}", tensor
@@ -177,8 +183,11 @@ def test_routed_slots_keep_token_order_and_nonzero_tp_expert_offset():
                 activated = (F.silu(projected) * projected).half()
                 expected[token] += (activated * (expert + 1)).float() * weights[token, slot]
     with (
-        patch.object(layer.projections["gate_proj"], "routed_linear", side_effect=projection),
-        patch.object(layer.projections["up_proj"], "routed_linear", side_effect=projection),
+        patch.object(
+            layer.projections["gate_up_proj"],
+            "routed_linear",
+            side_effect=lambda inputs, selected: torch.cat([projection(inputs, selected)] * 2, dim=-1),
+        ),
         patch.object(layer.projections["down_proj"], "routed_linear", side_effect=projection),
     ):
         torch.testing.assert_close(layer._forward_routed(x, weights, ids), expected)
@@ -221,6 +230,21 @@ def test_tile_permutation_is_lossless_and_keeps_bytes(outputs, inputs):
         torch.testing.assert_close(restored, tensor, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("outputs,inputs", [(32, 256), (640, 2560), (2560, 640)])
+def test_concatenating_tiled_gate_up_equals_packing_concatenated_weights(outputs, inputs):
+    generator = torch.Generator().manual_seed(1024)
+    values = {
+        "weight": torch.randint(-128, 128, (2, outputs, inputs // 2), dtype=torch.int8, generator=generator),
+        "weight_scale": torch.rand(2, outputs, inputs // 128, generator=generator).half(),
+        "weight_offset": torch.randint(-8, 8, (2, outputs, inputs // 128), dtype=torch.int8, generator=generator),
+    }
+    for kind, tensors in values.items():
+        separate = torch.cat([pack_cube_tiles(tensor, kind) for tensor in tensors])
+        combined = pack_cube_tiles(torch.cat(tuple(tensors)), kind)
+        torch.testing.assert_close(separate, combined, rtol=0, atol=0)
+        assert combined.nbytes == tensors.nbytes
+
+
 @pytest.mark.parametrize("backend", ["cube_310_tiled", "cube_310_routed"])
 def test_tiled_loader_permutes_each_expert_without_fp16_shadow(backend):
     cfg = config(num_layers=1, num_experts=3, top_k=1, shared_inter=0)
@@ -234,10 +258,83 @@ def test_tiled_loader_permutes_each_expert_without_fp16_shadow(backend):
     }
     for kind, tensor in values.items():
         layer.load_projection(2, "gate_proj", kind, tensor)
-        bank = layer.projections["gate_proj"]
-        torch.testing.assert_close(getattr(bank, kind)[2], pack_cube_tiles(tensor, kind), rtol=0, atol=0)
+        bank = layer.projections["gate_up_proj" if backend == "cube_310_routed" else "gate_proj"]
+        torch.testing.assert_close(getattr(bank, kind)[2, :256], pack_cube_tiles(tensor, kind), rtol=0, atol=0)
         assert not getattr(bank, kind)[0].any()
-    assert len(list(layer.projections["gate_proj"].parameters())) == 3
+    assert len(list(bank.parameters())) == 3
+
+
+def test_fused_gate_up_loader_preserves_layout_and_resident_bytes():
+    cfg = config(num_layers=1, num_experts=7, top_k=3, shared_inter=0)
+    cfg.hidden_size, cfg.moe_intermediate_size = 256, 384
+    cfg.ascend_expert_quantization.update(group_size=128, backend="cube_310_routed")
+    layer = W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy(), expert_sharding=(1, 2))
+    generator = torch.Generator().manual_seed(13)
+    for projection in ("up_proj", "gate_proj", "down_proj"):
+        outputs, inputs = (256, 384) if projection == "down_proj" else (384, 256)
+        tensors = (
+            torch.randint(-128, 128, (outputs, inputs // 2), dtype=torch.int8, generator=generator),
+            (torch.rand(outputs, inputs // 128, generator=generator) + 0.01).half(),
+            torch.randint(-8, 8, (outputs, inputs // 128), dtype=torch.int8, generator=generator),
+        )
+        bank_name = "down_proj" if projection == "down_proj" else "gate_up_proj"
+        start = 384 if projection == "up_proj" else 0
+        for kind, tensor in zip(KINDS, tensors):
+            assert layer.load_projection(0, projection, kind, tensor) is None  # peer
+            assert layer.load_projection(4, projection, kind, tensor) == f"projections.{bank_name}.{kind}"
+            stored = getattr(layer.projections[bank_name], kind)[4 - layer.expert_offset, start : start + outputs]
+            torch.testing.assert_close(stored, pack_cube_tiles(tensor, kind), rtol=0, atol=0)
+    assert set(layer.projections) == {"gate_up_proj", "down_proj"}
+    elements = layer.num_local_experts * 3 * 256 * 384
+    assert sum(parameter.nbytes for parameter in layer.projections.parameters()) == elements // 2 + elements // 128 * 3
+
+
+def test_fused_gate_up_host_fallback_preserves_routes_and_rounding():
+    cfg = config(num_layers=1, num_experts=3, top_k=2, shared_inter=0)
+    cfg.hidden_size = cfg.moe_intermediate_size = 256
+    cfg.ascend_expert_quantization.update(group_size=128, backend="cube_310_routed")
+    layer = W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy())
+    layer.device_routing = False  # diagnostic host routing must retain the fused layout
+    x = (torch.arange(512).reshape(2, 256) / 512).half()
+    ids, weights = torch.tensor([[0, 1], [1, 2]]), torch.tensor([[0.2, 0.8], [0.4, 0.6]])
+    expected = torch.zeros_like(x).float()
+    for token in range(2):
+        for slot in range(2):
+            factor = int(ids[token, slot]) + 1
+            gate, up = (x[token] * factor).float(), (x[token] * (factor + 1)).float()
+            expected[token] += ((F.silu(gate) * up).half() * factor).float() * weights[token, slot]
+    with (
+        patch.object(
+            layer.projections["gate_up_proj"],
+            "linear",
+            side_effect=lambda inputs, expert: torch.cat((inputs * (expert + 1), inputs * (expert + 2)), -1),
+        ),
+        patch.object(
+            layer.projections["down_proj"], "linear", side_effect=lambda inputs, expert: inputs * (expert + 1)
+        ),
+    ):
+        torch.testing.assert_close(layer._forward_host_routed(x, weights, ids), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("missing_up", [False, True])
+def test_real_loader_tracks_fused_parameters_but_requires_both_checkpoint_halves(missing_up):
+    cfg = config(num_layers=1, num_experts=2, top_k=1, shared_inter=0)
+    cfg.hidden_size = cfg.moe_intermediate_size = 256
+    cfg.ascend_expert_quantization.update(group_size=128, backend="cube_310_routed")
+    model = build(cfg)
+    tensors = list(payloads(cfg))
+    if missing_up:
+        tensors = [(name, value) for name, value in tensors if ".up_proj." not in name]
+        with pytest.raises(ValueError, match="incomplete W4 expert checkpoint"):
+            model.load_weights(tensors)
+    else:
+        loaded = model.load_weights(tensors)
+        assert loaded == {
+            f"model.layers.0.mlp.projections.{projection}.{kind}"
+            for projection in ("gate_up_proj", "down_proj")
+            for kind in KINDS
+        }
+        assert loaded <= dict(model.named_parameters()).keys()
 
 
 @pytest.mark.parametrize(
