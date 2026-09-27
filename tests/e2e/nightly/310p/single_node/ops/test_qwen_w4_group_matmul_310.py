@@ -308,6 +308,42 @@ def test_routed_reuse_owner_changes_on_graph_replay(routes, outputs, inputs):
         assert (actual[(ids < 0) | (ids >= 3)] == 0).all()
 
 
+@pytest.mark.parametrize("outputs,inputs", [(128, 1024), (640, 2560), (2560, 640)])
+def test_routed_compact_rows_cross_gather_and_cube_boundaries_on_replay(outputs, inputs):
+    routes = 80
+    values, canonical = routed_values(routes, outputs, inputs)
+    device_values = [value.npu() for value in values]
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        for _ in range(3):
+            routed_kernel(*device_values)
+    torch.npu.current_stream().wait_stream(stream)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, stream=stream):
+        captured = routed_kernel(*device_values)
+    # The graph shape stays at 80 routes while each expert's compact length
+    # changes. Exercise empty/singleton paths, 16-row UB flushes, Cube tails,
+    # arbitrary gaps, different first owners and fully occupied scratch.
+    generator = torch.Generator().manual_seed(129)
+    for phase, matches in enumerate([0, 1, 2, 3, 8, 15, 16, 17, 31, 32, 33, 65, 79, 80]):
+        order = torch.randperm(routes, generator=generator)
+        ids = torch.full((routes,), -1, dtype=torch.int32)
+        ids[order[:matches]] = phase % 3
+        if matches < routes:
+            # Another owner must not read the previous expert's compact rows.
+            ids[order[matches::2]] = (phase + 1) % 3
+        x = (torch.randn(values[0].shape, generator=generator) * 0.1).half()
+        device_values[0].copy_(x)
+        device_values[-1].copy_(ids)
+        captured.fill_(float("nan"))
+        graph.replay()
+        actual = captured.cpu()
+        torch.testing.assert_close(actual, routed_reference(x, canonical, ids), rtol=0.005, atol=0.003)
+        assert (actual[ids == -1] == 0).all()
+
+
 @pytest.mark.parametrize("bad", ["route_limit", "ids_dtype", "ids_shape", "bank_shape", "scale_shape", "noncontiguous"])
 def test_routed_invalid_input_fails_before_launch(bad):
     values, _ = routed_values(10, 128, 256)

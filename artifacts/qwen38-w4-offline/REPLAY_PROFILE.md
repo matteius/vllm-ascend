@@ -372,8 +372,95 @@ drafted 计数增长，capture 仍为 0.38 GiB、KV cache 12.91 GiB。
 旧版本相同，速度提高 0.87%；其它两题输出变化，drafted/accepted 为
 384/320、456/283、422/301。不能把整段中位数提升完全归因于共享表。
 model-load 仍为 19.3821 GiB/rank；kernel、checkpoint 和原 W8 launcher
-均未改动。原始结果 `w4-mtp2-r4-short.jsonl`。约 23.4k 长测试已开始，
-待其完成后再用同一 kernel + RoPE 比较 k=1，避免混淆 kernel 与 k。
+均未改动。原始结果 `w4-mtp2-r4-short.jsonl`。
+
+约 23.4k 长测试也完成：**10.852 / 10.120 / 9.004 tok/s**，中位数
+**10.120**，相对 zero-r1 的 9.709 高 4.23%。三题均生成 512 tokens，
+复用 23,168 prefix tokens；drafted/accepted 为 378/323、402/311、
+452/286。冷 TTFT 358.790 秒，热 TTFT 4.518/4.690/5.079 秒。
+三个输出 SHA 均改变，不能将这次中位数差异完全归因于 kernel 延迟；
+第一题低于 zero-r1 的 11.023。原始结果 `w4-mtp2-r4-long.jsonl`。
+下一步使用同一 kernel + RoPE 比较 k=1，避免混淆 kernel 与 k。
+
+同一 `ops-zero-r1` 与 RoPE 的 k=1 新 run `mtp1-r1` 已通过三个真实
+smoke；两-token verification 的 runtime stats 为 FULL，accepted 计数增长。
+短 coding 三题为 **13.417 / 12.392 / 12.787 tok/s**，中位数 **12.787**。
+k=2 的 13.034 仅高 1.93%；第三题输出 SHA 完全一致，其余两题不同。
+k=1 drafted/accepted 为 266/246、287/225、278/234；不要把更高
+acceptance rate 本身等同于更高 tok/s。
+
+k=1 的约 23.4k 三题完成：**13.213 / 12.754 / 12.269 tok/s**，中位数
+**12.754**，比相同代码 k=2 的 10.120 高 **26.03%**。全部生成 512 tokens、
+复用 23,168 prefix tokens；drafted/accepted 为 261/251、271/241、279/232。
+冷 TTFT 356.128 秒，热 TTFT 4.560/4.562/5.094 秒。三个输出都与 k=2
+不同，不是 bitwise-identical workload；不能把差异完全视为每步加速。
+原始证据 `w4-mtp1-r1-short.jsonl`、`w4-mtp1-r1-long.jsonl`，
+host `server-routed-mtp-mtp1-r1.log` 显示两-token FULL replay。
+
+源码定位到一个重要 dispatch 边界：`_BATCHED_QSA_MAX_DECODE_TOKENS=2`，
+且 `_qsa_decode_group_list` 也只按两-token 创建。满足其它条件时 k=1
+走 grouped batched QSA，k=2 的三-token（及 k=4 的五-token）则回退
+`qsa_sparse_attention_310`。这可能解释部分长上下文差距；尚未修改或
+以 matched profile 验证因果。下一独立候选应只对 routed-W4 扩展这个
+阈值及预创建 group-list，增加 T=3/5/8、KV heads=1/2 的 dynamic replay
+和真实长上下文 gates；不能全局改变 W8 默认或直接宣称可获得的 tok/s。
+
+## 第八个候选：只计算同一专家的匹配行
+
+之前 reuse 分支虽然只解包一次专家，但矩阵乘仍覆盖整个 R-route 输入，
+最后才筛掉其它专家的结果。新候选在 NPU 上 gather 匹配 activation 行，
+仅对 compact 行执行同样的 K=128 顺序 FP32 accumulation，再 scatter 回
+原 route。每个 persistent N tile 的 gather scratch 独立，复用原 R*N*K
+workspace；UB 每 16 行 flush，最大 80 KiB，workspace ABI/packed bank
+大小均不变。singleton 路径不 gather，canonical W4/W8/GLM 未修改。
+
+新 graph 回归固定 R=80，逐次改变匹配数为 0/1/2/3/8/15/16/17/
+31/32/33/65/79/80、随机位置与 expert owner、activation；每次先用 NaN
+污染输出，并与独立 CPU dequant reference 对比。另覆盖第二专家覆盖
+scratch、peer 精确清零、K=1024 与两种真实投影形状。
+本地 113 项 CPU/build tests 通过（仍排除两个已有 vLLM mock 不兼容项）；
+独立 vendor `ops-compact-r1` 构建成功，**163 项 NPU tests 全通过，
+138.18 秒**，包含新增 compact 边界与之前的 canonical/tiled、完整 MoE、
+MRoPE replay gates。`kernel-compact-r1-tests.log` 保留 15 条已有 warnings，
+不把 warnings 隐去。group kernel SHA 与 zero-r1 相同：
+`303e5bb7283bfd74daffb3297f412f5d71ace8b04f7be7b6bf088a38a9bc82b8`；
+routed kernel SHA：
+`1ced910285a0714b09e167fc84dd8490c0c9ea1c68cb397d07847227961efece`。
+
+同一真实权重 partial-layer、相同 seed/input 顺序的 graph 诊断如下；
+没有 collective，不能替代整模型 throughput：
+
+| tokens | local routes / distinct experts | zero-r1 ms | compact-r1 ms |
+| --- | --- | --- | --- |
+| 1 | 2 / 2 | 0.528335 | 0.505768 |
+| 2 | 1 / 1 | 0.334313 | 0.339203 |
+| 3 | 11 / 11 | 2.389827 | 2.379788 |
+| 5 | 8 / 8 | 1.865002 | 1.861959 |
+| 8 | 28 / 19 | 5.942223 | 4.513013 |
+
+只有最后一组包含重复本地专家，延迟降低 **24.05%**；其余组不走 gather，
+差异不能视为这次算法的收益。原始记录 `layer-compact-r1.jsonl`。
+真实整模型 `mtp2-r5` 的三个 smoke 已正确结束：323、完整 1–50、
+Python `[0,4,16]`。counting 为 16.287 tok/s，不代替 sustained coding。
+保持 k=2 / FULL `[1,3]`，请求 runtime stats 确认三-token FULL replay；
+capture 仍为 0.38 GiB，KV cache 12.91 GiB，没有同时更改 QSA dispatch。
+证据 `http-routed-mtp-smoke-mtp2-r5.jsonl`，host
+`server-routed-mtp-mtp2-r5.log`。
+
+三题 short coding 均正常生成 512 tokens：**15.000 / 12.669 / 12.926
+tok/s**，中位数 **12.926**，比之前 k=2 的 13.034 低 **0.82%**。
+第一题达到 15 不等于整体达到目标；三个 output SHA 都改变，
+drafted/accepted 为 380/321、448/289、438/293，第三题 acceptance 从
+0.713 降到 0.669。只能确认局部 repeated-expert kernel 的收益，不能
+宣称 whole-model median 提升。原始证据 `w4-mtp2-r5-short.jsonl`。
+约 23.4k 长三题已完成：**10.946 / 9.777 / 9.251 tok/s**，中位数
+**9.777**，比旧 10.120 低 **3.39%**。全部生成 512 tokens、复用
+23,168 prefix tokens；drafted/accepted 为 380/323、422/302、444/290。
+冷 TTFT 358.307 秒，热 TTFT 4.522/4.674/5.159 秒；三个输出 SHA 均变化。
+因此局部 kernel 收益没有转化为本轮整模型中位数提升，仍未达到 W8。
+原始记录 `w4-mtp2-r5-long.jsonl`，host sequence 已输出
+`QWEN_W4_COMPACT_MTP2_SEQUENCE_COMPLETE`；服务仍留在 :8002，未自动
+替换 W8 launcher。下一独立优先级为上面的 QSA decode dispatch。
 
 ## 复现与交接
 
@@ -413,6 +500,11 @@ bash qwen38-w4-mtp-short-benchmark.sh mtp2-r3
 bash qwen38-w4-server-routed-check-r1.sh mtp2-r4 \
   /srv/ai/src/qwen38-w4-operator-build-r1/ops-zero-r1/vendors/qwen_w4_probe_transformer 2
 bash qwen38-w4-mtp-short-benchmark.sh mtp2-r4
+
+# compact matching activation rows, same MTP k=2 / FULL [1,3]
+bash qwen38-w4-server-routed-check-r1.sh mtp2-r5 \
+  /srv/ai/src/qwen38-w4-operator-build-r1/ops-compact-r1/vendors/qwen_w4_probe_transformer 2
+bash qwen38-w4-mtp-short-benchmark.sh mtp2-r5
 ```
 
 服务配置见本页开头和 tutorial，仍为 :8002 / TP4 / EP /
@@ -465,8 +557,11 @@ FULL replay、短/长 coding 也完成。
 L1 候选通过 140 项 NPU tests、真实 layer 和三个整模型 smoke，
 k=2 三-token FULL replay 与短/长 coding 均完成。批量清零版本也完成
 三个真实 smoke、短/长 coding 和三-token FULL replay；RoPE 新候选也通过
-三个真实 smoke 和三-token FULL replay，短 coding 中位数 13.034；
-其长请求仍在执行。
+三个真实 smoke 和三-token FULL replay，短/23.4k coding 中位数
+**13.034 / 10.120 tok/s**。
+匹配 k=1 已完成 **12.787 / 12.754 tok/s**；compact-row 版本通过
+163 项 NPU tests、真实 partial-layer 和三个完整模型 smoke，短/23.4k coding
+中位数 **12.926 / 9.777 tok/s**，均已完成，不宣称 W8 速度达标。
 本轮只隔离 batch-one decode，不声称 W4 已验证 128k×16、双 160k 或
 完整任务质量。flashcomm1 和多模态未在本轮验证；容量和量化质量仍需后续
 独立评测，不能伪造 accuracy YAML 分数。

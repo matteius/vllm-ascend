@@ -144,8 +144,35 @@ Three short 512-token coding requests complete at 14.412/12.091/13.034 tok/s,
 median 13.034 (+3.84% versus 12.552). Only the first output hash matches the
 previous run; its gain is 0.87%. Drafted/accepted=384/320,456/283,422/301.
 Do not attribute the entire median difference to table sharing or claim W8
-parity. The 23.4k run is in progress; then compare k=1 with the same latest
-kernel and RoPE path, not with a different kernel's earlier result.
+parity. The 23.4k run completed at 10.852/10.120/9.004 tok/s, median 10.120
+(+4.23% versus zero-r1), but all outputs differ and the first prompt regresses.
+All three generated 512 tokens with 23,168 prefix tokens reused; cold TTFT
+358.790 s. Compare k=1 with this same kernel and RoPE path, not with a
+different kernel's earlier result. This matched k=1 run is now complete:
+short 13.417/12.392/12.787 (median 12.787), long 13.213/12.754/12.269
+(median 12.754) tok/s. All six generated 512 tokens with MTP acceptance and
+two-token FULL runtime replay. Long k=1 is 26.03% above k=2; output hashes
+differ, so this is not bitwise-identical workload evidence.
+Source inspection also found the faster grouped QSA decode dispatch is
+capped at two tokens, with a two-token precreated group-list. Three/five-token
+MTP verification falls back to the other sparse path. After the separately
+queued compact-expert candidate, validate a W4-only expansion of this bound
+with operator/replay gates and real long-context A/B; leave W8 defaults intact.
+
+The compact-expert candidate now gathers only the matching activation rows
+for a reused expert, into disjoint existing per-N-tile scratch, before the same
+FP32 K=128-order Cube reduction. No CPU routing or expanded bank is added.
+All 163 NPU tests pass (138.18 s), including changing compact lengths/owners
+across graph replay. Matched real-weight partial-layer M=8 replay drops from
+5.942 to 4.513 ms (-24.05%); M=1/2/3/5 samples contain no duplicate local
+experts and stay broadly similar. Real model `mtp2-r5` passes all three smokes
+and three-token FULL replay. Short coding 15.000/12.669/12.926 has median
+12.926, 0.82% below 13.034; all hashes differ and acceptance also changes.
+This is not a whole-model throughput win. The long benchmark also completed:
+10.946/9.777/9.251, median 9.777 tok/s (-3.39% versus 10.120), with all
+output hashes changed. All three generated 512 tokens and reused 23,168
+prefix tokens; cold TTFT 358.307 s. The two-query-token QSA batched decode
+cap is the next independent priority, with MTP and graphs still required.
 
 ## Acceptance criteria
 

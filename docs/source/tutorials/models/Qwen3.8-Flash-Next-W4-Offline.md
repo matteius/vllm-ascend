@@ -33,7 +33,7 @@ speed or broad model quality; see the hardware results below.
 | W4 ACLGraph | FULL_DECODE_ONLY verified with cube_310_routed; older backends still require eager |
 | W4 MTP | k=1/k=2/k=4 real-weight smokes and FULL replay verified; sustained speed depends on workload |
 | W4 multimodal / flashcomm1 / EPLB | Not validated; language-model-only with existing collectives |
-| Long context / concurrent sessions | ~23.4k batch-one k=1/k=2/k=4 benchmarks complete for preceding candidates; latest RoPE long run pending; maximum capacity and concurrency unvalidated |
+| Long context / concurrent sessions | ~23.4k batch-one k=1/k=2/k=4 benchmarks complete, including latest compact-expert k=2; maximum capacity and concurrency unvalidated |
 
 Uneven expert ownership is not proof of whole-model TP3/TP6 support: attention,
 shared-expert and MTP divisibility constraints still apply.
@@ -288,4 +288,21 @@ MTP k=2 + 三-token FULL replay 确认有效。短 coding 中位数提高到
 已通过；MTP k=2 短 coding 三题为 **14.412/12.091/13.034 tok/s**，
 中位数 **13.034**（比 12.552 高 3.84%）。第一题输出相同，其余两题
 输出和 acceptance 改变，不能把全幅提高归因于 RoPE，也未达到 W8。
-约 23.4k 长上下文 benchmark 仍在执行；原始证据见 replay report。
+约 23.4k 长上下文三题也完成：**10.852/10.120/9.004 tok/s**，中位数
+**10.120**；均生成 512 tokens，复用 23,168 prefix tokens。冷 TTFT
+358.790 秒，输出与 acceptance 不同、第一题回退，不能声称普遍提速。
+同一 kernel + RoPE 的 k=1 对照已完成：短/23.4k 中位数为
+**12.787 / 12.754 tok/s**，两-token FULL replay 和 MTP acceptance 有效。
+长上下文 k=1 比 k=2 高 26.03%，但输出不同；代码中 grouped QSA decode
+还仅对最多两个 query tokens 开启，后续需独立验证扩展到更多 MTP tokens。
+当前没有将 k=2/4 自动推广为默认。原始证据见 replay report。
+
+随后 compact-expert 候选只对同一专家的匹配行计算，复用现有 workspace、
+不新增常驻专家展开；163 项 NPU tests 与三个真实整模型 smoke 通过。
+MTP k=2 + 三-token FULL replay 有效，含重复专家的八-token partial-layer
+graph 从 5.942 降到 4.513 ms。完整模型短三题为
+**15.000/12.669/12.926 tok/s**，中位数 **12.926**，比旧 13.034 低 0.82%；
+输出与 acceptance 改变，不宣称整模型提速。23.4k 长三题也完成：
+**10.946/9.777/9.251 tok/s**，中位数 **9.777**（比旧 10.120 低 3.39%），
+三个输出 SHA 都变化。下一步独立验证 W4 的三/五-token batched QSA
+decode，仍保留 MTP 与 graphs；当前服务留在 :8002，未替换 W8 launcher。

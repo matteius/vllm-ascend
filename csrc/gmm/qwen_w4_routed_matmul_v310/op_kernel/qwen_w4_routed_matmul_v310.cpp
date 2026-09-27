@@ -46,21 +46,28 @@ extern "C" __global__ __aicore__ void qwen_w4_routed_matmul_v310(GM_ADDR x, GM_A
         break;
       }
     }
+    GM_ADDR projectionInput = x + route * k * sizeof(half);
     GM_ADDR projectionOutput = y + route * n * sizeof(half);
+    uint32_t projectionRows = 1;
     if (reuse) {
+      // Resident-L1 weights leave the original R*N*K workspace unused.
+      // Reserve R*32*K elements per N tile; compact input needs only R*K.
+      // This is disjoint across persistent blocks and from output scratch.
+      projectionInput = user + static_cast<int64_t>(tile) * td->numRows * NsQwenW4::QW4_TILE_N * k * sizeof(half);
+      projectionRows = op.GatherMatchingRows(x, projectionInput, expert_ids, expert, td->numRows, k);
       projectionOutput = user + (td->numRows * n * k + route * td->numRows * n) * sizeof(half);
     }
     const int64_t metadataOffset = static_cast<int64_t>(expert) * n * (k / NsQwenW4::QW4_GROUP_SIZE);
-    op.InitGeometry(reuse ? x : x + route * k * sizeof(half), codes + static_cast<int64_t>(expert) * n * k / 2,
+    op.InitGeometry(projectionInput, codes + static_cast<int64_t>(expert) * n * k / 2,
                     scale + metadataOffset * sizeof(half), offset + metadataOffset, projectionOutput, user,
-                    reuse ? td->numRows : 1, n, k, true);
+                    projectionRows, n, k, true);
     op.SetTileRange(tile, nTiles);
     // Keep the original unpack-workspace mapping: one region per logical
     // route/tile, independent of the added batched projection-output scratch.
     op.SetWorkspaceTile(route * nTiles + tile);
     op.Process();
     if (reuse) {
-      op.CopyMatchingRows(y, expert_ids, expert, tile);
+      op.CopyMatchingRows(y, expert_ids, expert, tile, td->numRows);
     }
     AscendC::PipeBarrier<PIPE_ALL>();
   }
