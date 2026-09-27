@@ -314,8 +314,66 @@ allocator allocated/reserved 与 L1 各对应形状完全相同。
 drafted/accepted 为 382/321、454/284、430/296，接受率为
 84.03% / 62.56% / 68.84%。三题输出 SHA 均与旧样本不同，不能把很小的
 中位数差异当成统计显著的整模型提速，也不能据此宣称 15 tok/s coding。
-短证据 `w4-mtp2-r3-short.jsonl`；约 23.4k 长测量仍在执行。
+短证据 `w4-mtp2-r3-short.jsonl`。约 23.4k 长测量完成：
+**11.023 / 9.709 / 8.866 tok/s**，中位数 **9.709**，比 L1 的
+9.283 高 4.59%，但第三题反而下降，且三题输出都变化。全部完整生成
+512 tokens，cached_tokens=23168；drafted/accepted 为
+364/331、412/306、450/286。冷 warmup TTFT=358.539 s，三个热请求
+TTFT=4.614/4.689/5.066 s。不能推广为所有长请求的收益，也仍低于
+旧 k=1 的 11.052 和 W8 的 18.091。原始证据 `w4-mtp2-r3-long.jsonl`。
 构建 `build-zero-r1.log`；回归 `kernel-zero-r1-tests.log`；W8 环境未替换。
+
+## 第七个候选：共享 Q/K/index-query RoPE 表
+
+只在显式 `cube_310_routed` W4 backend 开启：同一次 forward 的 Q、K、
+index-query 共享由当前 positions 计算的表，保留 FP32/FP64 accumulation
+与原先 norm→rotation 顺序。index-key 仍使用自身的 group-start positions
+和原精度；不把整型 positions 缩窄，不跨请求缓存动态表。
+W8、eager-W4、其它 Cube backend 默认保持旧计算路径。
+
+首次 NPU gate 的六项 text replay 通过，但 MRoPE capture 失败：
+`_rope_frequency_positions` 从 Python list 创建 axis tensor，触发 capture
+中禁止的同步 H2D copy（107030）。这不是通过；日志保留为
+`kernel-rope-r1-tests.log`。修正为 W4 module 的非持久 constant-axis buffer，
+init 时创建，query 与 index-key 共用；动态坐标仍每次 replay 读取。
+未修改 checkpoint 格式、operator binary、专家 bank 或生产 W8 安装。
+
+CPU 回归 **113 passed / 5.09 s**，覆盖 FP32/FP64、三轴 MRoPE、
+0/23400/163840/1048576/16777217 positions、Passthrough dims 与错误表/axis
+metadata。两项未改动的旧 full-model mock test 因本机 vLLM 已删除
+`logits_processor.get_tensor_model_parallel_world_size` hook，在模型构造前
+失败；本次选择性 gate 排除这两项，不声称整个 CPU suite 全绿。
+修正版 **160 NPU tests passed / 106.74 s**：143 项已有 W4 kernel
+回归与 17 项新增 RoPE/backend gate；12 项 replay 覆盖 1/2/3/5/8/512
+tokens、text/MRoPE、四轮动态位置/activation，并要求 bitwise parity。
+这不等于完整多模态模型验证。NPU 日志 `kernel-rope-r2-tests.log`。
+
+独立 graph microbenchmark（50 次/组，5 组）输出 bitwise equal；
+只计三路 query RoPE，不含 norm、projection、attention 或 collective：
+
+| tokens | 三份独立表 ms | 共享一份表 ms |
+| --- | --- | --- |
+| 1 | 0.453359 | 0.186866 |
+| 2 | 0.474302 | 0.198493 |
+| 3 | 0.477039 | 0.194466 |
+| 5 | 0.499273 | 0.204444 |
+| 8 | 0.481998 | 0.201357 |
+
+原始记录 `rope-r2-microbench.jsonl`；三-token 局部延迟降低 59.24%，
+不能直接折算整模型提速。真实 MTP k=2 / FULL `[1,3]` 的新 run 为
+`mtp2-r4`，沿用 `ops-zero-r1` binary、采样/上下文/内存配置。
+三个 smoke 已正确结束，counting 为 15.871 tok/s（不替代 coding
+benchmark）。runtime stats 显示三-token FULL replay；MTP accepted /
+drafted 计数增长，capture 仍为 0.38 GiB、KV cache 12.91 GiB。
+证据 `http-routed-mtp-smoke-mtp2-r4.jsonl` 与 host
+`server-routed-mtp-mtp2-r4.log`。短 coding 三题完成 512 tokens：
+**14.412 / 12.091 / 13.034 tok/s**，中位数 **13.034**，比 zero-r1
+12.552 高 **3.84%**，仍低于同机 W8 的 19.073。第一题输出 SHA 与
+旧版本相同，速度提高 0.87%；其它两题输出变化，drafted/accepted 为
+384/320、456/283、422/301。不能把整段中位数提升完全归因于共享表。
+model-load 仍为 19.3821 GiB/rank；kernel、checkpoint 和原 W8 launcher
+均未改动。原始结果 `w4-mtp2-r4-short.jsonl`。约 23.4k 长测试已开始，
+待其完成后再用同一 kernel + RoPE 比较 k=1，避免混淆 kernel 与 k。
 
 ## 复现与交接
 
@@ -349,6 +407,12 @@ bash qwen38-w4-mtp-short-benchmark.sh mtp2-r2
 bash qwen38-w4-server-routed-check-r1.sh mtp2-r3 \
   /srv/ai/src/qwen38-w4-operator-build-r1/ops-zero-r1/vendors/qwen_w4_probe_transformer 2
 bash qwen38-w4-mtp-short-benchmark.sh mtp2-r3
+
+# 共享 RoPE 候选使用同一 vendor；先 stage 新 model.py/qsa.py 并通过
+# 160 项 NPU gate（其中 17 项 RoPE），再用新的 run label 启动：
+bash qwen38-w4-server-routed-check-r1.sh mtp2-r4 \
+  /srv/ai/src/qwen38-w4-operator-build-r1/ops-zero-r1/vendors/qwen_w4_probe_transformer 2
+bash qwen38-w4-mtp-short-benchmark.sh mtp2-r4
 ```
 
 服务配置见本页开头和 tutorial，仍为 :8002 / TP4 / EP /
@@ -375,7 +439,7 @@ imports 等。自动格式修改只留在临时快照，没有污染任务 workt
   结合相邻 RoPE operations 和源码，优先检查整数 positions 的重复转换及
   Q/K/indexer 的频率与 sin/cos 重算。当前是归因线索，不是已验证加速。
   `project_qk` 的 Q/K 与 `model.py` 的 index-query 使用相同 rotary 参数
-  和 positions，可考虑在一次 forward 内共享 compute-dtype 的表；index-key
+  和 positions，本轮已实现隔离 W4 候选，在一次 forward 内共享 compute-dtype 的表；index-key
   的压缩组位置不同，不能直接复用 query 表。保留 CPU FP64、NPU FP32、
   MRoPE 三轴和 graph replay 的动态 positions，不能缓存旧请求的表。
 - `trans_TransData_10` 恰每步一次、约 2.311 ms；输入为 FP16
@@ -399,7 +463,10 @@ persistent 20-route 候选已完成算子、真实权重单层和整模型 smoke
 smoke、三-token FULL replay 和短 coding；k=4 的真实 smoke 与五-token
 FULL replay、短/长 coding 也完成。
 L1 候选通过 140 项 NPU tests、真实 layer 和三个整模型 smoke，
-k=2 三-token FULL replay 与短 coding 完成；其长 benchmark 仍在执行。
+k=2 三-token FULL replay 与短/长 coding 均完成。批量清零版本也完成
+三个真实 smoke、短/长 coding 和三-token FULL replay；RoPE 新候选也通过
+三个真实 smoke 和三-token FULL replay，短 coding 中位数 13.034；
+其长请求仍在执行。
 本轮只隔离 batch-one decode，不声称 W4 已验证 128k×16、双 160k 或
 完整任务质量。flashcomm1 和多模态未在本轮验证；容量和量化质量仍需后续
 独立评测，不能伪造 accuracy YAML 分数。

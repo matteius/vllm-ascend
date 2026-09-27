@@ -29,11 +29,11 @@ speed or broad model quality; see the hardware results below.
 | PLE disk-backed lazy lookup | Preserved; W4 explicitly selects the standard HF index |
 | W8 runtime, MTP and graph defaults | Unchanged unless W4 checkpoint metadata is present |
 | W4 NPU inference | Full checkpoint loaded on TP4/310P; three completed correct answers and seven operator regressions passed |
-| Experimental W4 Cube projection | Separate group/routed 310P operators; 122 NPU regressions and real-weight TP4 smokes passed |
+| Experimental W4 Cube projection | Separate group/routed 310P operators; 143 NPU regressions plus 17 RoPE/replay gates and real-weight TP4 smokes passed |
 | W4 ACLGraph | FULL_DECODE_ONLY verified with cube_310_routed; older backends still require eager |
 | W4 MTP | k=1/k=2/k=4 real-weight smokes and FULL replay verified; sustained speed depends on workload |
 | W4 multimodal / flashcomm1 / EPLB | Not validated; language-model-only with existing collectives |
-| Long context / concurrent sessions | ~23.4k batch-one k=1 benchmark complete; maximum capacity and concurrency unvalidated |
+| Long context / concurrent sessions | ~23.4k batch-one k=1/k=2/k=4 benchmarks complete for preceding candidates; latest RoPE long run pending; maximum capacity and concurrency unvalidated |
 
 Uneven expert ownership is not proof of whole-model TP3/TP6 support: attention,
 shared-expert and MTP divisibility constraints still apply.
@@ -275,4 +275,17 @@ MTP k=2 + 三-token FULL replay 确认有效。短 coding 中位数提高到
 三个整模型 smoke 正确、MTP k=2 + 三-token FULL replay 有效。
 短 coding 三题为 **14.288/11.902/12.552 tok/s**，中位数 **12.552**；
 相对 12.470 仅高 0.66%，输出和 acceptance 也变化，不能视为显著提速。
-新长测试仍在执行；未改变现有 W8 环境，也未实现 W8 的实测速度目标。
+新长测试完成，约 23.4k 三题为 **11.023/9.709/8.866 tok/s**，
+中位数 **9.709**；全部生成 512 tokens，复用 23,168 prefix tokens。
+输出和 acceptance 不同，第三题回退，不声称普遍长上下文提速。
+未改变现有 W8 环境，也未实现 W8 的实测速度目标。
+
+下一隔离 W4 候选在 Q/K/index-query 之间共享当前 positions 的 RoPE 表，
+保留 compute 精度和独立 index-key 坐标；MRoPE axis map 提前创建为
+非持久 buffer，避免 graph capture 中同步 H2D。113 项 CPU tests 与
+160 项 NPU tests 通过；三-token query RoPE 独立 graph 从 0.477 降至
+0.194 ms、bitwise equal。三个完整真实 smoke 与三-token FULL replay
+已通过；MTP k=2 短 coding 三题为 **14.412/12.091/13.034 tok/s**，
+中位数 **13.034**（比 12.552 高 3.84%）。第一题输出相同，其余两题
+输出和 acceptance 改变，不能把全幅提高归因于 RoPE，也未达到 W8。
+约 23.4k 长上下文 benchmark 仍在执行；原始证据见 replay report。

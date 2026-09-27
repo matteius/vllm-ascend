@@ -95,6 +95,7 @@ def _rope_frequency_positions(
     rotary_dim: int,
     mrope_section: list[int] | None,
     mrope_interleaved: bool,
+    frequency_axes: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return one position per token and RoPE frequency pair."""
     half = rotary_dim // 2
@@ -106,7 +107,11 @@ def _rope_frequency_positions(
         return positions[0, :, None].expand(-1, half)
     if not mrope_interleaved or sum(mrope_section) != half:
         raise ValueError("interleaved mrope_section must sum to rotary_dim // 2")
-    axes = torch.tensor(_mrope_interleaved_dims(mrope_section), device=positions.device)
+    axes = frequency_axes
+    if axes is None:
+        axes = torch.tensor(_mrope_interleaved_dims(mrope_section), device=positions.device)
+    elif axes.shape != (half,) or axes.dtype != torch.int64 or axes.device != positions.device:
+        raise ValueError("MRoPE frequency axes must have shape [rotary_dim // 2], int64 dtype and positions device")
     return positions.index_select(0, axes).transpose(0, 1)
 
 
@@ -133,6 +138,7 @@ def apply_partial_rope(
     *,
     mrope_section: list[int] | None = None,
     mrope_interleaved: bool = False,
+    cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Neox-style RoPE on the first ``rotary_dim`` dims; pass the rest through.
 
@@ -142,6 +148,8 @@ def apply_partial_rope(
         rotary_dim: leading dims that are rotated (even, ``<= D``).
         base: RoPE theta.
         accum_dtype: rotation compute dtype.
+        cos_sin: optional current-position tables in ``accum_dtype`` with
+            shape ``[T, rotary_dim]``. Never reuse across changed positions.
 
     Returns:
         ``[T, H, D]`` rotated tensor (in ``x``'s original dtype).
@@ -150,16 +158,23 @@ def apply_partial_rope(
         raise ValueError("rotary_dim must be even and <= head_dim")
     orig_dtype = x.dtype
     x = x.to(accum_dtype)
-    pos = _rope_frequency_positions(
-        positions,
-        rotary_dim,
-        mrope_section,
-        mrope_interleaved,
-    ).to(accum_dtype)
-    inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2, dtype=accum_dtype, device=x.device) / rotary_dim))
-    angles = pos * inv_freq[None, :]  # [T, rotary_dim/2]
-    cos = torch.cat([torch.cos(angles), torch.cos(angles)], dim=-1)[:, None, :]
-    sin = torch.cat([torch.sin(angles), torch.sin(angles)], dim=-1)[:, None, :]
+    if cos_sin is None:
+        pos = _rope_frequency_positions(
+            positions,
+            rotary_dim,
+            mrope_section,
+            mrope_interleaved,
+        ).to(accum_dtype)
+        inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2, dtype=accum_dtype, device=x.device) / rotary_dim))
+        angles = pos * inv_freq[None, :]  # [T, rotary_dim/2]
+        cos = torch.cat([torch.cos(angles), torch.cos(angles)], dim=-1)[:, None, :]
+        sin = torch.cat([torch.sin(angles), torch.sin(angles)], dim=-1)[:, None, :]
+    else:
+        cos, sin = cos_sin
+        for table in (cos, sin):
+            if table.shape != (x.shape[0], rotary_dim) or table.dtype != accum_dtype or table.device != x.device:
+                raise ValueError("shared RoPE tables must match token count, rotary_dim, accumulation dtype and device")
+        cos, sin = cos[:, None, :], sin[:, None, :]
 
     rot = x[..., :rotary_dim]
     passthrough = x[..., rotary_dim:]
@@ -179,14 +194,22 @@ def partial_rope_cos_sin(
     dtype: torch.dtype,
     mrope_section: list[int] | None = None,
     mrope_interleaved: bool = False,
+    compute_dtype: torch.dtype = torch.float32,
+    frequency_axes: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Materialize Neox-style cos/sin rows for a dedicated device kernel."""
-    compute_dtype = torch.float32
+    """Materialize current-position tables; default preserves the device-kernel policy.
+
+    Shared query tables must use the rotation's accumulation dtype for both
+    computation and storage, including float64 in the CPU reference policy.
+    ``frequency_axes`` must contain ``_mrope_interleaved_dims(mrope_section)``;
+    materialize it before capture to avoid a synchronous host-to-device copy.
+    """
     pos = _rope_frequency_positions(
         positions,
         rotary_dim,
         mrope_section,
         mrope_interleaved,
+        frequency_axes,
     ).to(compute_dtype)
     inv_freq = 1.0 / (
         base ** (torch.arange(0, rotary_dim, 2, dtype=compute_dtype, device=positions.device) / rotary_dim)
@@ -277,8 +300,11 @@ class AscendQwen4ExpQSAAttention(nn.Module):
         k_positions: torch.Tensor,
         *,
         accum_dtype: torch.dtype,
+        cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply per-head Q/K GemmaRMSNorm then partial RoPE (model order)."""
+        if cos_sin is not None and q_positions is not k_positions:
+            raise ValueError("shared Q/K RoPE tables require the same positions tensor")
         q = gemma_rmsnorm(query, self.q_norm_weight, self.rms_norm_eps, accum_dtype)
         k = gemma_rmsnorm(key, self.k_norm_weight, self.rms_norm_eps, accum_dtype)
         q = apply_partial_rope(
@@ -289,6 +315,7 @@ class AscendQwen4ExpQSAAttention(nn.Module):
             accum_dtype,
             mrope_section=self.mrope_section,
             mrope_interleaved=self.mrope_interleaved,
+            cos_sin=cos_sin,
         )
         k = apply_partial_rope(
             k,
@@ -298,6 +325,7 @@ class AscendQwen4ExpQSAAttention(nn.Module):
             accum_dtype,
             mrope_section=self.mrope_section,
             mrope_interleaved=self.mrope_interleaved,
+            cos_sin=cos_sin,
         )
         return q, k
 

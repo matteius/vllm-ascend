@@ -121,9 +121,31 @@ correct smokes with k=2 and verified three-token FULL replay. The three
 512-token short coding requests completed at 14.288/11.902/12.552 tok/s,
 median 12.552, only 0.66% above L1's 12.470. All output hashes and acceptance
 counts differ; this does not establish a statistically significant or clean
-causal throughput gain. The long-context run is still running. W8 remains unchanged.
+causal throughput gain. The long-context run completed at 11.023/9.709/8.866
+tok/s (median 9.709), with all three generating 512 tokens and reusing 23,168
+prefix tokens. Cold TTFT was 358.539 s. The median is 4.59% above L1, but the
+third prompt regresses and output/acceptance changes; this is not a universal
+long-context win. W8 remains unchanged.
 Before choosing a larger k for deployment, measure k=1 with the same latest
 kernel at long context: the existing k=2/k=1 comparison also changes kernels.
+
+The next isolated W4 candidate shares current-position RoPE tables across Q,
+K and index-query, preserving normalization order and accumulation precision.
+Index-key positions remain separate. Initial MRoPE graph capture exposed a
+synchronous axis-tensor H2D copy; a nonpersistent module buffer now creates
+that constant before capture. CPU gates pass 113 tests; two existing model
+mock tests are excluded because their vLLM hook no longer exists locally.
+All 160 NPU tests pass (106.74 s), including 17 new backend/replay tests.
+The isolated three-token query-RoPE graph drops from 0.477 to 0.194 ms
+with bitwise-equal outputs (50 iterations, five trials); this excludes the
+rest of the model. Real-weight MTP k=2 + FULL gates under label `mtp2-r4`
+pass all three correct smokes and verify three-token FULL runtime replay.
+Three short 512-token coding requests complete at 14.412/12.091/13.034 tok/s,
+median 13.034 (+3.84% versus 12.552). Only the first output hash matches the
+previous run; its gain is 0.87%. Drafted/accepted=384/320,456/283,422/301.
+Do not attribute the entire median difference to table sharing or claim W8
+parity. The 23.4k run is in progress; then compare k=1 with the same latest
+kernel and RoPE path, not with a different kernel's earlier result.
 
 ## Acceptance criteria
 

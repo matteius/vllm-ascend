@@ -137,6 +137,7 @@ from .ple_layer import AscendQwen4ExpPLELayer
 from .qsa import (
     AscendQwen4ExpQSAAttention,
     QSADecoderProjections,
+    _mrope_interleaved_dims,
     apply_partial_rope,
     gemma_rmsnorm,
     partial_rope_cos_sin,
@@ -1085,6 +1086,8 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
         self.prefix = prefix
         self.compute_dtype = dtype_policy.accumulation_dtype
         self.params_dtype = dtype_policy.qsa_main_dtype
+        expert_quant = w4_config(config)
+        self.reuse_query_rope = expert_quant is not None and expert_quant["backend"] == "cube_310_routed"
         hidden = int(config.hidden_size)
         self.head_dim = int(getattr(config, "head_dim", 256))
         self.tp_rank, self.tp_size = expert_sharding
@@ -1134,6 +1137,15 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
         vllm_config = get_current_vllm_config_or_none()
         device_config = getattr(vllm_config, "device_config", None)
         device = getattr(device_config, "device", torch.device("cpu"))
+        # W4 shares the constant axis map as well as per-forward query tables.
+        # Creating a tensor from this Python list during MRoPE capture would
+        # issue a prohibited synchronous host-to-device copy.
+        frequency_axes = None
+        if self.reuse_query_rope and self.attn.mrope_section is not None:
+            frequency_axes = torch.tensor(
+                _mrope_interleaved_dims(self.attn.mrope_section), dtype=torch.int64, device=device
+            )
+        self.register_buffer("_query_rope_frequency_axes", frequency_axes, persistent=False)
         heads_per_kv_head = self.num_heads // self.num_kv_heads
         self.register_buffer(
             "_qsa_decode_group_list",
@@ -1416,7 +1428,22 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
             seq_len, self.index_n_heads, self.index_head_dim
         )
         index_k = _linear(block_input, self.ik_proj, self.compute_dtype)
-        q, k = self.attn.project_qk(q, k, positions, positions, accum_dtype=self.compute_dtype)
+        # Q, K and index-query use the same current positions/rotary policy.
+        # Keep tables in accumulation precision and recompute on every replay;
+        # index-key group-start positions below intentionally remain separate.
+        query_cos_sin = None
+        if self.reuse_query_rope:
+            query_cos_sin = partial_rope_cos_sin(
+                positions,
+                rotary_dim=self.attn.rotary_dim,
+                base=self.attn.rope_theta,
+                dtype=self.compute_dtype,
+                compute_dtype=self.compute_dtype,
+                frequency_axes=self._query_rope_frequency_axes,
+                mrope_section=self.attn.mrope_section,
+                mrope_interleaved=self.attn.mrope_interleaved,
+            )
+        q, k = self.attn.project_qk(q, k, positions, positions, accum_dtype=self.compute_dtype, cos_sin=query_cos_sin)
         q = q.to(self.params_dtype)
         k = k.to(self.params_dtype)
         v = v.to(self.params_dtype)
@@ -1435,6 +1462,7 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
             self.compute_dtype,
             mrope_section=self.attn.mrope_section,
             mrope_interleaved=self.attn.mrope_interleaved,
+            cos_sin=query_cos_sin,
         ).to(self.params_dtype)
         if positions.ndim == 1:
             index_key_positions = positions - torch.remainder(logical_positions, self.indexer.compress_ratio)
@@ -1450,6 +1478,7 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
             dtype=self.params_dtype,
             mrope_section=self.attn.mrope_section,
             mrope_interleaved=self.attn.mrope_interleaved,
+            frequency_axes=self._query_rope_frequency_axes,
         )
         from vllm_ascend.device.device_op import DeviceOperator
 
