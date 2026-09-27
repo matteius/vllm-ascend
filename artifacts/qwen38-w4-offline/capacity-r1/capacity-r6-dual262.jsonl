@@ -1,0 +1,3 @@
+{"event": "start", "run_id": "63fb399df19f4cee8b0bb72ab028474b", "args": {"base_url": "http://127.0.0.1:8002", "model": "qwen38-w4-experimental", "model_dir": "/srv/ai/models/Qwen3.8-Flash-Next-W4A16-G128-300i", "prompt_tokens": 261632, "prompt_token_lengths": null, "output_tokens": 512, "concurrency": 2, "mode": "throughput", "warm_prefixes": true, "output": "/srv/ai/src/qwen38-w4-hardware-20260927/capacity-r6-dual262.jsonl"}}
+{"event": "metrics_before", "num_requests_running": 0.0, "num_requests_waiting": 0.0, "kv_cache_usage_perc": 0.0, "num_preemptions_total": 0.0, "spec_decode_num_draft_tokens_total": 1546.0, "spec_decode_num_accepted_tokens_total": 1114.0}
+{"event": "warmup_start", "session": 0}

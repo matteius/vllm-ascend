@@ -43,7 +43,7 @@ budget 不是 NPU 实占，须与 allocated/reserved/npu-smi 对照。
 `mixed-gdn-r5-tests.log.gz`。本轮没有完整任务准确率评测；synthetic passcode
 不代表长上下文 coding accuracy，也不承诺 temperature=0 bitwise deterministic。
 
-## r6（进行中）
+## r6（短窗口通过，完整长测已中止）
 
 actual attention=1,830,400 bytes/block，planner=5,444,608 bytes/block。
 限制 rank 规划9,552 blocks，shared容量1,215,533 tokens，262144理论并发4.64x。
@@ -58,14 +58,18 @@ FULL6 replay在运行时计数表中确认，不仅是capture配置。
 
 尚未据此认定 dual262 成功。完整长测脚本`qwen38-w4-dual262-r6.sh`
 会先独立warm两条261632-token前缀，再并发每条生成512tokens（含输出总262144）；
-要求两条完整结束、decode overlap、无preemption。已于13:12 UTC启动，
+要求两条完整结束、decode overlap、无preemption。于13:12 UTC启动，
 tmux `qwen-w4-dual262-r6`，日志`dual262-r6.log`和`capacity-r6-dual262.jsonl`。
 长前缀还会增加host Mamba snapshots。脚本监控MemAvailable和swap增长：
 低于12GiB可用或swap增长超过2GiB，仅取消测试client并断开请求，保留server。
 NPU allocation充足不等于host容量、长上下文准确率和吞吐已经验证。
 
-13:14 UTC检查：HTTP health正常，四rank NPU health均OK，温度70–74°C；
-host available约67GiB。长测仍在第一条cold prefill，不能提前标为通过。
+13:31:34 UTC host guard 在 swap 增长2,190,352KiB时取消测试client。
+第一条cold prefill约完成113,664tokens，第二条尚未开始，无完整窗口结果；
+当时MemAvailable=61,376,700KiB，未出现NPU OOM或preemption。
+这是预设保守swap增长阈值触发，不是dual262硬件容量上限的证明。
+server在请求断开后恢复idle；用户随后选择直接用Kilo测试，不重跑长测。
+最终guard日志与未完成JSONL已保存至本目录的`capacity-r1/`。
 `server-capacity-r6-gates.log.gz`是短窗口gates完成后的日志快照，不含长测最终结果。
 
 ## 版本与质量检查
