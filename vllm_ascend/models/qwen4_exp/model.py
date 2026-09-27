@@ -167,7 +167,7 @@ from .weight_mapping import (
 
 _BATCHED_QSA_MIN_PREFILL_TOKENS = 16
 _BATCHED_QSA_MAX_DECODE_TOKENS = 2
-_BATCHED_QSA_W4_MAX_DECODE_TOKENS = 8
+_BATCHED_QSA_DEVICE_ROUTED_MAX_DECODE_TOKENS = 8
 _BATCHED_QSA_MIN_DECODE_GROUPS = 256
 
 # ``VllmConfig`` is only needed for typing; keep import light.
@@ -1158,12 +1158,12 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
         self.compute_dtype = dtype_policy.accumulation_dtype
         self.params_dtype = dtype_policy.qsa_main_dtype
         expert_quant = w4_config(config)
-        self.reuse_query_rope = expert_quant is not None and expert_quant["backend"] in CUBE_DEVICE_ROUTED_BACKENDS
-        # Routed W4 verifies several MTP tokens in one replay. Preserve the
-        # production W8 bound, but cover W4's three/five-token verification
-        # batches and its eight-token (80-route) graph limit.
+        self.reuse_query_rope = expert_quant is None or expert_quant["backend"] in CUBE_DEVICE_ROUTED_BACKENDS
+        # QSA arithmetic is independent of expert quantization. Both W8 and
+        # device-routed W4 can reuse query tables and batch MTP verification;
+        # keep the reference W4 backends on their original dispatch policy.
         self._batched_qsa_max_decode_tokens = (
-            _BATCHED_QSA_W4_MAX_DECODE_TOKENS if self.reuse_query_rope else _BATCHED_QSA_MAX_DECODE_TOKENS
+            _BATCHED_QSA_DEVICE_ROUTED_MAX_DECODE_TOKENS if self.reuse_query_rope else _BATCHED_QSA_MAX_DECODE_TOKENS
         )
         hidden = int(config.hidden_size)
         self.head_dim = int(getattr(config, "head_dim", 256))
@@ -1214,7 +1214,7 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
         vllm_config = get_current_vllm_config_or_none()
         device_config = getattr(vllm_config, "device_config", None)
         device = getattr(device_config, "device", torch.device("cpu"))
-        # W4 shares the constant axis map as well as per-forward query tables.
+        # Share the constant axis map as well as per-forward query tables.
         # Creating a tensor from this Python list during MRoPE capture would
         # issue a prohibited synchronous host-to-device copy.
         frequency_axes = None

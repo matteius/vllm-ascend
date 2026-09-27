@@ -1,0 +1,30 @@
+[
+  {
+    "rank_directory": "dp0_pp0_tp0_dcp0_ep0_rank0_1233503_20260927180207942_ascend_pt",
+    "runtime_graph_calls": {
+      "AscendCL@aclmdlRICaptureGetInfo": 9245,
+      "AscendCL@aclmdlRIExecuteAsync": 110
+    }
+  },
+  {
+    "rank_directory": "dp0_pp0_tp1_dcp0_ep1_rank1_1233504_20260927180207942_ascend_pt",
+    "runtime_graph_calls": {
+      "AscendCL@aclmdlRICaptureGetInfo": 9245,
+      "AscendCL@aclmdlRIExecuteAsync": 110
+    }
+  },
+  {
+    "rank_directory": "dp0_pp0_tp2_dcp0_ep2_rank2_1233505_20260927180207942_ascend_pt",
+    "runtime_graph_calls": {
+      "AscendCL@aclmdlRICaptureGetInfo": 9245,
+      "AscendCL@aclmdlRIExecuteAsync": 110
+    }
+  },
+  {
+    "rank_directory": "dp0_pp0_tp3_dcp0_ep3_rank3_1233506_20260927180207942_ascend_pt",
+    "runtime_graph_calls": {
+      "AscendCL@aclmdlRICaptureGetInfo": 9245,
+      "AscendCL@aclmdlRIExecuteAsync": 110
+    }
+  }
+]

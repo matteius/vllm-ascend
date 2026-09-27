@@ -1,0 +1,8 @@
+ae81d75eec7516fc6f455a3a071e52410ba6c477c34e0114df647f4c125c77df  /home/matteius/start_qwen38_flashnext_mtp_graph.sh
+d491591a5f913d870808682d4b88ec28c0ec429a3a6d83496c051cc1839f9337  /srv/ai/models/Qwen3.8-Flash-Next-W8A8-DYNAMIC-300i/config.json
+dbd8ac590dfd639548014c7d44b2296d59cb0ceda3fbdf30b9a35111763fd5e1  /srv/ai/models/Qwen3.8-Flash-Next-W4A16-G128-300i/config.json
+f3f14677e2af54bdff8d493923032822ef7bccefa0889217c09588c443c61856  /srv/ai/src/qwen38-w4-native-build.zHZtEd/w8-routeplan-runtime/vllm_ascend/models/qwen4_exp/moe.py
+92115b5dba4837864d92e960fce0189b28fe29142f88aee575b9b1db57f1a29c  /srv/ai/src/qwen38-w4-native-build.zHZtEd/w8-routeplan-runtime/vllm_ascend/models/qwen4_exp/model.py
+c45d6a893b3b6a533faa8f367abd4f8fe8477e67dc47cfeae5b2eefb178ba53d  /srv/ai/src/qwen38-w4-native-build.zHZtEd/w8-routeplan-candidate/vllm_ascend/models/qwen4_exp/moe.py
+f252529f5558e3ba596ba7f6502288c6a3fc36b4e01d5fb9dd044368f58ca8df  /srv/ai/src/qwen38-w4-native-build.zHZtEd/w8-routeplan-candidate/vllm_ascend/models/qwen4_exp/model.py
+579c18bc76d3275de8859c5b552c3b3b5dd8e358339a22b9ac632d27ebc95e05  /srv/ai/src/qwen38-w4-native-build.zHZtEd/runtime/vllm_ascend/vllm_ascend_C.cpython-312-x86_64-linux-gnu.so

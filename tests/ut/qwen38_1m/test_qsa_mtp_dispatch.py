@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""W4 MTP dispatch and precreated graph metadata; W8 remains unchanged."""
+"""Device-routed W4/W8 MTP dispatch and precreated graph metadata."""
 
 from types import SimpleNamespace
 
@@ -15,7 +15,7 @@ from vllm_ascend.models.qwen4_exp.w4_moe import CUBE_DEVICE_ROUTED_BACKENDS, FOR
 
 @pytest.mark.parametrize("backend", [None, "eager_dequant", "cube_310", "cube_310_tiled", *CUBE_DEVICE_ROUTED_BACKENDS])
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
-def test_batched_qsa_limit_and_group_list_are_scoped_to_routed_w4(backend, tp_size):
+def test_batched_qsa_limit_and_group_list_cover_w8_and_routed_w4(backend, tp_size):
     config = SimpleNamespace(
         hidden_size=256,
         moe_intermediate_size=256,
@@ -41,7 +41,8 @@ def test_batched_qsa_limit_and_group_list_are_scoped_to_routed_w4(backend, tp_si
     module = _QSAAttention(
         config=config, layer_idx=0, dtype_policy=ASCEND_QWEN4EXP_DTYPE_POLICY, expert_sharding=(0, tp_size)
     )
-    limit = 8 if backend in CUBE_DEVICE_ROUTED_BACKENDS else 2
+    limit = 8 if backend is None or backend in CUBE_DEVICE_ROUTED_BACKENDS else 2
+    assert module.reuse_query_rope is (limit == 8)
     assert module._batched_qsa_max_decode_tokens == limit
     expected = torch.arange(1, limit * module.num_kv_heads + 1, dtype=torch.int64)
     expected *= module.num_heads // module.num_kv_heads

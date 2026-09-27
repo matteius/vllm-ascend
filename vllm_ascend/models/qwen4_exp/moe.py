@@ -61,7 +61,7 @@ _INT8_SYM_LEVELS = 127.0
 _INT8_MIN = -128
 _INT8_MAX = 127
 _PACKED_LOCAL_ROUTE_MIN_TOKENS = 128
-_FUSED_ROUTING_MAX_TOKENS = 2
+_FUSED_ROUTING_MAX_TOKENS = 8
 
 
 def quantize_activation_per_token(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -256,13 +256,18 @@ def _w8a8_packed_grouped_experts_npu(
         group_list = group_list.to(torch.int64)
         local_rows = torch.arange(num_tokens * top_k, device=x.device) < group_list[-1]
         gate_up = torch_npu.npu_quant_grouped_matmul_dequant(sorted_x, w13_weight, w13_weight_scale, group_list)
-        gate_up = torch.where(local_rows[:, None], gate_up, 0)
+        # Both grouped matmuls consume the same local group ends. SwiGLU is
+        # row-local, so peer rows need not be cleared between the two GEMMs;
+        # they are excluded from the second GEMM and cleared before reduction.
         hidden_act = torch_npu.npu_swiglu(gate_up)
         routed = torch_npu.npu_quant_grouped_matmul_dequant(hidden_act, w2_weight, w2_weight_scale, group_list)
         routed = torch.where(local_rows[:, None], routed, 0)
         # Applying weights after unpermutation avoids gathering a separate
         # sorted weight vector, while keeping the old fp16 weight rounding.
-        route_outputs = routed.to(torch.float32).index_select(0, inverse_order)
+        # Permute FP16 payloads, then widen: index_select does no arithmetic.
+        # This halves permutation traffic without changing FP32 weighting or
+        # the original top-k reduction/FP16 route-weight rounding.
+        route_outputs = routed.index_select(0, inverse_order).to(torch.float32)
         route_outputs = route_outputs * topk_weights.to(x.dtype).reshape(-1, 1)
         return route_outputs.view(num_tokens, top_k, hidden).sum(dim=1).to(x.dtype)
 

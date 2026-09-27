@@ -1,0 +1,393 @@
+{
+  "method": "three matched coding prompts; warmup excluded; profiler disabled during timing",
+  "warning": "output and MTP acceptance may differ across configurations; not bitwise whole-model parity",
+  "results": [
+    {
+      "file": "routeplan-http-baseline-short.jsonl",
+      "request_count": 3,
+      "median_decode_tok_s": 14.267562127514283,
+      "requests": [
+        {
+          "length": 32,
+          "repeat": 0,
+          "warmup": true,
+          "client_decode_tok_s": 17.679624950958427,
+          "ttft_s": 0.5213743999993312,
+          "acceptance": 0.9545454545454546,
+          "text_sha256": "328b08aae3e51810b998ae4f9482dc0d32f8129280e68bc826dffa90f70e3b1e"
+        },
+        {
+          "length": 512,
+          "repeat": 0,
+          "warmup": false,
+          "client_decode_tok_s": 16.455667136424893,
+          "ttft_s": 0.5013683440047316,
+          "acceptance": 0.8447368421052631,
+          "text_sha256": "66942de79b3aae0124024c2c76aeab80c10893a8c9e3a9f50b0d2a2d525e5cec"
+        },
+        {
+          "length": 512,
+          "repeat": 1,
+          "warmup": false,
+          "client_decode_tok_s": 14.017303479784296,
+          "ttft_s": 0.5893820839992259,
+          "acceptance": 0.6613636363636364,
+          "text_sha256": "1395cabbcd9f68fe60bd7e94a177a57d02da8947a8eddda3b2b70de043b5c758"
+        },
+        {
+          "length": 512,
+          "repeat": 2,
+          "warmup": false,
+          "client_decode_tok_s": 14.267562127514283,
+          "ttft_s": 0.6194031560007716,
+          "acceptance": 0.6774193548387096,
+          "text_sha256": "118240f4f540ba34b806432ebf61d040396dc851ac24784358290a38be2f763e"
+        }
+      ]
+    },
+    {
+      "file": "routeplan-http-candidate-short.jsonl",
+      "request_count": 3,
+      "median_decode_tok_s": 15.27402746367897,
+      "requests": [
+        {
+          "length": 32,
+          "repeat": 0,
+          "warmup": true,
+          "client_decode_tok_s": 18.518777715147547,
+          "ttft_s": 0.4964148190047126,
+          "acceptance": 0.9545454545454546,
+          "text_sha256": "328b08aae3e51810b998ae4f9482dc0d32f8129280e68bc826dffa90f70e3b1e"
+        },
+        {
+          "length": 512,
+          "repeat": 0,
+          "warmup": false,
+          "client_decode_tok_s": 17.486003421974367,
+          "ttft_s": 0.4935111999948276,
+          "acceptance": 0.8617021276595744,
+          "text_sha256": "5809a52daa04ac698b82a74e3e55e907b8bcdf8b220198f1fc25bd16bcea4edb"
+        },
+        {
+          "length": 512,
+          "repeat": 1,
+          "warmup": false,
+          "client_decode_tok_s": 15.080631224506929,
+          "ttft_s": 0.5783058609958971,
+          "acceptance": 0.6828703703703703,
+          "text_sha256": "be7426758f6c99fbfa917b6a1c2ba31656013025ec6e2e1dd25ec9d24c323ce1"
+        },
+        {
+          "length": 512,
+          "repeat": 2,
+          "warmup": false,
+          "client_decode_tok_s": 15.27402746367897,
+          "ttft_s": 0.593306020993623,
+          "acceptance": 0.6995305164319249,
+          "text_sha256": "4397f368b0abe0d5edddede187b148bb3e575d7d890148c0563a14ea45265791"
+        }
+      ]
+    },
+    {
+      "file": "routeplan-http-candidate-long.jsonl",
+      "request_count": 3,
+      "median_decode_tok_s": 14.228491753354549,
+      "requests": [
+        {
+          "length": 32,
+          "repeat": 0,
+          "warmup": true,
+          "client_decode_tok_s": 16.45139748593521,
+          "ttft_s": 99.98360257799504,
+          "acceptance": 0.8333333333333334,
+          "text_sha256": "91b875657c88dcd930634fb855954e62b800d133539c3984c860fea4afbd20ad"
+        },
+        {
+          "length": 512,
+          "repeat": 0,
+          "warmup": false,
+          "client_decode_tok_s": 17.210997980302068,
+          "ttft_s": 1.6065291140112095,
+          "acceptance": 0.8885869565217391,
+          "text_sha256": "0ca15d85fa42c8b103bc7e48e8e7b6490ffcb53114354256786a5a270e20fae2"
+        },
+        {
+          "length": 512,
+          "repeat": 1,
+          "warmup": false,
+          "client_decode_tok_s": 14.228491753354549,
+          "ttft_s": 1.7052919980051229,
+          "acceptance": 0.6689497716894978,
+          "text_sha256": "baa1ac16011e6522ca6279d44aaedbbbd40c9dd5e671b104f83b23b054dd3099"
+        },
+        {
+          "length": 512,
+          "repeat": 2,
+          "warmup": false,
+          "client_decode_tok_s": 13.922816193723103,
+          "ttft_s": 2.369979027993395,
+          "acceptance": 0.640625,
+          "text_sha256": "ac8ca2f964b925dd149ee95407212c81f924eb0c602cb29b08a56c5c2f662f97"
+        }
+      ]
+    },
+    {
+      "file": "w8-routeplan-baseline-short.jsonl",
+      "request_count": 3,
+      "median_decode_tok_s": 18.646680246114503,
+      "requests": [
+        {
+          "length": 32,
+          "repeat": 0,
+          "warmup": true,
+          "client_decode_tok_s": 17.973626545151074,
+          "ttft_s": 0.5147631239960901,
+          "acceptance": 0.7777777777777778,
+          "text_sha256": "d1f3d8b0248f2a6b717f375093e4149b7a173419efd6a5d691489b63753ee24d"
+        },
+        {
+          "length": 512,
+          "repeat": 0,
+          "warmup": false,
+          "client_decode_tok_s": 19.823509506474707,
+          "ttft_s": 0.4304449569899589,
+          "acceptance": 0.9210526315789473,
+          "text_sha256": "184fc12f3b63a10f76d4b994c078a3350070def07c4296b7c983fd18c631c471"
+        },
+        {
+          "length": 512,
+          "repeat": 1,
+          "warmup": false,
+          "client_decode_tok_s": 18.646680246114503,
+          "ttft_s": 0.5040543390059611,
+          "acceptance": 0.8120567375886525,
+          "text_sha256": "716160f6aaf80b8c1138eff0ca858c535f9059194da3237b8a2a25609abe4c69"
+        },
+        {
+          "length": 512,
+          "repeat": 2,
+          "warmup": false,
+          "client_decode_tok_s": 18.31123922954067,
+          "ttft_s": 0.5097625290072756,
+          "acceptance": 0.7867132867132867,
+          "text_sha256": "491ae1916b74d963364688ce0db921cfae2577f3de53a665d477757a7b373b1a"
+        }
+      ]
+    },
+    {
+      "file": "w8-routeplan-candidate-k2-short.jsonl",
+      "request_count": 3,
+      "median_decode_tok_s": 21.139653144665797,
+      "requests": [
+        {
+          "length": 32,
+          "repeat": 0,
+          "warmup": true,
+          "client_decode_tok_s": 21.34924835043299,
+          "ttft_s": 0.5104121740005212,
+          "acceptance": 0.7307692307692307,
+          "text_sha256": "d1f3d8b0248f2a6b717f375093e4149b7a173419efd6a5d691489b63753ee24d"
+        },
+        {
+          "length": 512,
+          "repeat": 0,
+          "warmup": false,
+          "client_decode_tok_s": 24.441458845156212,
+          "ttft_s": 0.4367704090109328,
+          "acceptance": 0.8689839572192514,
+          "text_sha256": "e405c390d5350f3c26d3d4a77418a5b3eedcd44b8de0662b20483e00caae4fdc"
+        },
+        {
+          "length": 512,
+          "repeat": 1,
+          "warmup": false,
+          "client_decode_tok_s": 20.820335446120776,
+          "ttft_s": 0.4744536060024984,
+          "acceptance": 0.6712328767123288,
+          "text_sha256": "e260c832746dce76eca13f7ca35d346ea41a414152d7c3c069f9240c39657b16"
+        },
+        {
+          "length": 512,
+          "repeat": 2,
+          "warmup": false,
+          "client_decode_tok_s": 21.139653144665797,
+          "ttft_s": 0.5268170260096667,
+          "acceptance": 0.6851851851851852,
+          "text_sha256": "303216aef2e1abccdd3976c0386d455bb52daf100186eebb3d7a6d9f53511163"
+        }
+      ]
+    },
+    {
+      "file": "w8-routeplan-candidate-short.jsonl",
+      "request_count": 3,
+      "median_decode_tok_s": 19.82945975122872,
+      "requests": [
+        {
+          "length": 32,
+          "repeat": 0,
+          "warmup": true,
+          "client_decode_tok_s": 18.7998988050412,
+          "ttft_s": 0.48427262899349444,
+          "acceptance": 0.7777777777777778,
+          "text_sha256": "d1f3d8b0248f2a6b717f375093e4149b7a173419efd6a5d691489b63753ee24d"
+        },
+        {
+          "length": 512,
+          "repeat": 0,
+          "warmup": false,
+          "client_decode_tok_s": 20.95071011811613,
+          "ttft_s": 0.393808730004821,
+          "acceptance": 0.924812030075188,
+          "text_sha256": "375956f9656b08c492840f7966a83d38948fb2076303714e60311b16206bcda5"
+        },
+        {
+          "length": 512,
+          "repeat": 1,
+          "warmup": false,
+          "client_decode_tok_s": 19.43309484857896,
+          "ttft_s": 0.49048962599772494,
+          "acceptance": 0.8028169014084507,
+          "text_sha256": "14a04027e9c0c4e6602a97d15945d1460c52cdd32f4ae387975c95c63673d2a5"
+        },
+        {
+          "length": 512,
+          "repeat": 2,
+          "warmup": false,
+          "client_decode_tok_s": 19.82945975122872,
+          "ttft_s": 0.5200190040050074,
+          "acceptance": 0.8315412186379928,
+          "text_sha256": "610a03a71532dbe7932eb6766ed23349d24e1ebc5be4100c0759099bfc0dece3"
+        }
+      ]
+    },
+    {
+      "file": "w8-routeplan-baseline-long.jsonl",
+      "request_count": 3,
+      "median_decode_tok_s": 18.525929986867734,
+      "requests": [
+        {
+          "length": 32,
+          "repeat": 0,
+          "warmup": true,
+          "client_decode_tok_s": 19.554692123516336,
+          "ttft_s": 45.508138951001456,
+          "acceptance": 1.0,
+          "text_sha256": "0062dbcf29fa32bc642f80197b8d1a3d11682e732b6f2c476b8231a838716a26"
+        },
+        {
+          "length": 512,
+          "repeat": 0,
+          "warmup": false,
+          "client_decode_tok_s": 19.330738472870852,
+          "ttft_s": 0.8945646209904226,
+          "acceptance": 0.9393939393939394,
+          "text_sha256": "0b1d671fd606cfab86ac4aa7478221633e9f5686a9876d54837db4e18d3269e6"
+        },
+        {
+          "length": 512,
+          "repeat": 1,
+          "warmup": false,
+          "client_decode_tok_s": 18.525929986867734,
+          "ttft_s": 0.922477065003477,
+          "acceptance": 0.864963503649635,
+          "text_sha256": "bdf178c1b67f3c0cdda587ec2c16976e46cd8c96b16df4340b798dccc2f69947"
+        },
+        {
+          "length": 512,
+          "repeat": 2,
+          "warmup": false,
+          "client_decode_tok_s": 17.557616154410383,
+          "ttft_s": 1.2341837790008867,
+          "acceptance": 0.7777777777777778,
+          "text_sha256": "c6945b2a4abbbb14385f32bd033555d964bc5d4f57688f60808d0872df003e7b"
+        }
+      ]
+    },
+    {
+      "file": "w8-routeplan-candidate-k2-long.jsonl",
+      "request_count": 3,
+      "median_decode_tok_s": 21.743598150326463,
+      "requests": [
+        {
+          "length": 32,
+          "repeat": 0,
+          "warmup": true,
+          "client_decode_tok_s": 17.463721713808916,
+          "ttft_s": 46.422135519009316,
+          "acceptance": 0.5333333333333333,
+          "text_sha256": "620e0d2042b4067f6c1b5b91ee2e574093da774a9fbfd83511c739782e0fefde"
+        },
+        {
+          "length": 512,
+          "repeat": 0,
+          "warmup": false,
+          "client_decode_tok_s": 23.587364123580265,
+          "ttft_s": 0.9202806700050132,
+          "acceptance": 0.8763440860215054,
+          "text_sha256": "f7c64ebf3048d54b1e045951112bcca41c0ed32a8cdfab9ce317dbe91fea2012"
+        },
+        {
+          "length": 512,
+          "repeat": 1,
+          "warmup": false,
+          "client_decode_tok_s": 21.743598150326463,
+          "ttft_s": 1.0219752959965263,
+          "acceptance": 0.7761194029850746,
+          "text_sha256": "ea139cec272b9fb6bb482fbd1c71892ec23dadccc150eec8c2485bb3edb98b4d"
+        },
+        {
+          "length": 512,
+          "repeat": 2,
+          "warmup": false,
+          "client_decode_tok_s": 20.869220059630415,
+          "ttft_s": 1.2816851579991635,
+          "acceptance": 0.722488038277512,
+          "text_sha256": "1961b8f0b2fbecf45db9239cd77b91fc58ad4ee669272ea75c24e18c706609a8"
+        }
+      ]
+    },
+    {
+      "file": "w8-routeplan-candidate-long.jsonl",
+      "request_count": 3,
+      "median_decode_tok_s": 19.54650823000778,
+      "requests": [
+        {
+          "length": 32,
+          "repeat": 0,
+          "warmup": true,
+          "client_decode_tok_s": 20.566013811759376,
+          "ttft_s": 46.06267533500795,
+          "acceptance": 1.0,
+          "text_sha256": "0062dbcf29fa32bc642f80197b8d1a3d11682e732b6f2c476b8231a838716a26"
+        },
+        {
+          "length": 512,
+          "repeat": 0,
+          "warmup": false,
+          "client_decode_tok_s": 20.3022863417639,
+          "ttft_s": 0.879278565000277,
+          "acceptance": 0.9138576779026217,
+          "text_sha256": "b4c76b95c05d95d598535200151178b08bef3073b81a91154d8907fdd6559130"
+        },
+        {
+          "length": 512,
+          "repeat": 1,
+          "warmup": false,
+          "client_decode_tok_s": 19.483970267840263,
+          "ttft_s": 1.0539654800086282,
+          "acceptance": 0.8447653429602888,
+          "text_sha256": "614c0fd8db53d72b870c6dbc59e90d558fc23b37d0b9c168258f4e40f1732de9"
+        },
+        {
+          "length": 512,
+          "repeat": 2,
+          "warmup": false,
+          "client_decode_tok_s": 19.54650823000778,
+          "ttft_s": 1.269889957999112,
+          "acceptance": 0.8514492753623188,
+          "text_sha256": "30aebcef68c427842f00016680b5995da17223df1ef040588db89dc82750cf48"
+        }
+      ]
+    }
+  ]
+}

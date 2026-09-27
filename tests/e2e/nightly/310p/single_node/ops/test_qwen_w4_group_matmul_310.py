@@ -404,6 +404,42 @@ def test_routed_meta_shape():
     assert output.shape == (20, 640) and output.dtype == torch.float16
 
 
+@pytest.mark.parametrize("routes", [30, 60, 80])
+@pytest.mark.parametrize("outputs,inputs", [(1280, 2560), (2560, 640)])
+def test_routed_plan_extreme_peer_ids_and_interleaved_groups(routes, outputs, inputs):
+    values, canonical = routed_values(routes, outputs, inputs)
+    device_values = [value.npu() for value in values]
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        for _ in range(3):
+            routed_kernel(*device_values)
+    torch.npu.current_stream().wait_stream(stream)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, stream=stream):
+        captured = routed_kernel(*device_values)
+    generator = torch.Generator().manual_seed(8001)
+    # Reuse plan storage through many/single/no groups. INT32 extrema are
+    # peer IDs, never truncated or used as an array index.
+    for phase in range(6):
+        ids = (torch.arange(routes, dtype=torch.int32) + phase) % 3
+        if phase % 3 == 1:
+            ids.fill_(2)
+        ids[::5] = torch.iinfo(torch.int32).min
+        ids[1::5] = torch.iinfo(torch.int32).max
+        if phase % 3 == 2:
+            ids.fill_(-1)
+        ids = ids[torch.randperm(routes, generator=generator)]
+        x = (torch.randn(values[0].shape, generator=generator) * 0.1).half()
+        device_values[0].copy_(x)
+        device_values[-1].copy_(ids)
+        captured.fill_(float("nan"))
+        graph.replay()
+        actual = captured.cpu()
+        torch.testing.assert_close(actual, routed_reference(x, canonical, ids), rtol=0.005, atol=0.003)
+        assert (actual[(ids < 0) | (ids >= 3)] == 0).all()
+
+
 @pytest.mark.parametrize("tokens", [1, 2, 5, 8])
 @pytest.mark.parametrize("nz", [False, True])
 def test_routed_complete_moe_matches_host_route_and_replays(tokens, nz):

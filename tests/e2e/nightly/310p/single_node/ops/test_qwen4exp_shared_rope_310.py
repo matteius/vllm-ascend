@@ -71,7 +71,7 @@ def test_shared_query_tables_replay_matches_separate_tables(tokens, mrope):
 
 
 @pytest.mark.parametrize("backend", [None, "eager_dequant", "cube_310", "cube_310_tiled", "cube_310_routed"])
-def test_query_table_reuse_is_only_enabled_for_alternate_routed_w4(backend):
+def test_query_table_reuse_covers_w8_and_alternate_routed_w4(backend):
     config = SimpleNamespace(
         hidden_size=256,
         moe_intermediate_size=256,
@@ -93,10 +93,11 @@ def test_query_table_reuse_is_only_enabled_for_alternate_routed_w4(backend):
             "offset_dtype": "int8",
         }
     layer = _QSAAttention(config=config, layer_idx=0, dtype_policy=ASCEND_QWEN4EXP_DTYPE_POLICY)
-    assert layer.reuse_query_rope is (backend == "cube_310_routed")
+    enabled = backend in (None, "cube_310_routed")
+    assert layer.reuse_query_rope is enabled
     axes = layer._query_rope_frequency_axes
     assert "_query_rope_frequency_axes" not in layer.state_dict()
-    if backend == "cube_310_routed":
+    if enabled:
         assert "_query_rope_frequency_axes" in dict(layer.named_buffers())
         torch.testing.assert_close(axes.cpu(), torch.tensor(_mrope_interleaved_dims([2, 1, 1])))
     else:

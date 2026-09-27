@@ -1,0 +1,12 @@
+(Worker_TP0 pid=1484350) [2026-09-27 18:33:46] [ERROR] [1484350] profiler.py: The profiling data cannot be parsed during the daemon process, it is recommended that you use an offline parsing interface to parse the collected data.
+(Worker_TP1 pid=1484664) [2026-09-27 18:33:46] [ERROR] [1484664] profiler.py: The profiling data cannot be parsed during the daemon process, it is recommended that you use an offline parsing interface to parse the collected data.
+(Worker_TP2 pid=1485033) [2026-09-27 18:33:46] [ERROR] [1485033] profiler.py: The profiling data cannot be parsed during the daemon process, it is recommended that you use an offline parsing interface to parse the collected data.
+(Worker_TP3 pid=1485692) [2026-09-27 18:33:46] [ERROR] [1485692] profiler.py: The profiling data cannot be parsed during the daemon process, it is recommended that you use an offline parsing interface to parse the collected data.
+(APIServer pid=1483252) ERROR 09-27 18:33:51 [async_llm.py:829] AsyncLLM output_handler failed.
+(APIServer pid=1483252) ERROR 09-27 18:33:51 [async_llm.py:829] Traceback (most recent call last):
+(APIServer pid=1483252) ERROR 09-27 18:33:51 [async_llm.py:829]   File "/srv/ai/src/vllm-opensensor/vllm/v1/engine/async_llm.py", line 775, in output_handler
+(APIServer pid=1483252) ERROR 09-27 18:33:51 [async_llm.py:829]     outputs = await engine_core.get_output_async()
+(APIServer pid=1483252) ERROR 09-27 18:33:51 [async_llm.py:829]               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1483252) ERROR 09-27 18:33:51 [async_llm.py:829]   File "/srv/ai/src/vllm-opensensor/vllm/v1/engine/core_client.py", line 1175, in get_output_async
+(APIServer pid=1483252) ERROR 09-27 18:33:51 [async_llm.py:829]     raise self._format_exception(outputs) from None
+(APIServer pid=1483252) ERROR 09-27 18:33:51 [async_llm.py:829] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.

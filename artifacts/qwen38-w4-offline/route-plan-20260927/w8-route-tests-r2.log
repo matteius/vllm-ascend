@@ -1,0 +1,16 @@
+................................                                         [100%]
+=============================== warnings summary ===============================
+../../../venvs/qwen38-w4-test-ce1862/lib/python3.12/site-packages/torch/jit/_script.py:365: 14 warnings
+  /srv/ai/venvs/qwen38-w4-test-ce1862/lib/python3.12/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+tests/e2e/nightly/310p/single_node/ops/test_qwen4exp_fused_moe_routing_310.py::test_fused_small_moe_routes_match_sort_dispatch[1-False-0]
+  /usr/local/python3.12.13/lib/python3.12/multiprocessing/popen_fork.py:66: DeprecationWarning: This process (pid=1220384) is multi-threaded, use of fork() may lead to deadlocks in the child.
+    self.pid = os.fork()
+
+tests/e2e/nightly/310p/single_node/ops/test_qwen4exp_grouped_moe_310.py: 12 warnings
+  /usr/local/Ascend/cann-9.1.0/python/site-packages/tbe/common/context/op_context.py:38: DeprecationWarning: currentThread() is deprecated, use current_thread() instead
+    return _contexts.setdefault(threading.currentThread().ident, [])
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+32 passed, 27 warnings in 27.99s

@@ -1,0 +1,86 @@
+[
+  {
+    "label": "baseline",
+    "rank_directory": "dp0_pp0_tp0_dcp0_ep0_rank0_1319769_20260927181615455_ascend_pt",
+    "runtime_graph_calls": {
+      "AscendCL@aclmdlRIExecuteAsync": 90
+    }
+  },
+  {
+    "label": "baseline",
+    "rank_directory": "dp0_pp0_tp1_dcp0_ep1_rank1_1320281_20260927181615455_ascend_pt",
+    "runtime_graph_calls": {
+      "AscendCL@aclmdlRIExecuteAsync": 90
+    }
+  },
+  {
+    "label": "baseline",
+    "rank_directory": "dp0_pp0_tp2_dcp0_ep2_rank2_1320643_20260927181615455_ascend_pt",
+    "runtime_graph_calls": {
+      "AscendCL@aclmdlRIExecuteAsync": 90
+    }
+  },
+  {
+    "label": "baseline",
+    "rank_directory": "dp0_pp0_tp3_dcp0_ep3_rank3_1321124_20260927181615455_ascend_pt",
+    "runtime_graph_calls": {
+      "AscendCL@aclmdlRIExecuteAsync": 90
+    }
+  },
+  {
+    "label": "candidate",
+    "rank_directory": "dp0_pp0_tp0_dcp0_ep0_rank0_1402903_20260927182518286_ascend_pt",
+    "runtime_graph_calls": {
+      "AscendCL@aclmdlRIExecuteAsync": 90
+    }
+  },
+  {
+    "label": "candidate",
+    "rank_directory": "dp0_pp0_tp1_dcp0_ep1_rank1_1403267_20260927182518286_ascend_pt",
+    "runtime_graph_calls": {
+      "AscendCL@aclmdlRIExecuteAsync": 90
+    }
+  },
+  {
+    "label": "candidate",
+    "rank_directory": "dp0_pp0_tp2_dcp0_ep2_rank2_1403657_20260927182518286_ascend_pt",
+    "runtime_graph_calls": {
+      "AscendCL@aclmdlRIExecuteAsync": 90
+    }
+  },
+  {
+    "label": "candidate",
+    "rank_directory": "dp0_pp0_tp3_dcp0_ep3_rank3_1404124_20260927182518286_ascend_pt",
+    "runtime_graph_calls": {
+      "AscendCL@aclmdlRIExecuteAsync": 90
+    }
+  },
+  {
+    "label": "candidate-k2",
+    "rank_directory": "dp0_pp0_tp0_dcp0_ep0_rank0_1484350_20260927183344651_ascend_pt",
+    "runtime_graph_calls": {
+      "AscendCL@aclmdlRIExecuteAsync": 110
+    }
+  },
+  {
+    "label": "candidate-k2",
+    "rank_directory": "dp0_pp0_tp1_dcp0_ep1_rank1_1484664_20260927183344651_ascend_pt",
+    "runtime_graph_calls": {
+      "AscendCL@aclmdlRIExecuteAsync": 110
+    }
+  },
+  {
+    "label": "candidate-k2",
+    "rank_directory": "dp0_pp0_tp2_dcp0_ep2_rank2_1485033_20260927183344651_ascend_pt",
+    "runtime_graph_calls": {
+      "AscendCL@aclmdlRIExecuteAsync": 110
+    }
+  },
+  {
+    "label": "candidate-k2",
+    "rank_directory": "dp0_pp0_tp3_dcp0_ep3_rank3_1485692_20260927183344651_ascend_pt",
+    "runtime_graph_calls": {
+      "AscendCL@aclmdlRIExecuteAsync": 110
+    }
+  }
+]

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #include "qwen_w4_routed_matmul_v310_tiling.h"
+#include <algorithm>
 #include "register/op_impl_registry.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "tiling_base/error_log.h"
@@ -40,16 +41,18 @@ static ge::graphStatus TileQwenW4Routed(gert::TilingContext* context) {
   data.set_numExperts(experts);
   data.set_nDim(n);
   data.set_kDim(k);
-  // Decode-only bound: at most 80 routes. Each route owns one ephemeral
-  // projection workspace; no bank expansion or routing readback to the host.
+  // Retain the legacy workspace budget while validating persistent routing.
+  // The resident-L1 path now uses only per-core compact activation scratch;
+  // it does not expand weight banks or read routing back to the host.
   auto workspace = context->GetWorkspaceSizes(1);
   OP_CHECK_NULL_WITH_CONTEXT(context, workspace);
   workspace[0] = device.GetLibApiWorkSpaceSize() + rows * n * k * sizeof(uint16_t);
-  // Private batched output for each possible first owner of an expert.
-  // This is at most 32,768,000 bytes at R=80,N=2560, not a resident bank.
-  // Weight banks stay packed; scratch lasts only for this projection.
+  // Legacy batched-output allowance (unused by direct row stores). Shrinking
+  // these reservations needs a separate graph-memory/capacity validation.
   workspace[0] += rows * rows * n * sizeof(uint16_t);
-  context->SetBlockDim(n / OUTPUT_TILE);
+  const uint32_t cores = device.GetCoreNumAic();
+  OP_CHECK_IF(cores == 0, OP_LOGE(context, "no AI cores"), return ge::GRAPH_FAILED);
+  context->SetBlockDim(std::min<int64_t>(cores, n / OUTPUT_TILE));
   context->SetTilingKey(0);
   data.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
   context->GetRawTilingData()->SetDataSize(data.GetDataSize());

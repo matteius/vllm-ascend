@@ -129,6 +129,7 @@ class QwenW4GroupMatmulV310Cube {
     K_ = inputs;
     codesPerByte_ = 2;
     tiled_ = tiled;
+    outputRowIndices_ = nullptr;
     tileId_ = GetBlockIdx();
     tileCount_ = GetBlockNum();
     tileK_ = QW4_TILE_K;
@@ -171,6 +172,12 @@ class QwenW4GroupMatmulV310Cube {
     coreNzBase_ = static_cast<int64_t>(logicalTile) * QW4_TILE_N * K_;
   }
 
+  // Only bounded routed decode uses this map (at most 80 rows, below the
+  // M128 tile size). Grouped/canonical calls retain contiguous output stores.
+  __aicore__ inline void SetOutputRows(const uint32_t* rowIndices) {
+    outputRowIndices_ = rowIndices;
+  }
+
   // One persistent block owns this N tile across all routes. Initialize
   // every row once, then let local experts overwrite their rows. This also
   // erases local->peer graph replays without draining the pipe per peer.
@@ -201,14 +208,12 @@ class QwenW4GroupMatmulV310Cube {
   // workspace, which the resident-L1 tiled path no longer reads or writes.
   // At most sixteen rows are staged in UB; wider route batches flush in
   // chunks, keeping the gather bounded for the eighty-route graph limit.
-  __aicore__ inline uint32_t GatherMatchingRows(GM_ADDR input, GM_ADDR scratch, GM_ADDR expertIds, int32_t expert,
-                                                uint32_t rows, int64_t inputs) {
+  __aicore__ inline void GatherPlannedRows(GM_ADDR input, GM_ADDR scratch, const uint32_t* rowIndices,
+                                           uint32_t rows, int64_t inputs) {
     GlobalTensor<half> source;
     source.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(input));
     GlobalTensor<half> destination;
     destination.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(scratch));
-    GlobalTensor<int32_t> ids;
-    ids.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(expertIds));
     auto staging = resource.ubBuf.template GetBufferByByte<half>(0);
     PipeBarrier<PIPE_ALL>();
     SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID4);
@@ -216,10 +221,8 @@ class QwenW4GroupMatmulV310Cube {
     uint32_t matched = 0;
     uint32_t buffered = 0;
     for (uint32_t row = 0; row < rows; ++row) {
-      if (ids.GetValue(row) == expert) {
-        DataCopy(staging[buffered * inputs], source[row * inputs], inputs);
-        ++buffered;
-      }
+      DataCopy(staging[buffered * inputs], source[static_cast<int64_t>(rowIndices[row]) * inputs], inputs);
+      ++buffered;
       if (buffered == QW4_ROUTE_GATHER_ROWS || (row + 1 == rows && buffered != 0)) {
         SetFlag<HardEvent::MTE2_MTE3>(EVENT_ID4);
         WaitFlag<HardEvent::MTE2_MTE3>(EVENT_ID4);
@@ -232,7 +235,6 @@ class QwenW4GroupMatmulV310Cube {
     }
     // The next stage reuses UB for unpacking and MTE2 reads this GM scratch.
     PipeBarrier<PIPE_ALL>();
-    return matched;
   }
 
   __aicore__ inline void Process() {
@@ -304,38 +306,8 @@ class QwenW4GroupMatmulV310Cube {
     }
   }
 
-  // Routed decode can evaluate several rows with one decoded expert tile.
-  // The temporary output is private to the first route owning that expert;
-  // publish only matching rows so unrelated experts never race on y.
-  __aicore__ inline void CopyMatchingRows(GM_ADDR output, GM_ADDR expertIds, int32_t expert, uint32_t tile,
-                                          uint32_t originalRows) {
-    GlobalTensor<half> destination;
-    destination.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(output));
-    GlobalTensor<int32_t> ids;
-    ids.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(expertIds));
-    auto rowBuffer = resource.ubBuf.template GetBufferByByte<half>(0);
-    // BlockMmad's finalWaitFlags completes its output stores. Explicitly
-    // order the subsequent GM read and each reuse of this 64-byte buffer.
-    PipeBarrier<PIPE_ALL>();
-    SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID4);
-    WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID4);
-    uint32_t compactRow = 0;
-    for (uint32_t row = 0; row < originalRows; ++row) {
-      if (ids.GetValue(row) != expert) {
-        continue;
-      }
-      const int64_t index = static_cast<int64_t>(row) * N_ + tile * QW4_TILE_N;
-      const int64_t compactIndex = static_cast<int64_t>(compactRow++) * N_ + tile * QW4_TILE_N;
-      DataCopy(rowBuffer, yGm_[compactIndex], QW4_TILE_N);
-      SetFlag<HardEvent::MTE2_MTE3>(EVENT_ID4);
-      WaitFlag<HardEvent::MTE2_MTE3>(EVENT_ID4);
-      DataCopy(destination[index], rowBuffer, QW4_TILE_N);
-      SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID4);
-      WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID4);
-    }
-  }
-
  private:
+  const uint32_t* outputRowIndices_ = nullptr;
   // Qwen-only resident-B block: the existing shared CATLASS block remains
   // unchanged for W8, GLM and the canonical (non-tiled) W4 reference path.
   // Double-buffer A/L0. Small M tiles can use wider K reductions within
@@ -432,6 +404,15 @@ class QwenW4GroupMatmulV310Cube {
       for (uint32_t mf = 0; mf < mAligned / QW4_FRACTAL_SIZE; ++mf) {
         const uint32_t row = mf * QW4_FRACTAL_SIZE;
         const uint32_t ubOffset = (nf * (mAligned / QW4_FRACTAL_SIZE) + mf) * QW4_FRACTAL_SIZE * QW4_FRACTAL_SIZE;
+        if (outputRowIndices_ != nullptr) {
+          const uint32_t rows = MinU<uint32_t>(QW4_FRACTAL_SIZE, (uint32_t)T_ - row);
+          for (uint32_t slot = 0; slot < rows; ++slot) {
+            const int64_t gmOffset = static_cast<int64_t>(outputRowIndices_[row + slot]) * N_ + n0 +
+                                     nf * QW4_FRACTAL_SIZE;
+            DataCopy(yGm_[gmOffset], output[ubOffset + slot * QW4_FRACTAL_SIZE], QW4_FRACTAL_SIZE);
+          }
+          continue;
+        }
         const int64_t gmOffset = static_cast<int64_t>(row) * N_ + n0 + nf * QW4_FRACTAL_SIZE;
         DataCopyParams toGm;
         toGm.blockCount = MinU<uint32_t>(QW4_FRACTAL_SIZE, (uint32_t)T_ - row);

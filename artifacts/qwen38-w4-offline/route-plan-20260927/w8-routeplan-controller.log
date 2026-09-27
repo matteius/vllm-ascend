@@ -1,0 +1,7 @@
+{"event": "START", "label": "baseline", "api_pid": 1317209}
+{"event": "STOP", "label": "baseline", "passed": true}
+{"event": "START", "label": "candidate", "api_pid": 1400581}
+{"event": "STOP", "label": "candidate", "passed": true}
+{"event": "START", "label": "candidate-k2", "api_pid": 1483252}
+{"event": "STOP", "label": "candidate-k2", "passed": true}
+W8_SWEEP_COMPLETE
