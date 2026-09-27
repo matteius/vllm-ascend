@@ -703,7 +703,41 @@ graph replay 全部略慢，不能进入完整模型：
 运行源码；matched JSONL 也在该目录。没有用这个 binary 启动模型。
 下一项是以已验证 compact kernel + 两个 QSA dispatch 修复，重新测
 MTP k=4 的 `[1,5]` FULL replay；旧 k=4 慢速结果早于这些修复，
-不能当成当前版本结果。新 run `mtp4-r2` 尚待真实 smoke/短长六题完成。
+不能当成当前版本结果。新 run `mtp4-r2` 的结果见下一节。
+
+## QSA 修复后的 k=4 实测
+
+`mtp4-r2` 使用相同 compact binary、共享 RoPE 和两个 W4-only QSA
+dispatch 修复，仅改 MTP k=4 / FULL `[1,5]`。三个真实 smoke 正确，
+1–50 counting 为 20.198 tok/s；不能用这个简单题代替 coding benchmark。
+运行时表反复确认五-token FULL replay，drafted/accepted counters 增长。
+六个无 profiler coding 请求均完成 512 tokens，结果如下：
+
+| context | 三题 decode tok/s | 中位数 | 相对同代码 k=2 |
+| --- | --- | --- | --- |
+| 短 | 15.783 / 11.199 / 12.189 | 12.189 | -8.79% |
+| 约 23.4k | 15.843 / 12.025 / 11.392 | 12.025 | -12.12% |
+
+短题 drafted/accepted 为 536/378、748/328、688/339；长题为
+492/389、636/352、680/345。第一题改善，但后两题 acceptance 不足以
+抵消更多 draft/verify 工作。全部输出 SHA 与 k=2 不同，不能声称是
+bitwise 等价的 workload。长题均复用 23,168 tokens，hot TTFT 为
+4.660/4.728/5.258 秒；cold warmup TTFT=361.316 秒。
+
+权重仍约 19.38 GiB/rank，graph 从 k=2 的 0.38 增为 0.50 GiB；
+watchdog 最高 75°C。没有启用 rejected Cube binary，也未改生产 W8；
+home launcher SHA256 仍为
+`ae81d75eec7516fc6f455a3a071e52410ba6c477c34e0114df647f4c125c77df`。
+原始请求文件为 `replay-r4/w4-mtp4-r2-{short,long}.jsonl` 与
+`http-routed-mtp-smoke-mtp4-r2.jsonl`。服务/温度日志在 host
+`/srv/ai/src/qwen38-w4-hardware-20260927/` 下的
+`server-routed-mtp-mtp4-r2.log` / `server-routed-thermal-mtp4-r2.log`。
+
+因此保留 k=2 作为下一次 profile 配置，不将 k=4 推为更快默认。
+完成全部请求并确认 idle 后，原 API PID 3479201 正常退出；新的
+`replay-profile-r5` 已启动（API PID 3549264），采样仍为 delay=4、
+max=8 steps。其 trace 尚未完成；不能把旧 profile 的瓶颈比例当成
+QSA score 修复后的实测，也不能把带 profiler 的请求算作速度基准。
 
 ## 复现与交接
 

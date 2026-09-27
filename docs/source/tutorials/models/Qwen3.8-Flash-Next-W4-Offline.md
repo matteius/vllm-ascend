@@ -334,3 +334,11 @@ NPU QSA tests 通过，包含动态 query/页表/positions 与精确 ties。
 W8 launcher 未修改。无 profiler 的实际 tok/s 仍低于 W8 的
 19.073/18.091；不声称完整任务质量、生产速度等价或更大容量已验证。
 证据见 `artifacts/qwen38-w4-offline/replay-r4/` 与 `REPLAY_PROFILE.md`。
+
+相同代码的 k=4 / FULL `[1,5]` 重测也完成：三个 smoke 正确，六个
+512-token 请求完成，五-token runtime replay 有证据。短三题为
+15.783/11.199/12.189、23.4k 三题为 15.843/12.025/11.392 tok/s；
+中位数 **12.189 / 12.025** 均低于 k=2。所有输出 SHA 改变，部分题目
+draft 接受率降低。没有用 counting 的 20.198 tok/s 代替真实 coding
+吞吐，也不提升 k=4 为更快默认。当前最佳长题配置仍是 k=2，正在重新
+profile QSA 修复后的剩余成本；W8 基线 19.073/18.091 仍未达到。

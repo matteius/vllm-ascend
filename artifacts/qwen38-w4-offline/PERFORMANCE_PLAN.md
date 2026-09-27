@@ -222,8 +222,13 @@ projection 的 copy/event/scalar 开销，必须先通过数值、动态 replay�
 small-M Cube stage 从 K=128 改到 512 的独立候选通过 195 NPU tests，
 但相同真实 partial-layer 的五个 replay shapes 全部慢 0.76–2.78%，
 故没有保留，也未进入整模型。记录与源码 patch 已归档。
-接下来以同一已验证 compact binary 和 QSA 修复重测 k=4 + FULL
-`[1,5]`；这是新的待验证实验，不代表旧 k=4 结果已经被推翻。
+同一已验证 compact binary 和 QSA 修复的 k=4 + FULL `[1,5]`
+重测已完成。三个正确 smoke、五-token FULL replay、六题各 512 tokens
+均通过；短中位数 12.189、23.4k 中位数 12.025 tok/s，分别低于 k=2
+8.79% / 12.12%。第一题有 15.783/15.843 tok/s，但后两题接受率下降，
+不能挑第一题宣称达到目标。所有输出 SHA 改变；cold TTFT 361.316 秒。
+因此下一次 `replay-profile-r5` 保留 k=2 + FULL `[1,3]`，重新测量
+QSA score 修复后的瓶颈分布。该 profile 已启动，尚未形成新速度结论。
 
 ## Acceptance criteria
 
