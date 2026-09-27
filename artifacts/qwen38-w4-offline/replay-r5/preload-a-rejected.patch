@@ -1,0 +1,102 @@
+diff --git a/csrc/gmm/qwen_w4_group_matmul_v310/op_kernel/qwen_w4_group_matmul_v310.h b/csrc/gmm/qwen_w4_group_matmul_v310/op_kernel/qwen_w4_group_matmul_v310.h
+index 76180c3cc..d76f3df15 100644
+--- a/csrc/gmm/qwen_w4_group_matmul_v310/op_kernel/qwen_w4_group_matmul_v310.h
++++ b/csrc/gmm/qwen_w4_group_matmul_v310/op_kernel/qwen_w4_group_matmul_v310.h
+@@ -18,7 +18,7 @@
+  * avoiding runtime weight/metadata gathers. The canonical backend instead
+  * gathers each decoded 16-output-channel plane into NZ. Each AI core decodes
+  * only its current 32-output-channel tile. Tiled weights move directly from
+- * UB to L1, with two activation stages beside the resident tile; canonical
++ * UB to L1, with resident A when it fits or two activation stages; canonical
+  * weights retain the per-output-tile GM workspace and shared CATLASS block.
+  * No persistent dequantized expert bank or separate ND-to-NZ pass is retained.
+  */
+@@ -317,7 +317,8 @@ class QwenW4GroupMatmulV310Cube {
+  private:
+   // Qwen-only resident-B block: the existing shared CATLASS block remains
+   // unchanged for W8, GLM and the canonical (non-tiled) W4 reference path.
+-  // Double-buffer A/L0 and preserve the original ascending K=128 reduction.
++  // Preload A when it fits beside B, otherwise double-buffer its L1 tiles.
++  // Both paths keep double-buffered L0 and the ascending K=128 reduction.
+   __aicore__ inline void MatmulFromL1(uint32_t n0, uint32_t nActual) {
+     auto aLayout = tla::MakeLayout<half, layout::RowMajor>((uint32_t)T_, (uint32_t)K_);
+     auto tensorA = tla::MakeTensor(xGm_, aLayout, Arch::PositionGM{});
+@@ -329,6 +330,19 @@ class QwenW4GroupMatmulV310Cube {
+     constexpr auto aL1Layout =
+         tla::MakeLayout<half, typename TileCopy::LayoutTagL1A>(tla::Int<QW4_CUBE_M>{}, tla::Int<QW4_TILE_K>{});
+     const uint32_t mActual = T_ == 1 ? QW4_FRACTAL_SIZE : (uint32_t)T_;
++    const uint32_t aResidentBytes = AlignUpU<uint32_t>((uint32_t)T_, QW4_FRACTAL_SIZE) * K_ * sizeof(half);
++    const bool preloadA = aResidentBytes <= ArchTag::L1_SIZE - QW4_L1_WEIGHT_BYTES;
++    auto aResidentLayout = tla::MakeLayout<half, typename TileCopy::LayoutTagL1A>(mActual, (uint32_t)K_);
++    auto tensorResidentA = tla::MakeTensor(resource.l1Buf.template GetBufferByByte<half>(QW4_L1_WEIGHT_BYTES),
++                                           aResidentLayout, Arch::PositionL1{});
++    if (preloadA) {
++      // A single GM->L1 transfer replaces the per-K copy/event pairs. The
++      // padded M extent participates in the capacity check; e.g. K=2560
++      // fits through M=64 but M=65 must retain the bounded tiled fallback.
++      copyA(tensorResidentA, tensorA);
++      SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2);
++      WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2);
++    }
+     auto bL1Layout = tla::MakeLayout<half, typename TileCopy::LayoutTagL1B>((uint32_t)K_, nActual);
+     auto tensorL1B = tla::MakeTensor(resource.l1Buf.template GetBufferByByte<half>(0), bL1Layout, Arch::PositionL1{});
+     auto aL0Layout = tla::MakeLayout<half, typename TileCopy::LayoutTagL0A>(mActual, QW4_TILE_K);
+@@ -336,28 +350,38 @@ class QwenW4GroupMatmulV310Cube {
+     auto l0C = resource.l0CBuf.template GetBufferByByte<float>(0);
+     auto tensorL0C = tla::MakeTensor(l0C, tla::MakeLayoutL0C(mActual, nActual), Arch::PositionL0C{});
+     for (uint32_t stage = 0; stage < QW4_CUBE_STAGES; ++stage) {
+-      SetFlag<HardEvent::MTE1_MTE2>(stage);
++      if (!preloadA) {
++        SetFlag<HardEvent::MTE1_MTE2>(stage);
++      }
+       SetFlag<HardEvent::M_MTE1>(stage);
+     }
+     for (uint32_t k0 = 0; k0 < K_; k0 += QW4_TILE_K) {
+       const uint32_t stage = (k0 / QW4_TILE_K) % QW4_CUBE_STAGES;
+       auto l1A = resource.l1Buf.template GetBufferByByte<half>(QW4_L1_WEIGHT_BYTES + stage * QW4_L1_ACTIVATION_BYTES);
+       auto tensorL1A = tla::MakeTensor(l1A, aL1Layout, Arch::PositionL1{});
+-      auto tileA = GetTile(tensorA, tla::MakeCoord((uint32_t)0, k0), tla::MakeShape((uint32_t)T_, QW4_TILE_K));
+-      WaitFlag<HardEvent::MTE1_MTE2>(stage);
+-      copyA(tensorL1A, tileA);
+-      SetFlag<HardEvent::MTE2_MTE1>(stage);
++      if (!preloadA) {
++        auto tileA = GetTile(tensorA, tla::MakeCoord((uint32_t)0, k0), tla::MakeShape((uint32_t)T_, QW4_TILE_K));
++        WaitFlag<HardEvent::MTE1_MTE2>(stage);
++        copyA(tensorL1A, tileA);
++        SetFlag<HardEvent::MTE2_MTE1>(stage);
++      }
+       auto l0A = resource.l0ABuf.template GetBufferByByte<half>(stage * QW4_L1_ACTIVATION_BYTES);
+       auto l0B = resource.l0BBuf.template GetBufferByByte<half>(stage * QW4_TILE_N * QW4_TILE_K * sizeof(half));
+       auto tensorL0A = tla::MakeTensor(l0A, aL0Layout, Arch::PositionL0A{});
+       auto tensorL0B = tla::MakeTensor(l0B, bL0Layout, Arch::PositionL0B{});
+-      auto tileL1A = GetTile(tensorL1A, tla::MakeCoord((uint32_t)0, (uint32_t)0), tla::MakeShape(mActual, QW4_TILE_K));
+       auto tileL1B = GetTile(tensorL1B, tla::MakeCoord(k0, (uint32_t)0), tla::MakeShape(QW4_TILE_K, nActual));
+       WaitFlag<HardEvent::M_MTE1>(stage);
+-      WaitFlag<HardEvent::MTE2_MTE1>(stage);
+-      copyL0A(tensorL0A, tileL1A);
++      if (preloadA) {
++        auto tileL1A = GetTile(tensorResidentA, tla::MakeCoord((uint32_t)0, k0), tla::MakeShape(mActual, QW4_TILE_K));
++        copyL0A(tensorL0A, tileL1A);
++      } else {
++        auto tileL1A =
++            GetTile(tensorL1A, tla::MakeCoord((uint32_t)0, (uint32_t)0), tla::MakeShape(mActual, QW4_TILE_K));
++        WaitFlag<HardEvent::MTE2_MTE1>(stage);
++        copyL0A(tensorL0A, tileL1A);
++        SetFlag<HardEvent::MTE1_MTE2>(stage);
++      }
+       copyL0B(tensorL0B, tileL1B);
+-      SetFlag<HardEvent::MTE1_MTE2>(stage);
+       SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
+       WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
+       const uint8_t unitFlag = k0 + QW4_TILE_K == K_ ? 0b11 : 0b10;
+@@ -366,7 +390,9 @@ class QwenW4GroupMatmulV310Cube {
+     }
+     for (uint32_t stage = 0; stage < QW4_CUBE_STAGES; ++stage) {
+       WaitFlag<HardEvent::M_MTE1>(stage);
+-      WaitFlag<HardEvent::MTE1_MTE2>(stage);
++      if (!preloadA) {
++        WaitFlag<HardEvent::MTE1_MTE2>(stage);
++      }
+     }
+     StoreAccumulator(l0C, n0, nActual);
+   }

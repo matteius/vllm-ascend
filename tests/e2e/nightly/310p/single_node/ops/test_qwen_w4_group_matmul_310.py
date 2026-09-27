@@ -327,7 +327,9 @@ def test_routed_compact_rows_cross_gather_and_cube_boundaries_on_replay(outputs,
     # changes. Exercise empty/singleton paths, 16-row UB flushes, Cube tails,
     # arbitrary gaps, different first owners and fully occupied scratch.
     generator = torch.Generator().manual_seed(129)
-    for phase, matches in enumerate([0, 1, 2, 3, 8, 15, 16, 17, 31, 32, 33, 65, 79, 80]):
+    # Return across the adjacent 64/65 sizes within a fixed-shape graph to
+    # expose stale compact-row geometry in candidate activation layouts.
+    for phase, matches in enumerate([0, 1, 2, 3, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 64, 79, 80]):
         order = torch.randperm(routes, generator=generator)
         ids = torch.full((routes,), -1, dtype=torch.int32)
         ids[order[:matches]] = phase % 3
@@ -427,14 +429,17 @@ def test_routed_complete_moe_matches_host_route_and_replays(tokens, nz):
     host = W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy()).npu()
     with torch.no_grad():
         for expert in range(7):
-            for projection in layer.projections:
-                values = make_inputs(1, 256, 256, seed=417 + expert)
+            # Load checkpoint names into both layouts: the routed layer has
+            # one packed gate/up bank while the host reference has two.
+            for index, projection in enumerate(("gate_proj", "up_proj", "down_proj")):
+                values = make_inputs(1, 256, 256, seed=417 + expert + index * 7)
                 for kind, value in zip(["weight", "weight_scale", "weight_offset"], values[1:]):
                     layer.load_projection(expert, projection, kind, value)
+                    host.load_projection(expert, projection, kind, value)
         for name in ["gate", "shared_gate_up", "shared_down", "shared_expert_gate"]:
             torch.manual_seed(910)
             getattr(layer, name).copy_((torch.randn_like(getattr(layer, name).cpu()) * 0.1).half())
-        host.load_state_dict(layer.state_dict())
+            getattr(host, name).copy_(getattr(layer, name))
         if nz:
             # Actual model post-load hook converts router/shared weights to
             # NZ. This exposed an uncapturable FP16->FP32 shared-weight Cast.

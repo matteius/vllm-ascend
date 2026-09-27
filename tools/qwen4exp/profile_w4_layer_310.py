@@ -9,6 +9,7 @@ use an external temperature watchdog when running this diagnostic.
 """
 
 import argparse
+import hashlib
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -125,6 +126,7 @@ def main():
                 comparison = timed_ms(lambda inputs=inputs: layer(inputs), args.iterations, args.repeats)
                 layer.device_routing = True
             replay = None
+            graph_output_sha256 = None
             if args.graph:
                 stream = torch.npu.Stream()
                 stream.wait_stream(torch.npu.current_stream())
@@ -137,7 +139,9 @@ def main():
                 with torch.npu.graph(graph, stream=stream):
                     captured = layer(inputs)
                 graph.replay()
-                torch.testing.assert_close(captured.cpu(), result, rtol=0.01, atol=0.003)
+                graph_result = captured.cpu()
+                torch.testing.assert_close(graph_result, result, rtol=0.01, atol=0.003)
+                graph_output_sha256 = hashlib.sha256(graph_result.numpy().tobytes()).hexdigest()
                 replay = timed_ms(graph.replay, args.iterations, args.repeats)
                 del graph, captured
             record = {
@@ -148,6 +152,9 @@ def main():
                 "collective": False,
                 "weights": "real_checkpoint",
                 "activations": "synthetic_seed_1024_std_0.1",
+                "input_sha256": hashlib.sha256(inputs.cpu().numpy().tobytes()).hexdigest(),
+                "output_sha256": hashlib.sha256(result.numpy().tobytes()).hexdigest(),
+                "graph_output_sha256": graph_output_sha256,
                 "production_nz_projections": args.graph,
                 "tokens": tokens,
                 "local_routes": selected.numel(),

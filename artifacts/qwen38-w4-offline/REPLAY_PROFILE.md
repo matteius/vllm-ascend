@@ -943,6 +943,82 @@ TP workers 3784185–3784188，host log
 `server-routed-mtp-mtp2-r10.log`。生产 W8 launcher
 SHA256 仍为 `ae81d75eec7516fc6f455a3a071e52410ba6c477c34e0114df647f4c125c77df`。
 
+## k=1 重测和 CPU affinity 对照
+
+gate/up 合并后再测 MTP k=1 / FULL `[1,2]`，其它设置不变。
+短三题 14.265 / 12.984 / 13.496，23.4k 三题
+14.063 / 13.283 / 13.035 tok/s，中位数 **13.496 / 13.283**。
+三题均为 512 tokens / finish=length；长题复用 23,168 prefix tokens，
+cold warmup TTFT 323.856 秒。三个真实 smoke 正确，two-token FULL
+runtime 计数可见，不是 eager 或无 MTP 的结果。
+
+W8 worker 启动日志及实际 affinity 为 `(0–5)/(8–13)/(16–21)/(24–29)`；
+W4 日志为 `CPU binding skipped: non-ARM CPU detected`，四个
+worker 原 mask 都是 `0–63`。在同一 W4 服务完成请求且空闲后，
+核对 API/engine/worker 父子关系，仅绑定四个 worker 的所有线程，
+rank0 共 87 线程、其它 ranks 各 86 线程；没有改 IRQ、W8 或 kernel。
+
+再次通过三个 smoke 后，同服务、不重启的 affinity 对照为：
+
+| case | unbound median tok/s | bound median tok/s | 变化 |
+| --- | --- | --- | --- |
+| short | 13.496 | 13.853 | +2.64% |
+| 23.4k | 13.283 | 13.781 | +3.75% |
+
+bound 短三题 14.675 / 13.572 / 13.853，长三题
+14.261 / 13.781 / 13.329。输出 SHA 与 acceptance 也变化，不能将
+整个差值都归因于 affinity；这是单次 A/B，并非统计显著性结论。
+`decode_s / drafted_delta` 粗略 step 代理由短 134–135 / 长 138–139
+降到 131–132 / 134–135 ms，不是 profiler 精确 step latency。
+**仍未达到 W8 19.073 / 18.091，未将此 host 特定绑定写入通用默认值。**
+
+证据在 `replay-r5/w4-mtp1-r2-{short,long}.jsonl` 和
+`w4-mtp1-affinity-r1-{short,long}.jsonl`，相邻 smoke 文件保留答案。
+host `mtp1-affinity-r1-applied.json` 保存旧/新 thread masks，
+`affinity-sequence-r1.log` 有最终完成标记。API 3868105 的这组对照
+已完整结束，确认 idle 和准确 PID tree 后正常停止，以做下一 kernel
+的隔离硬件验证；不再是运行中的服务。W8 launcher SHA256 未变。
+
+## 被拒绝的第十四个候选：整段 A 预加载到 L1
+
+将能放入剩余 L1 的完整 activation 预加载一次，替代每个 K=128
+tile 的 GM→L1 copy/event，保留原 reduction 次序、双 L0 和原
+大 M fallback。K=2560 的 resident/fallback 边界为 M=64/65。
+只修改 Qwen W4 的 tiled kernel；没有常驻 FP16/W8 shadow。
+
+独立 `ops-preload-a-r1` 构建成功，compact 和 candidate 各通过
+**170 个 NPU tests**（147.49 / 145.55 秒），覆盖 projection、所有
+byte/offset、changing ownership、64→65→64、NaN scratch、完整
+MoE 和共享 RoPE/合并 gate-up。旧 full-MoE 测试已修正为按 checkpoint
+gate/up/down 分别加载到两种布局，不再复制不兼容的 state_dict。
+
+真实 layer-0 / rank-0 partial、固定 seed 合成输入、无 collective，
+tokens 1/2/3/5/8，40 iterations × 5 trials；进程均绑定 CPU 0–5，
+按 baseline-A / candidate-A / candidate-B / baseline-B 测试。
+每种 shape 的输入、eager 输出和 graph 输出在四轮均 SHA256 相同。
+graph timing 合并每侧十次 trial 取中位数：
+
+| tokens | compact ms | preload-A ms | 变慢 |
+| --- | --- | --- | --- |
+| 1 | 0.467028 | 0.493831 | 5.74% |
+| 2 | 0.317500 | 0.329619 | 3.82% |
+| 3 | 2.150634 | 2.279928 | 6.01% |
+| 5 | 1.684382 | 1.781025 | 5.74% |
+| 8 | 4.081794 | 4.312513 | 5.65% |
+
+**正确但更慢，不进入服务默认路径。** 主 kernel source 保持已验证
+compact 版本；仅保留增强后的测试和 profile 工具输出 hash。
+候选 diff 在 `replay-r5/preload-a-rejected.patch`，完整 A-B-B-A 记录
+为 `layer-preload-a-r1-*.jsonl`，两份 `kernel-preload-a-r1-*-tests.log`
+保留测试证据。host 构建日志 `build-preload-a-r2.log`，group/routed
+binary SHA256 分别为
+`f0eb23d970156ae9a60c384cf268fc9a01c419b68898007767cd9fd979ac5790` /
+`8b86e3f6106c3045623e2e16fb21e1318523a3354494a36c5f48a6c1529957b3`。
+
+完成这些隔离测试后，启动 compact + MTP k=2 / FULL `[1,3]`
+的 affinity 对照。此时尚未得到该新整模型 benchmark 的结果；
+不可用上述 layer 测试代替整模型吞吐或质量评测。
+
 ## 复现与交接
 
 简短 runbook（仅已授权的隔离 host 环境，不替换 W8）：
