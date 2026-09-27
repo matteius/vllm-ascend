@@ -283,6 +283,16 @@ class TestNPUWorker(TestBase):
         with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
             self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), 12345)
 
+        cache_config.enable_prefix_caching = True
+        worker.model_runner.supports_prefix_mamba_state_tier = True
+        worker.model_runner.num_compact_mamba_blocks = 64
+        worker.model_runner.max_num_reqs = 2
+        with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
+            self.assertEqual(
+                worker._scale_kv_cache_memory_for_multi_group(12345), 12345 - 64 * mamba_spec.page_size_bytes
+            )
+            self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(1), 0)
+
     @unittest.skipIf(
         vllm_version_is("0.28.0"),
         "vLLM #51718 only changed the main planner",

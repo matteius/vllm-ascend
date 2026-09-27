@@ -16,6 +16,57 @@ from typing import Any
 import numpy as np
 import torch
 
+PREFIX_MAMBA_MIN_SLOTS = 64
+
+
+def prefix_mamba_slot_count(max_num_reqs: int, num_speculative_tokens: int) -> int:
+    """One shared pool: null slot plus both live windows of every request."""
+    if max_num_reqs < 1 or num_speculative_tokens < 0:
+        raise ValueError("Invalid compact Mamba request or speculation limit")
+    return max(PREFIX_MAMBA_MIN_SLOTS, 1 + max_num_reqs * 2 * (1 + num_speculative_tokens))
+
+
+def prefix_mamba_active_columns(
+    used_columns: Sequence[int],
+    computed_tokens: Sequence[int],
+    scheduled_tokens: Sequence[int],
+    block_size: int,
+    num_speculative_blocks: int,
+    previous_columns: Sequence[int] | None = None,
+) -> tuple[tuple[int, ...], ...]:
+    """Select each row's pre-copy sources and forward/postprocess destinations.
+
+    The previous running column need not equal floor(computed / block_size)
+    after speculative rejection. Protect its whole candidate window as well
+    as the current one, so temporal-state copy can select the accepted token.
+    All arguments are scheduler-side CPU metadata; no device synchronization.
+    """
+    num_reqs = len(used_columns)
+    if (
+        block_size <= 0
+        or num_speculative_blocks < 0
+        or len(computed_tokens) != num_reqs
+        or len(scheduled_tokens) != num_reqs
+        or (previous_columns is not None and len(previous_columns) != num_reqs)
+    ):
+        raise ValueError("Invalid per-request compact Mamba metadata")
+    rows = []
+    for row in range(num_reqs):
+        computed, scheduled, used = int(computed_tokens[row]), int(scheduled_tokens[row]), int(used_columns[row])
+        if computed < 0 or scheduled <= 0:
+            raise ValueError("Compact Mamba requires nonnegative progress and a scheduled token")
+        current = (computed + scheduled - 1) // block_size
+        if current >= used:
+            raise RuntimeError("Mamba destination block is missing from the scheduler table")
+        previous = int(previous_columns[row]) if previous_columns is not None else (computed - 1) // block_size
+        if previous < -1 or previous >= used:
+            raise RuntimeError("Mamba previous state is missing from the scheduler table")
+        needed = set(range(current, min(used, current + 1 + num_speculative_blocks)))
+        if previous >= 0:
+            needed.update(range(previous, min(used, previous + 1 + num_speculative_blocks)))
+        rows.append(tuple(sorted(needed)))
+    return tuple(rows)
+
 
 def get_mamba_postprocess_block_ids(input_batch: Any, group_id: int, req_idx: int) -> np.ndarray:
     """Use the same compact slots for align postprocess as for model forward.
@@ -107,30 +158,44 @@ class PrefixMambaStateTier:
     def remap_table(
         self, table: np.ndarray, used_columns: int, active_columns: Sequence[int] | None = None
     ) -> np.ndarray:
+        """Compatibility entry point when every request uses the same columns."""
+        columns = tuple(range(used_columns) if active_columns is None else active_columns)
+        return self.remap_rows(table, [used_columns] * len(table), [columns] * len(table))
+
+    def remap_rows(
+        self, table: np.ndarray, used_columns: Sequence[int], active_columns: Sequence[Sequence[int]]
+    ) -> np.ndarray:
         """Stage only the Mamba checkpoints read by this step.
 
         Align-mode kernels read the previous checkpoint and the destination
         block, not the entire sequence's historical block table. Historical
         entries can point at the null slot until a later prefix-cache hit
         makes one active again. The scheduler's CPU table remains unchanged.
+
+        Each row may have a different length/progress. Admit the UNION first:
+        admitting rows separately can evict the first request's live state
+        while staging the second request, silently aliasing their outputs.
         """
-        if active_columns is None:
-            active_columns = range(used_columns)
-        columns = tuple(sorted(set(active_columns)))
-        if not 0 <= used_columns <= table.shape[1] or any(not 0 <= col < used_columns for col in columns):
-            raise ValueError("Invalid active Mamba block-table window")
+        if table.ndim != 2 or len(used_columns) != len(table) or len(active_columns) != len(table):
+            raise ValueError("Invalid per-request Mamba block-table shape")
+        rows = [tuple(sorted(set(columns))) for columns in active_columns]
+        block_ids: set[int] = set()
+        for row, (used, columns) in enumerate(zip(used_columns, rows)):
+            if not 0 <= used <= table.shape[1] or any(not 0 <= col < used for col in columns):
+                raise ValueError("Invalid active Mamba block-table window")
+            block_ids.update(int(value) for value in table[row, list(columns)] if value > 0)
         mapped = np.zeros_like(table)
-        block_ids = {int(value) for value in np.unique(table[:, columns]) if value > 0}
         if len(block_ids) >= self.num_slots:
             raise RuntimeError(
                 f"Mamba prefix table references {len(block_ids)} states but has "
                 f"only {self.num_slots - 1} non-null NPU slots"
             )
         for block_id in sorted(block_ids):
-            slot = self._admit(block_id, block_ids)
-            # Compare against the immutable scheduler table: a mapped slot
-            # number must not be mistaken for another scheduler block ID.
-            mapped[table == block_id] = slot
+            self._admit(block_id, block_ids)
+        for row, columns in enumerate(rows):
+            for column in columns:
+                block_id = int(table[row, column])
+                mapped[row, column] = self._resident[block_id] if block_id > 0 else 0
         return mapped
 
     def slot_for(self, block_id: int) -> int:

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec, MLAAttentionSpec
@@ -545,7 +546,7 @@ def test_prefix_mamba_precopy_uses_slots_then_restores_scheduler_ids() -> None:
     tier = PrefixMambaStateTier([(states,)], 4)
     tier.remap_table(np.array([[0, 101, 102]], dtype=np.int32), 3)
     runner._prefix_mamba_tiers = {1: tier}
-    runner._prefix_mamba_active_columns = {1: (0, 1, 2)}
+    runner._prefix_mamba_active_columns = {1: ((0, 1, 2),)}
     original = ([17, 18, 19], [0, 101, 102])
     req_state = SimpleNamespace(block_ids=original)
     runner.requests = {"request": req_state}
@@ -640,10 +641,132 @@ def test_prefix_mamba_stages_cached_checkpoint_across_long_chunk() -> None:
 
     runner._remap_compact_mamba_block_tables(num_reqs=1, num_scheduled_tokens=np.array([3783]))
 
-    assert runner._prefix_mamba_active_columns == {1: (45, 53)}
+    assert runner._prefix_mamba_active_columns == {1: ((45, 53),)}
     assert torch.count_nonzero(staged_table).item() == 2
     assert staged_table[0, 45] != staged_table[0, 53]
     np.testing.assert_array_equal(raw_table, np.arange(1, 55, dtype=np.int32).reshape(1, -1))
+
+
+def test_multi_request_prefix_tier_allocates_one_shared_pool() -> None:
+    runner = object.__new__(NPUModelRunner310)
+    runner.device = torch.device("cpu")
+    runner.runner_only_attn_layers = set()
+    runner.max_num_reqs = 2
+    runner.supports_compact_mamba_state = True
+    runner.supports_prefix_mamba_state_tier = True
+    runner.num_compact_mamba_blocks = 64
+    spec = MambaSpec(block_size=128, shapes=((4, 8), (2, 4)), dtypes=(torch.float16, torch.float32))
+    name = "model.layers.0.linear_attn"
+    config = SimpleNamespace(
+        num_blocks=2048,
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[name])],
+        kv_cache_tensors=[SimpleNamespace(size=2048 * spec.page_size_bytes, layers=[name], shared_by=[name])],
+    )
+    states = runner._allocate_kv_cache_tensors(config)[name]
+    assert states[0].shape == (64, 4, 8)
+    assert states[1].shape == (64, 2, 4)
+    assert states[0].untyped_storage().nbytes() == 64 * spec.page_size_bytes
+    PrefixMambaStateTier([states], 64)  # Also validates the allocator/tier contract.
+
+
+@pytest.mark.parametrize("preempted", [None, {"preempted"}])
+def test_prefix_mamba_update_lifecycle_and_cow_ignore_padding(preempted) -> None:
+    runner = object.__new__(NPUModelRunner310)
+    states = torch.zeros((6, 2), dtype=torch.float16)
+    tier = PrefixMambaStateTier([(states,)], 6)
+    tier.remap_table(np.array([[101, 102, 103]], dtype=np.int32), 3)
+    states[tier.slot_for(101)].fill_(11)
+    states[tier.slot_for(102)].fill_(99)
+    states[tier.slot_for(103)].fill_(33)
+    runner._prefix_mamba_tiers = {1: tier}
+    runner.kv_caches = [(states,)]
+    runner._prefix_attention_copy_tensors = []
+    runner.kv_cache_config = SimpleNamespace(num_blocks=512)
+    runner._new_prefix_mamba_block_ids = MagicMock(return_value={1: {102}})
+    runner.mamba_state_idx = {key: 9 for key in ("finished", "resumed", "new", "preempted", "ongoing")}
+    runner.input_batch = SimpleNamespace(
+        num_reqs=2,
+        block_table=SimpleNamespace(
+            block_tables=[
+                SimpleNamespace(),
+                SimpleNamespace(
+                    num_blocks_per_row=np.array([1, 1]),
+                    block_table=SimpleNamespace(np=np.array([[102, 103], [101, 103]])),
+                ),
+            ]
+        ),
+    )
+    copies = [(101, 102), (999, 103)]  # 103 is stale row padding, not a copy target in this group.
+    output = SimpleNamespace(
+        kv_cache_block_copies=copies,
+        finished_req_ids={"finished"},
+        preempted_req_ids=preempted,
+        scheduled_new_reqs=[SimpleNamespace(req_id="new")],
+        scheduled_cached_reqs=SimpleNamespace(resumed_req_ids={"resumed"}),
+    )
+    with (
+        patch.object(NPUModelRunner, "_update_states", return_value="deferred"),
+        patch("vllm.v1.worker.utils.copy_kv_cache_blocks_inplace"),
+        patch("torch.npu.current_stream") as stream,
+    ):
+        assert runner._update_states(output) == "deferred"
+        stream.return_value.synchronize.assert_called_once()
+    assert output.kv_cache_block_copies is copies
+    assert runner.mamba_state_idx == ({"ongoing": 9} if preempted else {"ongoing": 9, "preempted": 9})
+    torch.testing.assert_close(states[tier.slot_for(102)], torch.full((2,), 11, dtype=torch.float16))
+    torch.testing.assert_close(states[tier.slot_for(103)], torch.full((2,), 33, dtype=torch.float16))
+
+
+def test_multi_request_remap_precopy_and_postprocess_follow_row_identity() -> None:
+    runner = object.__new__(NPUModelRunner310)
+    runner.device = torch.device("cpu")
+    runner.supports_compact_mamba_state = True
+    runner.supports_prefix_mamba_state_tier = True
+    states = torch.zeros((12, 2), dtype=torch.float16)
+    tier = PrefixMambaStateTier([(states,)], 12)
+    runner._prefix_mamba_tiers = {1: tier}
+    runner.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(),
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=512, num_speculative_blocks=2)),
+        ]
+    )
+    raw = np.stack([np.arange(101, 157), np.arange(201, 257)]).astype(np.int32)
+    table = SimpleNamespace(
+        is_mamba_group=True,
+        num_blocks_per_row=np.array([56, 4]),
+        block_table=SimpleNamespace(np=raw, gpu=torch.from_numpy(raw.copy())),
+    )
+    original = {"long": ([1], raw[0].tolist()), "short": ([2], raw[1, :4].tolist())}
+    runner.requests = {key: SimpleNamespace(block_ids=value) for key, value in original.items()}
+    runner.input_batch = SimpleNamespace(
+        req_ids=["long", "short"],
+        num_computed_tokens_cpu=np.array([23424, 512]),
+        block_table=SimpleNamespace(block_tables=[SimpleNamespace(is_mamba_group=False), table]),
+    )
+    runner.mamba_state_idx = {"long": 45, "short": 1}
+    runner._remap_compact_mamba_block_tables(2, np.array([3783, 3]))
+    assert runner._prefix_mamba_active_columns == {1: ((45, 46, 47, 53, 54, 55), (1, 2, 3))}
+    mapped = runner.input_batch._prefix_mamba_postprocess_tables[1].copy()
+    assert len(set(mapped[mapped > 0])) == 9
+    states[tier.slot_for(146)].fill_(11)
+    states[tier.slot_for(202)].fill_(22)
+    runner._stage_prefix_mamba_request_ids()
+    for row, req_id in enumerate(runner.input_batch.req_ids):
+        np.testing.assert_array_equal(runner.requests[req_id].block_ids[1], mapped[row, : len(original[req_id][1])])
+    runner._restore_prefix_mamba_request_ids()
+    assert all(runner.requests[key].block_ids is value for key, value in original.items())
+
+    # Input rows can be reordered without moving request-owned state slots.
+    runner.input_batch.req_ids.reverse()
+    runner.input_batch.num_computed_tokens_cpu = np.array([512, 23424])
+    table.block_table.np = raw[::-1].copy()
+    table.num_blocks_per_row = np.array([4, 56])
+    runner._remap_compact_mamba_block_tables(2, np.array([3, 3783]))
+    np.testing.assert_array_equal(runner.input_batch._prefix_mamba_postprocess_tables[1], mapped[::-1])
+    torch.testing.assert_close(states[tier.slot_for(146)], torch.full((2,), 11, dtype=torch.float16))
+    torch.testing.assert_close(states[tier.slot_for(202)], torch.full((2,), 22, dtype=torch.float16))
+    np.testing.assert_array_equal(raw, np.stack([np.arange(101, 157), np.arange(201, 257)]))
 
 
 class TestNPUModelRunner310(TestBase):

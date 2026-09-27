@@ -730,6 +730,7 @@ class NPUWorker(WorkerBase):
         )
         bytes_per_block = 0
         sum_pages = 0
+        compact_prefix_bytes = 0
         for group in kv_cache_groups:
             group_pages = 0
             for layer_name in group.layer_names:
@@ -741,7 +742,15 @@ class NPUWorker(WorkerBase):
                 group_pages += layer_spec.page_size_bytes
                 if not (compact_mamba_state and isinstance(layer_spec, MambaSpec)):
                     sum_pages += layer_spec.page_size_bytes
+                elif getattr(model_runner, "supports_prefix_mamba_state_tier", False):
+                    # Compact prefix states no longer scale with scheduler
+                    # blocks, but their one shared resident pool still costs
+                    # device memory. Reserve it before planning attention KV.
+                    compact_prefix_bytes += model_runner.num_compact_mamba_blocks * layer_spec.page_size_bytes
             bytes_per_block = max(bytes_per_block, group_pages)
+        if compact_prefix_bytes:
+            available_memory = max(0, available_memory - compact_prefix_bytes)
+            logger.info("Reserved %d bytes for the shared compact Mamba prefix-state pool.", compact_prefix_bytes)
         if bytes_per_block > 0 and sum_pages > bytes_per_block:
             scale = bytes_per_block / sum_pages
             logger.info(

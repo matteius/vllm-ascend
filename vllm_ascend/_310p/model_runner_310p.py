@@ -50,7 +50,11 @@ from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBloc
 from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
 from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
-from vllm_ascend._310p.prefix_mamba_state import PrefixMambaStateTier
+from vllm_ascend._310p.prefix_mamba_state import (
+    PrefixMambaStateTier,
+    prefix_mamba_active_columns,
+    prefix_mamba_slot_count,
+)
 from vllm_ascend._310p.qwen4exp_mtp import (
     is_qwen4exp_mtp_config,
     stage_ple_history,
@@ -74,7 +78,6 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
-_PREFIX_MAMBA_NPU_SLOTS = 64
 
 
 def _iter_kv_cache_tensors(kv_caches: Iterable[Any]) -> Iterator[torch.Tensor]:
@@ -225,10 +228,10 @@ class NPUModelRunner310(NPUModelRunner):
         # so GDN allocation is independent of context length. The native GDN
         # speculative kernel writes one state per candidate token and selects
         # the accepted state on the next step; its two slots must stay distinct.
-        # Multi-request or prefix-cached compaction needs persistent mapping.
+        # Prefix-cached requests use a shared persistent ID-to-slot mapping,
+        # not row-indexed slots: input rows can move when another request ends.
         self.supports_prefix_mamba_state_tier = (
-            self.max_num_reqs == 1
-            and self.cache_config.enable_prefix_caching
+            self.cache_config.enable_prefix_caching
             and self.cache_config.mamba_cache_mode == "align"
             and getattr(self.model_config.hf_text_config, "model_type", None) == "qwen4_exp_text"
             and (self.speculative_config is None or self._qwen4exp_mtp_ple)
@@ -239,7 +242,10 @@ class NPUModelRunner310(NPUModelRunner):
             and (self.speculative_config is None or self._qwen4exp_mtp_ple)
         )
         self.num_compact_mamba_blocks = (
-            _PREFIX_MAMBA_NPU_SLOTS
+            prefix_mamba_slot_count(
+                self.max_num_reqs,
+                self.speculative_config.num_speculative_tokens if self._qwen4exp_mtp_ple else 0,
+            )
             if self.supports_prefix_mamba_state_tier
             else (1 + self.speculative_config.num_speculative_tokens if self._qwen4exp_mtp_ple else 1)
         )
@@ -328,12 +334,26 @@ class NPUModelRunner310(NPUModelRunner):
             if copied_nested_caches:
                 scheduler_output.kv_cache_block_copies = block_copies
         if prefix_tiers:
+            # Preprocess also clears these later, but remapping runs first.
+            # Resumed/new requests must not select an old running column.
+            reset_ids = set(scheduler_output.finished_req_ids)
+            reset_ids.update(getattr(scheduler_output, "preempted_req_ids", None) or ())
+            reset_ids.update(scheduler_output.scheduled_cached_reqs.resumed_req_ids)
+            reset_ids.update(req.req_id for req in scheduler_output.scheduled_new_reqs)
+            state_indices = getattr(self, "mamba_state_idx", {})
+            for req_id in reset_ids:
+                state_indices.pop(req_id, None)
             multi_group_table = cast(MultiGroupBlockTable310, self.input_batch.block_table)
             for group_idx, tier in prefix_tiers.items():
                 tier.invalidate(fresh_mamba_ids.get(group_idx, ()))
                 if block_copies:
                     block_table = multi_group_table.block_tables[group_idx]
-                    active_ids = set(np.unique(block_table.block_table.np[: self.input_batch.num_reqs]))
+                    active_ids = {
+                        int(block_id)
+                        for row in range(self.input_batch.num_reqs)
+                        for block_id in block_table.block_table.np[row, : block_table.num_blocks_per_row[row]]
+                        if block_id > 0
+                    }
                     active_ids.update(fresh_mamba_ids.get(group_idx, ()))
                     for source_id, target_id in block_copies:
                         if target_id in active_ids:
@@ -510,25 +530,26 @@ class NPUModelRunner310(NPUModelRunner):
             if block_table.is_mamba_group:
                 if self.supports_prefix_mamba_state_tier:
                     tier = self._prefix_mamba_tiers[group_idx]
-                    used_columns = int(max(block_table.num_blocks_per_row[:num_reqs], default=0))
-                    active_columns: tuple[int, ...] = tuple(range(used_columns))
+                    used_columns = block_table.num_blocks_per_row[:num_reqs]
+                    active_columns = tuple(tuple(range(int(used))) for used in used_columns)
                     if num_scheduled_tokens is not None:
                         spec = self.kv_cache_config.kv_cache_groups[group_idx].kv_cache_spec
-                        block_size = spec.block_size
-                        computed = int(self.input_batch.num_computed_tokens_cpu[0])
-                        scheduled = int(num_scheduled_tokens[0])
-                        # The align-mode pre-copy may read the checkpoint from
-                        # before this chunk; forward reads the destination at
-                        # its end. It never reads the intervening block IDs.
-                        current_column = (computed + scheduled - 1) // block_size
-                        if current_column >= used_columns:
-                            raise RuntimeError("Mamba destination block is missing from the scheduler table")
-                        previous_column = (computed - 1) // block_size if computed else current_column
-                        needed_columns = set(range(current_column, current_column + 1 + spec.num_speculative_blocks))
-                        needed_columns.add(previous_column)
-                        active_columns = tuple(col for col in sorted(needed_columns) if col < used_columns)
+                        computed = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                        previous_columns = (computed.astype(np.int64) - 1) // spec.block_size
+                        # Use request identity, never the previous batch row.
+                        state_indices = getattr(self, "mamba_state_idx", {})
+                        for row, req_id in enumerate(getattr(self.input_batch, "req_ids", ())):
+                            previous_columns[row] = state_indices.get(req_id, int(previous_columns[row]))
+                        active_columns = prefix_mamba_active_columns(
+                            used_columns,
+                            computed,
+                            num_scheduled_tokens,
+                            spec.block_size,
+                            spec.num_speculative_blocks,
+                            previous_columns,
+                        )
                     self._prefix_mamba_active_columns[group_idx] = active_columns
-                    mapped = tier.remap_table(block_table.block_table.np[:num_reqs], used_columns, active_columns)
+                    mapped = tier.remap_rows(block_table.block_table.np[:num_reqs], used_columns, active_columns)
                     mapped_tables[group_idx] = mapped
                     block_table.block_table.gpu[:num_reqs].copy_(
                         torch.as_tensor(mapped, device=self.device), non_blocking=True
@@ -560,7 +581,7 @@ class NPUModelRunner310(NPUModelRunner):
         self._prefix_raw_req_block_ids = {}
         prefix_tiers = getattr(self, "_prefix_mamba_tiers", {})
         block_tables = cast(MultiGroupBlockTable310, self.input_batch.block_table).block_tables
-        for req_id in self.input_batch.req_ids:
+        for row, req_id in enumerate(self.input_batch.req_ids):
             req_state = self.requests[req_id]
             raw_ids = req_state.block_ids
             mapped = list(raw_ids)
@@ -569,7 +590,7 @@ class NPUModelRunner310(NPUModelRunner):
                     continue
                 if tier := prefix_tiers.get(group_idx):
                     mapped_ids = [0] * len(raw_ids[group_idx])
-                    for column in self._prefix_mamba_active_columns[group_idx]:
+                    for column in self._prefix_mamba_active_columns[group_idx][row]:
                         mapped_ids[column] = tier.slot_for(raw_ids[group_idx][column])
                 else:
                     mapped_ids = [column % self.num_compact_mamba_blocks for column in range(len(raw_ids[group_idx]))]
@@ -1179,8 +1200,14 @@ class NPUModelRunner310(NPUModelRunner):
                     # MambaSpec.page_size_bytes is per-layer, so num_blocks times
                     # it is the per-layer byte count (matching v0.28.0's size).
                     compact_state = self.supports_compact_mamba_state
+                    # The prefix tier already sizes one shared pool for all
+                    # requests. Multiplying it by batch size both overallocates
+                    # and violates PrefixMambaStateTier's slot-count contract.
+                    compact_slots = self.num_compact_mamba_blocks if compact_state else 0
+                    if compact_state and not self.supports_prefix_mamba_state_tier:
+                        compact_slots *= self.max_num_reqs
                     per_layer_size = (
-                        self.max_num_reqs * self.num_compact_mamba_blocks * cache_spec.page_size_bytes
+                        compact_slots * cache_spec.page_size_bytes
                         if compact_state
                         else (
                             kv_cache_tensor.size
