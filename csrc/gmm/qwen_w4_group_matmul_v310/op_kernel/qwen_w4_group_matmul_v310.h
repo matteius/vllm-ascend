@@ -64,6 +64,7 @@ constexpr uint32_t QW4_L1_ACTIVATION_BYTES = QW4_CUBE_M * QW4_TILE_K * sizeof(ha
 // Per packed byte: uint8 input, FP16 input, int16 cast, two FP16 outputs.
 constexpr uint32_t QW4_TILED_BYTES_PER_PACKED = 9;
 constexpr uint32_t QW4_BUFFER_ALIGNMENT = 512;
+constexpr uint32_t QW4_DMA_BLOCK_BYTES = 32;
 constexpr uint32_t QW4_HALF_VECTOR_ELEMENTS = 128;
 constexpr uint32_t QW4_VECTOR_BLOCKS = 8;
 constexpr uint32_t QW4_K_FRACTALS_PER_TILE = QW4_TILE_K / QW4_FRACTAL_SIZE;
@@ -163,17 +164,25 @@ class QwenW4GroupMatmulV310Cube {
     coreNzBase_ = static_cast<int64_t>(logicalTile) * QW4_TILE_N * K_;
   }
 
-  // Reuse this resource for peer routes too. Creating a second TPipe while
-  // CATLASS owns the first one would reset the live buffer/event allocation.
-  __aicore__ inline void ZeroOutputTile(GM_ADDR output, int64_t outputOffset) {
+  // One persistent block owns this N tile across all routes. Initialize
+  // every row once, then let local experts overwrite their rows. This also
+  // erases local->peer graph replays without draining the pipe per peer.
+  // Host validation bounds rows to 80: the zero staging needs at most 5 KiB.
+  // Reuse CATLASS's resource; a second TPipe would reset its allocation.
+  __aicore__ inline void ZeroOutputRows(GM_ADDR output, uint32_t rows, int64_t columns, uint32_t tile) {
     auto zero = resource.ubBuf.template GetBufferByByte<half>(0);
     PipeBarrier<PIPE_ALL>();
-    Duplicate(zero, static_cast<half>(0), QW4_TILE_N);
+    Duplicate(zero, static_cast<half>(0), rows * QW4_TILE_N);
     SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
     WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
     GlobalTensor<half> destination;
     destination.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(output));
-    DataCopy(destination[outputOffset], zero, QW4_TILE_N);
+    DataCopyParams toGm;
+    toGm.blockCount = rows;
+    toGm.blockLen = QW4_TILE_N * sizeof(half) / QW4_DMA_BLOCK_BYTES;
+    toGm.srcStride = 0;
+    toGm.dstStride = (columns - QW4_TILE_N) * sizeof(half) / QW4_DMA_BLOCK_BYTES;
+    DataCopy(destination[tile * QW4_TILE_N], zero, toGm);
     SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
     WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
     PipeBarrier<PIPE_ALL>();

@@ -271,7 +271,7 @@ def test_routed_graph_changes_experts_in_both_directions(routes, outputs, inputs
         )
 
 
-@pytest.mark.parametrize("routes", [2, 3, 19, 20, 21, 30, 50, 80])
+@pytest.mark.parametrize("routes", [1, 2, 3, 19, 20, 21, 30, 50, 80])
 @pytest.mark.parametrize("outputs,inputs", [(128, 256), (640, 2560), (2560, 640)])
 def test_routed_reuse_owner_changes_on_graph_replay(routes, outputs, inputs):
     values, canonical = routed_values(routes, outputs, inputs)
@@ -287,6 +287,8 @@ def test_routed_reuse_owner_changes_on_graph_replay(routes, outputs, inputs):
     with torch.npu.graph(graph, stream=stream):
         captured = routed_kernel(*device_values)
     # All duplicates, a later first owner, no local rows, and mixed owners.
+    # Poison the output before every replay: batched strided zeroing must
+    # cover every peer tile, including a single row and the maximum batch.
     # Row activations differ, so copying the owner's result to peers is wrong.
     for phase in range(5):
         ids = torch.full((routes,), 2, dtype=torch.int32)
@@ -299,8 +301,11 @@ def test_routed_reuse_owner_changes_on_graph_replay(routes, outputs, inputs):
         elif phase == 4:
             ids[0], ids[-1] = 0, 1
         device_values[-1].copy_(ids)
+        captured.fill_(float("nan"))
         graph.replay()
-        torch.testing.assert_close(captured.cpu(), routed_reference(values[0], canonical, ids), rtol=0.005, atol=0.003)
+        actual = captured.cpu()
+        torch.testing.assert_close(actual, routed_reference(values[0], canonical, ids), rtol=0.005, atol=0.003)
+        assert (actual[(ids < 0) | (ids >= 3)] == 0).all()
 
 
 @pytest.mark.parametrize("bad", ["route_limit", "ids_dtype", "ids_shape", "bank_shape", "scale_shape", "noncontiguous"])

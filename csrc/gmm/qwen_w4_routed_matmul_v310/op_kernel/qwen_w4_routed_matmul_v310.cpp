@@ -22,11 +22,11 @@ extern "C" __global__ __aicore__ void qwen_w4_routed_matmul_v310(GM_ADDR x, GM_A
   ids.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(expert_ids));
   NsQwenW4::QwenW4GroupMatmulV310Cube op;
   GM_ADDR user = AscendC::GetUserWorkspace(workspace);
+  op.ZeroOutputRows(y, td->numRows, n, tile);
   for (uint32_t route = 0; route < td->numRows; ++route) {
     const int32_t expert = ids.GetValue(route);
-    // Always overwrite peer-owned rows, including local->peer replays.
+    // Peer rows were cleared in one strided store before any local output.
     if (expert < 0 || expert >= td->numExperts) {
-      op.ZeroOutputTile(y, route * n + tile * NsQwenW4::QW4_TILE_N);
       continue;
     }
     bool reuse = false;

@@ -97,19 +97,33 @@ Short coding is 14.207/11.895/12.470 tok/s, median **12.470**, up **4.16%**
 from the previous k=2 median of 11.972. All requests completed 512 tokens;
 drafted/accepted=376/323,446/289,426/299. Only the first output hash matches
 the older run, and acceptance also varies slightly, so this is not a pure
-kernel causal estimate. The 23.4k-context run is active. This still misses
+kernel causal estimate. The 23.4k-context run completed at
+10.483/9.283/9.147 tok/s (median 9.283), with all three producing 512 tokens
+and reusing 23,168 prefix tokens. Cold TTFT was 359.882 s. This is below
+the earlier k=1 median of 11.052; do not extrapolate the short k=2 advantage
+to longer contexts. Kernel and k both differ from that k=1 run. This still misses
 the measured W8 baseline; counting's 15.373 tok/s is not coding throughput.
 Canonical W4 and the shared W8/GLM helper remain unchanged. The existing GM
 workspace allocation is deliberately retained for this first execution-path
 A/B, so allocator memory/capacity savings are not yet claimed.
 
-Another bounded follow-up is peer-output initialization: each persistent N
-tile currently calls `ZeroOutputTile` separately for every remote expert row,
-with a vector fill, GM store and pipeline drains each time. Since one block
-owns all route rows for that N tile, a single strided zero-fill of those rows
-before local expert work could replace the repeated clears. This must retain
-local→peer graph-replay correctness and order zero stores before local output
-stores. It is a source-level hypothesis only, not implemented or benchmarked.
+The batched peer-output initialization candidate is now implemented in the
+isolated `ops-zero-r1` vendor. One strided zero-fill per persistent N tile
+replaces per-peer vector fills/stores/drains; local experts overwrite their
+rows after the initialization is drained. It retains the existing bounded
+workspace and uses at most 5 KiB of the same UB, not a new allocation.
+143 NPU tests pass (108.73 s), including NaN-poisoned replay outputs and
+exact peer-zero checks; 37 CPU/build tests pass (4.82 s). Matched real-layer
+1/2/3/5/8-token graph medians are 0.528/0.334/2.390/1.865/5.942 ms.
+Two-token latency is 14.35% lower than L1; three-token is 1.80% lower;
+single-token is 0.75% higher. Full-model `mtp2-r3` passes three complete
+correct smokes with k=2 and verified three-token FULL replay. The three
+512-token short coding requests completed at 14.288/11.902/12.552 tok/s,
+median 12.552, only 0.66% above L1's 12.470. All output hashes and acceptance
+counts differ; this does not establish a statistically significant or clean
+causal throughput gain. The long-context run is still running. W8 remains unchanged.
+Before choosing a larger k for deployment, measure k=1 with the same latest
+kernel at long context: the existing k=2/k=1 comparison also changes kernels.
 
 ## Acceptance criteria
 

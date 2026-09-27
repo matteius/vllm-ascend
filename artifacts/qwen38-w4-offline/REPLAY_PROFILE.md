@@ -264,8 +264,58 @@ model-load 仍为 19.3821 GiB/rank，capture 0.38 GiB。
 第三题从 42.682 降到 40.978 s。三题均改善，但小样本不是统计显著性证明。
 
 证据为 `http-routed-mtp-smoke-mtp2-r2.jsonl`、`w4-mtp2-r2-short.jsonl`。
-约 23.4k 的长 benchmark 在短测试完成后自动开始；仍在执行，不以单层
-或 counting 数据宣称达到生产 W8 的 19.073/18.091 tok/s。
+约 23.4k 的长 benchmark 已全部完成：**10.483 / 9.283 / 9.147 tok/s**，
+中位数 **9.283 tok/s**，三题都完成 512 tokens、命中 23,168 prefix tokens。
+drafted/accepted 为 380/321、426/298、432/297；接受率
+84.47% / 69.95% / 68.75%。冷 TTFT 为 359.882 s；热 TTFT 为
+4.622 / 4.653 / 5.184 s。原始证据 `w4-mtp2-r2-long.jsonl`。
+该组合低于旧 k=1 的 11.052 tok/s，不能将短 prompt 的 k=2 优势推广到
+长窗口。这里同时改变了 kernel 与 k，不将差异单独归因于 L1。
+不以单层或 counting 数据宣称达到生产 W8 的 19.073/18.091 tok/s。
+
+## 第六个候选：批量清零 peer 输出
+
+`ops-zero-r1` 保留 L1 数学路径，只改 routed 输出初始化：每个 persistent
+N tile 的 block 先在 UB 准备 `[R,32]` 的零，再通过一次 strided UB→GM
+copy 清零该 tile 的所有 route 行，最后由本地专家覆盖所属行。host 限制
+R≤80，临时零 buffer 最大 5 KiB，与原 CATLASS UB 复用，不新增分配。
+MTE3 完成后才复用 UB / 写入 local outputs；不同 blocks 的 N tile 不重叠。
+peer 分支不再每行执行 Duplicate、store 和 pipeline drain。
+
+回归新增 R=1 的三种尺寸，并在每次 graph replay 前用 NaN 污染输出，
+要求本地输出数值正确、peer 输出逐元素精确为零。覆盖 all-local、all-peer、
+mixed、owner 改变和 R=80 上限。**143 NPU tests passed / 108.73 s**；
+**37 CPU/build tests passed / 4.82 s**。group binary 与 L1 完全相同；
+routed binary SHA256 为：
+
+```text
+47f845c1129a24814b02cc489e72e9b72feda56c94e9779ed6975938ae63bc48
+```
+
+真实 layer0、同一 `[1,2,3,5,8]` input 顺序的 replay 数值检查通过。
+allocator allocated/reserved 与 L1 各对应形状完全相同。
+原始证据 `layer-zero-r1.jsonl`，下面不是整模型速度：
+
+| tokens | L1-r1 ms | zero-r1 ms | latency 降低 |
+| --- | ---: | ---: | ---: |
+| 1 | 0.524 | 0.528 | -0.75% |
+| 2 | 0.390 | 0.334 | 14.35% |
+| 3 | 2.434 | 2.390 | 1.80% |
+| 5 | 1.956 | 1.865 | 4.65% |
+| 8 | 6.133 | 5.942 | 3.11% |
+
+整模型 label `mtp2-r3` 使用相同 MTP k=2 / FULL `[1,3]` 配置，
+三个完整 smoke 已正确结束，counting 为 15.687 tok/s，不作 coding
+速度替代。runtime 表显示三-token `FULL` 重放，drafted/accepted 计数
+递增，model-load 仍为 19.3821 GiB/rank、capture 0.38 GiB。
+原始证据 `http-routed-mtp-smoke-mtp2-r3.jsonl`。
+同协议短 coding 完成：**14.288 / 11.902 / 12.552 tok/s**，中位数
+**12.552**，比 L1 的 12.470 高 **0.66%**；全部正常完成 512 tokens。
+drafted/accepted 为 382/321、454/284、430/296，接受率为
+84.03% / 62.56% / 68.84%。三题输出 SHA 均与旧样本不同，不能把很小的
+中位数差异当成统计显著的整模型提速，也不能据此宣称 15 tok/s coding。
+短证据 `w4-mtp2-r3-short.jsonl`；约 23.4k 长测量仍在执行。
+构建 `build-zero-r1.log`；回归 `kernel-zero-r1-tests.log`；W8 环境未替换。
 
 ## 复现与交接
 
@@ -294,6 +344,11 @@ bash qwen38-w4-mtp-short-benchmark.sh mtp2-r1
 bash qwen38-w4-server-routed-check-r1.sh mtp2-r2 \
   /srv/ai/src/qwen38-w4-operator-build-r1/ops-l1-r1/vendors/qwen_w4_probe_transformer 2
 bash qwen38-w4-mtp-short-benchmark.sh mtp2-r2
+
+# 批量清零候选；143 项 NPU tests / layer parity 后才启动：
+bash qwen38-w4-server-routed-check-r1.sh mtp2-r3 \
+  /srv/ai/src/qwen38-w4-operator-build-r1/ops-zero-r1/vendors/qwen_w4_probe_transformer 2
+bash qwen38-w4-mtp-short-benchmark.sh mtp2-r3
 ```
 
 服务配置见本页开头和 tutorial，仍为 :8002 / TP4 / EP /
@@ -319,6 +374,10 @@ imports 等。自动格式修改只留在临时快照，没有污染任务 workt
 - rank0 有 384 个 AI_CPU `Cast`，八步共 60.698 ms（约 7.587 ms/step）；
   结合相邻 RoPE operations 和源码，优先检查整数 positions 的重复转换及
   Q/K/indexer 的频率与 sin/cos 重算。当前是归因线索，不是已验证加速。
+  `project_qk` 的 Q/K 与 `model.py` 的 index-query 使用相同 rotary 参数
+  和 positions，可考虑在一次 forward 内共享 compute-dtype 的表；index-key
+  的压缩组位置不同，不能直接复用 query 表。保留 CPU FP64、NPU FP32、
+  MRoPE 三轴和 graph replay 的动态 positions，不能缓存旧请求的表。
 - `trans_TransData_10` 恰每步一次、约 2.311 ms；输入为 FP16
   `FRACTAL_Z [4,640,16,16]`，输出为 `[2560,1,16,16]`，前后是
   `[10240,1,1,4]` depthwise filters 和 `Conv2D3`，不是大 lm_head 权重搬运。
