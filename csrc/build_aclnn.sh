@@ -271,6 +271,7 @@ if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
         "qwen_w4_routed_matmul_v310"
         "qwen_w4_grouped_matmul_v310"
         "qwen_w4_a8_int4_matmul_v310"
+        "qwen_w4_a8_pack_v310"
         "rms_norm_dynamic_quant"
         "add_rms_norm_dynamic_quant"
     )

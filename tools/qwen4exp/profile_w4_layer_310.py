@@ -34,6 +34,8 @@ from vllm_ascend.utils import enable_custom_op
 def load_layer(model, layer_number, rank, tp_size, backend):
     config = json.loads((model / "config.json").read_text())["text_config"]
     config["ascend_expert_quantization"]["backend"] = backend
+    if backend == "cube_310_int4_a8":
+        config["ascend_expert_quantization"]["activation_quantization"] = "int8_per_group"
     layer = W4SparseMoE(
         config=SimpleNamespace(**config), dtype_policy=Qwen4ExpDtypePolicy(), expert_sharding=(rank, tp_size)
     )

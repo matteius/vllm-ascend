@@ -9,6 +9,8 @@ TILING_DATA_FIELD_DEF(int64_t, numRows);
 TILING_DATA_FIELD_DEF(int64_t, numExperts);
 TILING_DATA_FIELD_DEF(int64_t, nDim);
 TILING_DATA_FIELD_DEF(int64_t, kDim);
+TILING_DATA_FIELD_DEF(int64_t, metadataLanes);
+TILING_DATA_FIELD_DEF(int64_t, routed);
 END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(QwenW4A8Int4MatmulV310, QwenW4A8Int4MatmulTilingData)
 }  // namespace optiling

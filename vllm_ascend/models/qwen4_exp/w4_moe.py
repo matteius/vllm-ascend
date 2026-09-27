@@ -18,7 +18,7 @@ from torch import nn
 from .dtype_policy import ASCEND_QWEN4EXP_DTYPE_POLICY, Qwen4ExpDtypePolicy
 from .grouped_expert_dispatch import build_grouped_expert_dispatch
 from .moe import route_topk
-from .w4a8_int4 import NATIVE_INT4_BACKEND, pack_native_metadata, pack_native_weight, quantize_activation_limbs
+from .w4a8_int4 import NATIVE_INT4_BACKEND, pack_activation_device, pack_native_metadata, pack_native_weight
 from .weight_mapping import local_expert_range
 
 FORMAT = "qwen4exp_w4a16_group_v1"
@@ -62,6 +62,11 @@ def w4_config(config: object) -> dict | None:
     backend = metadata.get("backend")
     if backend not in ("eager_dequant", *CUBE_BACKENDS):
         raise ValueError(f"W4 backend must be eager_dequant or one of {CUBE_BACKENDS}")
+    activation = metadata.get("activation_quantization", "float16")
+    if activation not in ("float16", "int8_per_group"):
+        raise ValueError("unsupported W4 activation_quantization policy")
+    if backend == NATIVE_INT4_BACKEND and activation != "int8_per_group":
+        raise ValueError("native INT4 requires explicit activation_quantization=int8_per_group permission")
     group = metadata.get("group_size")
     if type(group) is not int or group <= 0 or group % 2:
         raise ValueError("W4 group_size must be a positive even integer")
@@ -162,6 +167,10 @@ class PackedExpertBank(nn.Module):
         return F.linear(inputs, weight.to(inputs.dtype))
 
     def routed_linear(self, inputs: torch.Tensor, expert_ids: torch.Tensor) -> torch.Tensor:
+        if self.backend == NATIVE_INT4_BACKEND:
+            if inputs.device.type != "npu":
+                raise ValueError("native INT4 requires NPU inputs")
+            return self.native_linear(pack_activation_device(inputs), expert_ids)
         if self.backend not in ("cube_310_routed", "cube_310_grouped") or inputs.device.type != "npu":
             raise ValueError("W4 routed projection requires NPU inputs and cube_310_routed")
         if not hasattr(torch.ops._C_ascend, "npu_qwen_w4_routed_matmul_310"):
@@ -179,26 +188,23 @@ class PackedExpertBank(nn.Module):
         if self.backend == NATIVE_INT4_BACKEND:
             if inputs.device.type != "npu":
                 raise ValueError("native INT4 requires NPU inputs")
-            if not hasattr(torch.ops._C_ascend, "npu_qwen_w4_a8_int4_matmul_310"):
-                raise RuntimeError("native INT4 requires the rebuilt custom operator; refusing silent fallback")
-            low, high, activation_scale, activation_sum = quantize_activation_limbs(inputs)
-            return torch.ops._C_ascend.npu_qwen_w4_a8_int4_matmul_310(
-                low,
-                high,
-                activation_scale,
-                activation_sum,
-                self.weight,
-                self.weight_scale,
-                self.weight_offset,
-                self.weight_sum,
-                group_ends,
-            )
+            return self.native_linear(pack_activation_device(inputs), group_ends)
         if self.backend != "cube_310_grouped" or inputs.device.type != "npu":
             raise ValueError("W4 grouped projection requires NPU inputs and cube_310_grouped")
         if not hasattr(torch.ops._C_ascend, "npu_qwen_w4_grouped_matmul_310"):
             raise RuntimeError("W4 grouped projection requires the rebuilt custom operator; refusing silent fallback")
         return torch.ops._C_ascend.npu_qwen_w4_grouped_matmul_310(
             inputs, self.weight, self.weight_scale, self.weight_offset, group_ends
+        )
+
+    def native_linear(self, prepared: tuple[torch.Tensor, ...], group_ends: torch.Tensor) -> torch.Tensor:
+        """Consume activations packed once and shared across expert routes."""
+        if self.backend != NATIVE_INT4_BACKEND:
+            raise ValueError("packed activation inputs require native INT4")
+        if not hasattr(torch.ops._C_ascend, "npu_qwen_w4_a8_int4_matmul_310"):
+            raise RuntimeError("native INT4 requires the rebuilt custom operator; refusing silent fallback")
+        return torch.ops._C_ascend.npu_qwen_w4_a8_int4_matmul_310(
+            *prepared, self.weight, self.weight_scale, self.weight_offset, self.weight_sum, group_ends
         )
 
 
@@ -323,7 +329,7 @@ class W4SparseMoE(nn.Module):
             renormalize=self.renormalize,
             routed_scaling_factor=self.routed_scaling_factor,
         )
-        if self.device_routing and not self.native_int4 and block_input.shape[0] * self.top_k <= MAX_CUBE_ROUTES:
+        if self.device_routing and block_input.shape[0] * self.top_k <= MAX_CUBE_ROUTES:
             result = self._forward_routed(block_input, weights, ids)
         elif self.grouped_routing:
             result = self._forward_grouped(block_input, weights, ids)
@@ -399,11 +405,19 @@ class W4SparseMoE(nn.Module):
                 expert_offset=self.expert_offset,
                 weight_dtype=self.compute_dtype,
             )
-            inputs = inputs.index_select(0, dispatch.token_indices.index_select(0, dispatch.order)).contiguous()
+            sorted_tokens = dispatch.token_indices.index_select(0, dispatch.order)
             group_ends = dispatch.group_list.contiguous()
-            gate, up = (
-                self.projections["gate_up_proj"].grouped_linear(inputs, group_ends).to(self.compute_dtype).chunk(2, -1)
-            )
+            gate_up_bank = self.projections["gate_up_proj"]
+            if self.native_int4 and tokens * self.top_k > MAX_CUBE_ROUTES:
+                # Quantization belongs to the token, not its top-k copies.
+                # Share it across prefill routes; small decode avoids four
+                # gather launches because its packing work is already tiny.
+                prepared = tuple(value.index_select(0, sorted_tokens) for value in pack_activation_device(inputs))
+                projected = gate_up_bank.native_linear(prepared, group_ends)
+            else:
+                inputs = inputs.index_select(0, sorted_tokens).contiguous()
+                projected = gate_up_bank.grouped_linear(inputs, group_ends)
+            gate, up = projected.to(self.compute_dtype).chunk(2, -1)
             activation = (F.silu(gate) * up).to(self.params_dtype)
             output = self.projections["down_proj"].grouped_linear(activation, group_ends).to(self.compute_dtype)
             output *= dispatch.route_weights.index_select(0, dispatch.order)

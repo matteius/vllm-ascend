@@ -1,0 +1,14 @@
+{
+  "operator_package": "ops-delivery",
+  "operator_sha256": {
+    "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_3a644bf0930547c10e04e17d2ef17784.o": "418023e8abe0b1dfa5f6b73c3e867edad51688b24b4075e50a6fd3b915480972",
+    "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_f445ca91b09a2d95f71de7992df42bfd.o": "053a008ed90a06881fd4bd8c03cd0af56112878bc84147587f3f7a6b187b56d3",
+    "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_pack_v310/QwenW4A8PackV310_27bb22b665b89060a6ab8d99f12c3b1f.o": "530aa41c47d00ba0ba9211a746d0ffa815d140fb7926315ece233190f6679cd8"
+  },
+  "runtime_source_sha256": {
+    "vllm_ascend/models/qwen4_exp/model.py": "23b4d592aa2cfe5914397b9a4ba1fa670c41707e0d763c578b631ce8588a0ba5",
+    "vllm_ascend/models/qwen4_exp/w4_moe.py": "d6d8d8ceec303ed3c858b7406c4f3e1f26d70418393e0f4c87d179aad109814d",
+    "vllm_ascend/models/qwen4_exp/w4_backend_policy.py": "356a4553d93bca46b3fd94d77953b54d7e395b6e5aa4ecc1465d63ae89d01034",
+    "vllm_ascend/models/qwen4_exp/w4a8_int4.py": "9b306faaceaf9b1e595d41cbdcde021b9b1fdc6e5a24c00dab92c348b3d8d51c"
+  }
+}

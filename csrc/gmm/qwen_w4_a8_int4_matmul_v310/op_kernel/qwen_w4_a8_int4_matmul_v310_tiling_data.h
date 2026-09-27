@@ -8,5 +8,7 @@ struct QwenW4A8Int4KernelTilingData {
   int64_t numExperts;
   int64_t nDim;
   int64_t kDim;
+  int64_t metadataLanes;
+  int64_t routed;
 };
 #endif

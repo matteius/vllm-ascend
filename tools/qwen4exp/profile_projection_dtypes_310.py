@@ -22,6 +22,7 @@ import torch.nn.functional as F
 from vllm_ascend.models.qwen4_exp.w4_moe import pack_cube_tiles
 from vllm_ascend.models.qwen4_exp.w4a8_int4 import (
     GROUP_SIZE,
+    pack_activation_device,
     pack_native_metadata,
     pack_native_weight,
     pack_nibbles,
@@ -42,6 +43,9 @@ CASES = (
     "int4_activation_limbs_only",
     "int8_with_activation_quant",
     "w4a8_native_with_activation_quant",
+    "w4a8_native_fused_prepared",
+    "w4a8_native_fused",
+    "int4_fused_pack_only",
 )
 
 
@@ -108,6 +112,7 @@ def make_cases(data, npu):
     ]
     ends = torch.tensor([rows], dtype=torch.int64, device=x.device)
     limbs = quantize_activation_limbs(x)
+    fused_limbs = pack_activation_device(x)
 
     def int8_with_quant():
         quantized, _ = npu.npu_dynamic_quant(x)
@@ -125,6 +130,13 @@ def make_cases(data, npu):
         "w4a8_native_with_activation_quant": lambda: torch.ops._C_ascend.npu_qwen_w4_a8_int4_matmul_310(
             *quantize_activation_limbs(x), *native, ends
         ),
+        "w4a8_native_fused_prepared": lambda: torch.ops._C_ascend.npu_qwen_w4_a8_int4_matmul_310(
+            *fused_limbs, *native, ends
+        ),
+        "w4a8_native_fused": lambda: torch.ops._C_ascend.npu_qwen_w4_a8_int4_matmul_310(
+            *pack_activation_device(x), *native, ends
+        ),
+        "int4_fused_pack_only": lambda: pack_activation_device(x),
     }
     if rows <= 80:
         expert_ids = torch.zeros(rows, dtype=torch.int32, device=x.device)

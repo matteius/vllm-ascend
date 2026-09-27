@@ -12,6 +12,8 @@ constexpr int64_t GROUP_SIZE = 128;
 constexpr int64_t OUTPUT_TILE = 16;
 constexpr int64_t MIN_K = 256;
 constexpr int64_t MAX_K = 2560;
+constexpr int64_t MAX_N = 2 * MAX_K;
+constexpr int64_t DECODE_ROUTE_LIMIT = 80;
 
 static ge::graphStatus TileQwenW4A8Int4(gert::TilingContext* context) {
   auto platform = context->GetPlatformInfo();
@@ -28,9 +30,11 @@ static ge::graphStatus TileQwenW4A8Int4(gert::TilingContext* context) {
   OP_CHECK_IF(x.GetDimNum() != 2 || codes.GetDimNum() != 3 || scales.GetDimNum() != 3 || offsets.GetDimNum() != 3 ||
                   ends.GetDimNum() != 1,
               OP_LOGE(context, "expected x[R,K], banks[E,N,*], group_ends[E]"), return ge::GRAPH_FAILED);
+  const bool routed = context->GetInputDesc(8)->GetDataType() == ge::DT_INT32;
   const int64_t rows = x.GetDim(0), k = x.GetDim(1) * 2, experts = codes.GetDim(0), n = codes.GetDim(1);
-  OP_CHECK_IF(rows <= 0 || rows > MAX_ROUTES || experts <= 0 || n <= 0 || n % GROUP_SIZE != 0 || k < MIN_K ||
-                  k > MAX_K || k % GROUP_SIZE != 0 || codes.GetDim(2) * 2 != k || ends.GetDim(0) != experts,
+  OP_CHECK_IF(rows <= 0 || rows > MAX_ROUTES || experts <= 0 || n <= 0 || n > MAX_N || n % GROUP_SIZE != 0 ||
+                  k < MIN_K || k > MAX_K || k % GROUP_SIZE != 0 || codes.GetDim(2) * 2 != k ||
+                  ends.GetDim(0) != (routed ? rows : experts),
               OP_LOGE(context, "invalid Qwen W4 grouped dimensions"), return ge::GRAPH_FAILED);
   for (const auto& shape : {scales, offsets}) {
     OP_CHECK_IF(shape.GetDim(0) != experts || shape.GetDim(1) != n || shape.GetDim(2) != k / GROUP_SIZE,
@@ -40,12 +44,19 @@ static ge::graphStatus TileQwenW4A8Int4(gert::TilingContext* context) {
   const auto xs = context->GetInputShape(2)->GetStorageShape();
   const auto sums = context->GetInputShape(3)->GetStorageShape();
   const auto ws = context->GetInputShape(7)->GetStorageShape();
-  OP_CHECK_IF(high.GetDimNum() != 2 || xs.GetDimNum() != 2 || sums.GetDimNum() != 2 || ws.GetDimNum() != 3,
+  OP_CHECK_IF(high.GetDimNum() != 2 || (xs.GetDimNum() != 2 && xs.GetDimNum() != 3) ||
+                  sums.GetDimNum() != xs.GetDimNum() || ws.GetDimNum() != 3,
               OP_LOGE(context, "invalid W4A8 auxiliary ranks"), return ge::GRAPH_FAILED);
   OP_CHECK_IF(high.GetDim(0) != rows || high.GetDim(1) != k / 2 || xs.GetDim(0) != rows ||
                   xs.GetDim(1) != k / GROUP_SIZE || sums.GetDim(0) != rows || sums.GetDim(1) != k / GROUP_SIZE ||
                   ws.GetDim(0) != experts || ws.GetDim(1) != n || ws.GetDim(2) != k / GROUP_SIZE,
               OP_LOGE(context, "invalid W4A8 auxiliary dimensions"), return ge::GRAPH_FAILED);
+  const int64_t lanes = xs.GetDimNum() == 3 ? 8 : 1;
+  OP_CHECK_IF(lanes == 8 && (xs.GetDim(2) != 8 || sums.GetDim(2) != 8),
+              OP_LOGE(context, "W4A8 broadcast metadata requires eight lanes"), return ge::GRAPH_FAILED);
+  OP_CHECK_IF(routed && (rows > DECODE_ROUTE_LIMIT || lanes != 8),
+              OP_LOGE(context, "native routed decode requires <=80 rows and broadcast metadata"),
+              return ge::GRAPH_FAILED);
   const uint32_t cores = device.GetCoreNumAic();
   OP_CHECK_IF(cores == 0, OP_LOGE(context, "no AI cores"), return ge::GRAPH_FAILED);
   const uint32_t blocks = std::min<int64_t>(cores, experts * (n / OUTPUT_TILE));
@@ -54,6 +65,8 @@ static ge::graphStatus TileQwenW4A8Int4(gert::TilingContext* context) {
   data.set_numExperts(experts);
   data.set_nDim(n);
   data.set_kDim(k);
+  data.set_metadataLanes(lanes);
+  data.set_routed(routed);
   auto workspace = context->GetWorkspaceSizes(1);
   OP_CHECK_NULL_WITH_CONTEXT(context, workspace);
   // All native INT4 tiles and accumulators are on chip.

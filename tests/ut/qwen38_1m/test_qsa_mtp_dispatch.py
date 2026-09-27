@@ -35,6 +35,7 @@ def test_batched_qsa_limit_and_group_list_cover_w8_and_routed_w4(backend, tp_siz
             "group_size": 128,
             "packing": "signed_int4_low_nibble_first_in_axis",
             "backend": backend,
+            "activation_quantization": "int8_per_group" if backend == "cube_310_int4_a8" else "float16",
             "scale_dtype": "float16",
             "offset_dtype": "int8",
         }

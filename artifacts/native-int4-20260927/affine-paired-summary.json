@@ -1,0 +1,75 @@
+{
+  "accuracy": {
+    "scope": "fixed stratified zero-shot MMLU sample, not the official full-dataset score",
+    "samples": 228,
+    "baseline_correct": 206,
+    "native_correct": 204,
+    "regressions": [
+      "college_medicine:4",
+      "global_facts:49",
+      "machine_learning:2"
+    ],
+    "improvements": [
+      "high_school_mathematics:9"
+    ],
+    "changed_predictions": 6
+  },
+  "performance": {
+    "short": {
+      "baseline": {
+        "requests": 3,
+        "completion_tokens": 1536,
+        "median_decode_tok_s": 15.176561102844984,
+        "median_e2e_seconds": 34.308439535991056,
+        "aggregate_e2e_tok_s": 15.026357575782946,
+        "median_ttft_seconds": 0.6191941220022272,
+        "drafted_tokens": 1262.0,
+        "accepted_tokens": 906.0,
+        "acceptance": 0.7179080824088748,
+        "scope": "serial batch-one; long-prefix cache warmed by excluded 32-token request"
+      },
+      "affine": {
+        "requests": 3,
+        "completion_tokens": 1536,
+        "median_decode_tok_s": 16.556345988301715,
+        "median_e2e_seconds": 31.503596800001105,
+        "aggregate_e2e_tok_s": 16.7732170145965,
+        "median_ttft_seconds": 0.6225305690022651,
+        "drafted_tokens": 1246.0,
+        "accepted_tokens": 912.0,
+        "acceptance": 0.7319422150882825,
+        "scope": "serial batch-one; long-prefix cache warmed by excluded 32-token request"
+      },
+      "decode_speedup": 1.0909155161110957,
+      "e2e_speedup": 1.1162530194029763
+    },
+    "long": {
+      "baseline": {
+        "requests": 3,
+        "completion_tokens": 1536,
+        "median_decode_tok_s": 14.435111983246967,
+        "median_e2e_seconds": 37.33703965500172,
+        "aggregate_e2e_tok_s": 14.415077476459887,
+        "median_ttft_seconds": 1.6622552769986214,
+        "drafted_tokens": 1222.0,
+        "accepted_tokens": 927.0,
+        "acceptance": 0.7585924713584288,
+        "scope": "serial batch-one; long-prefix cache warmed by excluded 32-token request"
+      },
+      "affine": {
+        "requests": 3,
+        "completion_tokens": 1536,
+        "median_decode_tok_s": 16.027368156716143,
+        "median_e2e_seconds": 33.58732476999285,
+        "aggregate_e2e_tok_s": 15.704132669713879,
+        "median_ttft_seconds": 1.7042603199952282,
+        "drafted_tokens": 1222.0,
+        "accepted_tokens": 926.0,
+        "acceptance": 0.7577741407528642,
+        "scope": "serial batch-one; long-prefix cache warmed by excluded 32-token request"
+      },
+      "decode_speedup": 1.1103043866453624,
+      "e2e_speedup": 1.0894240905301442
+    }
+  }
+}

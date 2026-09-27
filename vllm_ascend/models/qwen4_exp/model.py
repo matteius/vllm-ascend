@@ -152,6 +152,7 @@ from .qwen4exp_gdn import (
     gdn_gating,
     gdn_short_conv,
 )
+from .w4_backend_policy import configure_w4_backend
 from .w4_moe import CUBE_DEVICE_ROUTED_BACKENDS, W4SparseMoE, require_eager_w4, validate_w4_inventory, w4_config
 from .w4_moe import EXPERT_NAME as W4_EXPERT_NAME
 from .weight_mapping import (
@@ -2370,6 +2371,7 @@ class AscendQwen4ExpModel(nn.Module):
         self.config = config
         self.vllm_config = vllm_config
         self.quant_config = getattr(vllm_config, "quant_config", None)
+        configure_w4_backend(config)
         require_eager_w4(vllm_config.model_config, config)
         if w4_config(config) is not None and self.quant_config is not None:
             raise ValueError("Qwen4Exp packed W4 selects its own backend; omit --quantization")

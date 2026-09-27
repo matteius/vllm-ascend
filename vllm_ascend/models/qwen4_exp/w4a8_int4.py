@@ -19,6 +19,19 @@ INT4_RADIX = 16
 NATIVE_INT4_BACKEND = "cube_310_int4_a8"
 
 
+def pack_activation_device(inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """Fused NPU quantization/packing with aligned broadcast metadata.
+
+    The reference quantizer remains available for independent numerical gates.
+    Missing kernels fail explicitly; activation precision never changes here.
+    """
+    if inputs.device.type != "npu":
+        raise ValueError("native INT4 activation packing requires NPU inputs")
+    if not hasattr(torch.ops._C_ascend, "npu_qwen_w4_a8_pack_310"):
+        raise RuntimeError("native INT4 requires the rebuilt activation pack operator")
+    return torch.ops._C_ascend.npu_qwen_w4_a8_pack_310(inputs)
+
+
 def pack_nibbles(values: torch.Tensor) -> torch.Tensor:
     return ((values[..., ::2] & 15) | ((values[..., 1::2] & 15) << 4)).to(torch.int8)
 

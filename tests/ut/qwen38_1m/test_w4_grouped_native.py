@@ -26,14 +26,17 @@ def make_layer(backend="cube_310_grouped"):
     cfg = config(num_layers=1, num_experts=7, top_k=3, shared_inter=0)
     cfg.hidden_size = cfg.moe_intermediate_size = 256
     cfg.ascend_expert_quantization.update(group_size=128, backend=backend)
+    if backend == NATIVE_INT4_BACKEND:
+        cfg.ascend_expert_quantization["activation_quantization"] = "int8_per_group"
     require_eager_w4(SimpleNamespace(enforce_eager=False), cfg)
     return W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy(), expert_sharding=(1, 2))
 
 
 @pytest.mark.parametrize("tokens", [1, 8, 27, 128, 513])
 @pytest.mark.parametrize("peers_only", [False, True])
-def test_grouped_routes_match_slot_reference_without_host_readback(tokens, peers_only):
-    layer = make_layer()
+@pytest.mark.parametrize("backend", ["cube_310_grouped", NATIVE_INT4_BACKEND])
+def test_grouped_routes_match_slot_reference_without_host_readback(tokens, peers_only, backend):
+    layer = make_layer(backend)
     x = torch.rand(tokens, 256).half() * 0.1
     ids = torch.arange(tokens * 3).reshape(tokens, 3) % (3 if peers_only else 7)
     weights = torch.tensor([0.125, 0.375, 0.5]).expand(tokens, -1)
@@ -54,6 +57,12 @@ def test_grouped_routes_match_slot_reference_without_host_readback(tokens, peers
             layer.projections["gate_up_proj"], "grouped_linear", side_effect=lambda x, e: projection(x, e, True)
         ),
         patch.object(layer.projections["down_proj"], "grouped_linear", side_effect=projection),
+        patch("vllm_ascend.models.qwen4_exp.w4_moe.pack_activation_device", side_effect=lambda x: (x,)),
+        patch.object(
+            layer.projections["gate_up_proj"],
+            "native_linear",
+            side_effect=lambda prepared, e: projection(prepared[0], e, True),
+        ),
         patch.object(torch.Tensor, "cpu", side_effect=AssertionError("routing CPU copy")),
         patch.object(torch.Tensor, "tolist", side_effect=AssertionError("routing Python list")),
         patch.object(torch.Tensor, "item", side_effect=AssertionError("routing scalar sync")),
@@ -74,9 +83,8 @@ def test_backend_dispatch_never_falls_back_to_python(backend, tokens):
         patch.object(layer, "_forward_routed", return_value=expected) as routed,
     ):
         layer(torch.zeros(tokens, 256).half())
-    uses_native = backend == NATIVE_INT4_BACKEND
-    assert grouped.call_count == int(uses_native or tokens * 3 > 80)
-    assert routed.call_count == int(not uses_native and tokens * 3 <= 80)
+    assert grouped.call_count == int(tokens * 3 > 80)
+    assert routed.call_count == int(tokens * 3 <= 80)
 
 
 def test_two_int4_limb_identity_covers_every_int8():

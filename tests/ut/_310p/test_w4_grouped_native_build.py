@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 def test_device_grouped_and_native_int4_are_registered_for_310p():
     build_script = (REPO_ROOT / "csrc/build_aclnn.sh").read_text()
     binding = (REPO_ROOT / "csrc/torch_binding.cpp").read_text()
-    for op in ("qwen_w4_grouped_matmul_v310", "qwen_w4_a8_int4_matmul_v310"):
+    for op in ("qwen_w4_grouped_matmul_v310", "qwen_w4_a8_int4_matmul_v310", "qwen_w4_a8_pack_v310"):
         assert f'"{op}"' in build_script
         definition = (REPO_ROOT / "csrc/gmm" / op / "op_host" / f"{op}_def.cpp").read_text()
         assert 'AddConfig("ascend310p"' in definition

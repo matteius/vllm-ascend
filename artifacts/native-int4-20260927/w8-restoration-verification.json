@@ -1,0 +1,9 @@
+{
+  "status": "W8_RESTORED",
+  "api_pid": 2099429,
+  "argv_matches": true,
+  "cwd_matches": true,
+  "saved_environment_matches": true,
+  "smoke_correct": true,
+  "finish_reason": "stop"
+}

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #include "kernel_operator.h"
+#include "native_int4_schedule.h"
 #include "qwen_w4_a8_int4_matmul_v310_tiling_data.h"
 
 // EXPERIMENTAL: two native mad_s4 instructions per activation/weight group.
@@ -210,6 +211,23 @@ extern "C" __global__ __aicore__ void qwen_w4_a8_int4_matmul_v310(GM_ADDR low, G
                                                                   GM_ADDR workspace, GM_ADDR tiling) {
   KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC);
   auto td = reinterpret_cast<__gm__ QwenW4A8Int4KernelTilingData*>(tiling);
+  if (td->metadataLanes == 8) {
+    constexpr int64_t DECODE_ROUTE_LIMIT = 80;
+    if (td->numRows <= DECODE_ROUTE_LIMIT) {
+      native_int4::Schedule<16> op;
+      op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
+      op.Process();
+    } else if (td->numRows > td->numExperts * 64) {
+      native_int4::Schedule<128> op;
+      op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
+      op.Process();
+    } else {
+      native_int4::Schedule<32> op;
+      op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
+      op.Process();
+    }
+    return;
+  }
   NativeInt4 op;
   op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
   op.Process();
