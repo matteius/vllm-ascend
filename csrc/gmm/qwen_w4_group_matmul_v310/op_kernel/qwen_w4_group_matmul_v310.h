@@ -55,6 +55,11 @@ constexpr uint32_t QW4_TILE_N = 32;
 constexpr uint32_t QW4_TILE_K = 128;
 constexpr uint32_t QW4_TILED_K_BATCH = 512;
 constexpr uint32_t QW4_MAX_TILED_K_BATCH = 640;
+constexpr uint32_t QW4_WIDE_INPUT_DIM = 2560;
+constexpr uint32_t QW4_WIDE_TILED_K_BATCH = QW4_WIDE_INPUT_DIM / 2;
+// Per packed byte: uint8 input, FP16 input, int16 cast, two FP16 outputs.
+constexpr uint32_t QW4_TILED_BYTES_PER_PACKED = 9;
+constexpr uint32_t QW4_BUFFER_ALIGNMENT = 512;
 constexpr uint32_t QW4_HALF_VECTOR_ELEMENTS = 128;
 constexpr uint32_t QW4_VECTOR_BLOCKS = 8;
 constexpr uint32_t QW4_K_FRACTALS_PER_TILE = QW4_TILE_K / QW4_FRACTAL_SIZE;
@@ -79,6 +84,13 @@ __aicore__ inline T MinU(T a, T b) {
 class QwenW4GroupMatmulV310Cube {
  public:
   using ArchTag = Arch::AtlasA2;
+  // Three metadata allocations (half/int8/half), each rounded up. The
+  // packed buffers are all aligned at this batch size. Canonical uses
+  // its original small K tile and independent scratch layout.
+  static_assert(QW4_WIDE_TILED_K_BATCH * QW4_TILE_N / 2 * QW4_TILED_BYTES_PER_PACKED +
+                        QW4_TILE_N * (QW4_WIDE_INPUT_DIM / QW4_GROUP_SIZE) * 5 + 3 * QW4_BUFFER_ALIGNMENT <=
+                    ArchTag::UB_SIZE,
+                "Qwen W4 wide unpack must fit the allocated UB");
   using DispatchPolicyTla = Gemm::MmadPingpongTlaMulti<ArchTag, true, false>;
   using L1TileShapeTla = tla::Shape<tla::Int<128>, tla::Int<QW4_TILE_N>, tla::Int<128>>;
   using L0TileShapeTla = L1TileShapeTla;
@@ -108,6 +120,9 @@ class QwenW4GroupMatmulV310Cube {
     tileK_ = QW4_TILE_K;
     if (tiled_) {
       tileK_ = K_ <= QW4_MAX_TILED_K_BATCH ? K_ : QW4_TILED_K_BATCH;
+      if (K_ == QW4_WIDE_INPUT_DIM) {
+        tileK_ = QW4_WIDE_TILED_K_BATCH;
+      }
       while (K_ % tileK_ != 0) {
         tileK_ /= 2;
       }
@@ -180,6 +195,34 @@ class QwenW4GroupMatmulV310Cube {
     }
   }
 
+  // Routed decode can evaluate several rows with one decoded expert tile.
+  // The temporary output is private to the first route owning that expert;
+  // publish only matching rows so unrelated experts never race on y.
+  __aicore__ inline void CopyMatchingRows(GM_ADDR output, GM_ADDR expertIds, int32_t expert, uint32_t tile) {
+    GlobalTensor<half> destination;
+    destination.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(output));
+    GlobalTensor<int32_t> ids;
+    ids.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(expertIds));
+    auto rowBuffer = resource.ubBuf.template GetBufferByByte<half>(0);
+    // BlockMmad's finalWaitFlags completes its output stores. Explicitly
+    // order the subsequent GM read and each reuse of this 64-byte buffer.
+    PipeBarrier<PIPE_ALL>();
+    SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID4);
+    WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID4);
+    for (uint32_t row = 0; row < T_; ++row) {
+      if (ids.GetValue(row) != expert) {
+        continue;
+      }
+      const int64_t index = static_cast<int64_t>(row) * N_ + tile * QW4_TILE_N;
+      DataCopy(rowBuffer, yGm_[index], QW4_TILE_N);
+      SetFlag<HardEvent::MTE2_MTE3>(EVENT_ID4);
+      WaitFlag<HardEvent::MTE2_MTE3>(EVENT_ID4);
+      DataCopy(destination[index], rowBuffer, QW4_TILE_N);
+      SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID4);
+      WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID4);
+    }
+  }
+
  private:
   __aicore__ inline void AllocBuffers() {
     uint32_t off = 0;
@@ -189,21 +232,30 @@ class QwenW4GroupMatmulV310Cube {
     off = AlignUpU<uint32_t>(off + QW4_TILE_N * (uint32_t)kbCount_, 512);
     offsetHalfUB_ = resource.ubBuf.template GetBufferByByte<half>(off);
     off = AlignUpU<uint32_t>(off + QW4_TILE_N * (uint32_t)kbCount_ * sizeof(half), 512);
-    scaleVecUB_ = resource.ubBuf.template GetBufferByByte<half>(off);
-    off = AlignUpU<uint32_t>(off + (uint32_t)packedTileCount_ * sizeof(half), 512);
-    offsetVecUB_ = resource.ubBuf.template GetBufferByByte<half>(off);
-    off = AlignUpU<uint32_t>(off + (uint32_t)packedTileCount_ * sizeof(half), 512);
+    if (!tiled_) {
+      scaleVecUB_ = resource.ubBuf.template GetBufferByByte<half>(off);
+      off = AlignUpU<uint32_t>(off + (uint32_t)packedTileCount_ * sizeof(half), 512);
+      offsetVecUB_ = resource.ubBuf.template GetBufferByByte<half>(off);
+      off = AlignUpU<uint32_t>(off + (uint32_t)packedTileCount_ * sizeof(half), 512);
+    }
     cU8_ = resource.ubBuf.template GetBufferByByte<uint8_t>(off);
     off = AlignUpU<uint32_t>(off + (uint32_t)packedTileCount_ * sizeof(uint8_t), 512);
     cH_ = resource.ubBuf.template GetBufferByByte<half>(off);
     off = AlignUpU<uint32_t>(off + (uint32_t)packedTileCount_ * sizeof(half), 512);
     c16_ = resource.ubBuf.template GetBufferByByte<int16_t>(off);
     off = AlignUpU<uint32_t>(off + (uint32_t)packedTileCount_ * sizeof(int16_t), 512);
-    fieldHalfUB_ = resource.ubBuf.template GetBufferByByte<half>(off);
-    off = AlignUpU<uint32_t>(off + (uint32_t)packedTileCount_ * sizeof(half), 512);
+    if (!tiled_) {
+      fieldHalfUB_ = resource.ubBuf.template GetBufferByByte<half>(off);
+      off = AlignUpU<uint32_t>(off + (uint32_t)packedTileCount_ * sizeof(half), 512);
+    }
     signedHalfUB_ = resource.ubBuf.template GetBufferByByte<half>(off);
     off = AlignUpU<uint32_t>(off + (uint32_t)decodedTileCount_ * sizeof(half), 512);
     if (tiled_) {
+      // The low-nibble output is not live until the final Sub. Reuse it
+      // for intermediate FP16 arithmetic; the final Sub allows dst==src1.
+      // With no expanded metadata this uses 188416 bytes at K=2560 and
+      // tileK=1280, below AtlasA2's 192 KiB UB allocation.
+      fieldHalfUB_ = signedHalfUB_;
       return;
     }
     andTmp_ = resource.ubBuf.template GetBufferByByte<int16_t>(off);
@@ -347,11 +399,19 @@ class QwenW4GroupMatmulV310Cube {
           // Zero src1 block/repeat strides broadcast it across K using
           // vsub/vmul directly, with no expanded coefficients or Gather.
           Sub(values, values, offsetHalfUB_[base], QW4_HALF_VECTOR_ELEMENTS, repeats, broadcast);
-          PipeBarrier<PIPE_V>();
-          Mul(values, values, scaleUB_[base], QW4_HALF_VECTOR_ELEMENTS, repeats, broadcast);
-          PipeBarrier<PIPE_V>();
         }
       }
+      // Groups/fields are disjoint. Order the two arithmetic stages once
+      // instead of draining the vector pipeline after every group.
+      PipeBarrier<PIPE_V>();
+      for (int32_t field = 0; field < codesPerByte_; ++field) {
+        for (int32_t groupInTile = 0; groupInTile < tileK_ / QW4_GROUP_SIZE; ++groupInTile) {
+          auto values = signedHalfUB_[field * packedTileCount_ + groupInTile * groupElements];
+          const int64_t base = (group + groupInTile) * QW4_TILE_N + field * QW4_FRACTAL_SIZE;
+          Mul(values, values, scaleUB_[base], QW4_HALF_VECTOR_ELEMENTS, repeats, broadcast);
+        }
+      }
+      PipeBarrier<PIPE_V>();
       return;
     }
 

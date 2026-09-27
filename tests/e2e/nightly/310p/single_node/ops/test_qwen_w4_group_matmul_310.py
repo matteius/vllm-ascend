@@ -67,10 +67,10 @@ def test_projection_matches_independent_cpu_reference(tokens, outputs, inputs, t
     assert torch.isfinite(actual).all()
 
 
-@pytest.mark.parametrize("inputs", [256, 384, 512, 768, 896, 1536, 2304])
+@pytest.mark.parametrize("inputs", [256, 384, 512, 640, 768, 896, 1280, 1536, 2304, 2560])
 def test_tiled_k_batch_selection_matches_reference(inputs):
-    # Exercise full-K, 512/256 batches, and the 128 fallback.  In particular,
-    # 384 is not a power of two and 896 must not read a padded K tail.
+    # Exercise full-K, the wide 1280 batch, 512/256 batches, and the 128
+    # fallback. 384 is not a power of two; 896 must not read a padded tail.
     values = make_inputs(2, 128, inputs)
     actual = kernel(*(value.npu() for value in layout_values(values, True)), tiled=True).cpu()
     torch.testing.assert_close(actual, reference(*values), rtol=0.005, atol=0.003)
@@ -114,6 +114,18 @@ def test_graph_replay_uses_changed_inputs_and_weights(tokens, tiled):
         graph.replay()
         actual = captured.cpu()
         torch.testing.assert_close(actual, reference(*replacements), rtol=0.005, atol=0.003)
+
+
+def test_wide_unpack_basis_at_batch_and_group_boundaries():
+    inputs, outputs = 2560, 128
+    columns = [0, 127, 128, 639, 640, 1279, 1280, 2559]
+    x = torch.eye(inputs, dtype=torch.float16)[columns]
+    packed = torch.arange(-128, 128, dtype=torch.int16).to(torch.int8).repeat(outputs, inputs // 512)
+    scales = torch.full((outputs, inputs // 128), 0.125, dtype=torch.float16)
+    offsets = (torch.arange(outputs, dtype=torch.int16) % 16 - 8).to(torch.int8).unsqueeze(1)
+    offsets = offsets.expand_as(scales).contiguous()
+    actual = kernel(*(v.npu() for v in layout_values([x, packed, scales, offsets], True)), tiled=True).cpu()
+    torch.testing.assert_close(actual, reference(x, packed, scales, offsets), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("bad", ["tokens", "scale_shape", "offset_dtype", "packed_shape", "noncontiguous"])
@@ -232,6 +244,38 @@ def test_routed_graph_changes_experts_in_both_directions(routes, outputs, inputs
         torch.testing.assert_close(
             actual, routed_reference(replacements[0], canonical, replacements[-1]), rtol=0.005, atol=0.003
         )
+
+
+@pytest.mark.parametrize("routes", [2, 3, 19, 20, 21])
+@pytest.mark.parametrize("outputs,inputs", [(128, 256), (640, 2560), (2560, 640)])
+def test_routed_reuse_owner_changes_on_graph_replay(routes, outputs, inputs):
+    values, canonical = routed_values(routes, outputs, inputs)
+    device_values = [value.npu() for value in values]
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        for _ in range(3):
+            routed_kernel(*device_values)
+    torch.npu.current_stream().wait_stream(stream)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, stream=stream):
+        captured = routed_kernel(*device_values)
+    # All duplicates, a later first owner, no local rows, and mixed owners.
+    # Row activations differ, so copying the owner's result to peers is wrong.
+    for phase in range(5):
+        ids = torch.full((routes,), 2, dtype=torch.int32)
+        if phase == 1:
+            ids[0] = -1
+        elif phase == 2:
+            ids.fill_(3)
+        elif phase == 3:
+            ids = torch.arange(routes, dtype=torch.int32) % 3
+        elif phase == 4:
+            ids[0], ids[-1] = 0, 1
+        device_values[-1].copy_(ids)
+        graph.replay()
+        torch.testing.assert_close(captured.cpu(), routed_reference(values[0], canonical, ids), rtol=0.005, atol=0.003)
 
 
 @pytest.mark.parametrize("bad", ["route_limit", "ids_dtype", "ids_shape", "bank_shape", "scale_shape", "noncontiguous"])

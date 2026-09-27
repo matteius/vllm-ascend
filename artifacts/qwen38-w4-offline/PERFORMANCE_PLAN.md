@@ -43,6 +43,14 @@ temperature was 80°C. Production W8 parity is not yet achieved. Next collect a
 full-model replay profile before deciding between projection fusion, route/expert
 reuse, attention/GDN or communication changes.
 
+The eight-step full-model replay profile is now complete. Routed W4 projections
+account for 46.5–49.8% of each rank's summed task time (not critical-path latency).
+Within-batch expert-unpack reuse passes 97 NPU tests and full real-weight smokes;
+matched short/23.4k medians improve to 11.203/11.050 tok/s. The wider-unpack
+candidate passes 101 NPU tests, real-weight layer replay, and all three full-model
+smokes. Its short coding median is 11.310 tok/s; the long-context run remains
+in progress. See [REPLAY_PROFILE.md](REPLAY_PROFILE.md). No production parity claim.
+
 ## Acceptance criteria
 
 - Compare against a freshly measured W8 baseline on the same four NPUs,

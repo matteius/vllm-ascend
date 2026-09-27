@@ -144,8 +144,10 @@ Neither group-only variant makes full-model graph capture safe while routing
 uses the CPU. The new `cube_310_routed` variant reads expert IDs on device and
 supports bounded decode graphs up to 80 routes (8 tokens for this top-k=10 model).
 Larger prefill uses the existing grouped host route; oversized capture fails
-explicitly. Workspace is bounded by `routes*N*K*2 + CANN reserve`, not a
-persistent expanded expert bank. For eager isolation, select `cube_310_tiled`
+explicitly. Workspace is bounded by `routes*N*K*2 + CANN reserve`, plus
+`routes*routes*N*2` for at most 20 routes to reuse a repeated expert's unpacking
+within a verification batch. It is not a persistent expanded expert bank.
+For eager isolation, select `cube_310_tiled`
 or remove the overrides, add `--enforce-eager`, and remove speculative and
 compilation configuration. Do not use `TORCHDYNAMO_DISABLE=1` as graph evidence.
 
@@ -234,3 +236,11 @@ routed NPU 后端，改为 resident FP16 operand policy，与 W8 一致。
 replay 的瓶颈 profile；仍未达到 W8 的 19.073/18.091 tok/s。
 不能靠常驻 INT8/FP16 全专家展开
 制造 W4 提速；必须保留量化内存收益与动态 replay 正确性。
+
+整模型八步 replay profile 已完成：W4 projection 占各 rank 累计任务时间的
+46.5–49.8%（不是 critical-path 占比）。同 batch 的重复专家复用解包后，
+真实 smoke 通过，短/23.4k 中位数提高到 **11.203 / 11.050 tok/s**。
+更宽 unpack 候选已通过 101 项 NPU 回归、真实权重 layer replay 和三个
+整模型 smoke；短 coding 中位数为 **11.310 tok/s**，长上下文还在验证。
+各候选、原始样本、kernel SHA 和边界说明见
+`artifacts/qwen38-w4-offline/REPLAY_PROFILE.md`。
