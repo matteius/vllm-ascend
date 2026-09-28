@@ -92,3 +92,18 @@ def test_route_plan_limit_matches_host_guard():
     host = (root / "op_host/qwen_w4_routed_matmul_v310_tiling.cpp").read_text()
     assert "constexpr uint32_t MAX_ROUTE_ROWS = 80;" in kernel
     assert "constexpr int64_t MAX_ROUTES = 80;" in host
+
+
+def test_native_int4_route_limit_matches_every_guard():
+    root = REPO_ROOT / "csrc/gmm/qwen_w4_a8_int4_matmul_v310"
+    sources = {
+        "adapter": (root / "qwen_w4_a8_int4_matmul_310_torch_adpt.h").read_text(),
+        "tiling": (root / "op_host/qwen_w4_a8_int4_matmul_v310_tiling.cpp").read_text(),
+        "kernel": (root / "op_kernel/qwen_w4_a8_int4_matmul_v310.cpp").read_text(),
+        "schedule": (root / "op_kernel/native_int4_schedule.h").read_text(),
+    }
+    for name in ("adapter", "tiling", "kernel"):
+        assert "constexpr int64_t DECODE_ROUTE_LIMIT = 128;" in sources[name]
+    assert "static constexpr uint32_t MAX_ROUTES = 128;" in sources["schedule"]
+    assert "requires <=128 rows" in sources["adapter"]
+    assert "requires <=128 rows" in sources["tiling"]

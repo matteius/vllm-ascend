@@ -454,7 +454,10 @@ def _linear(x: torch.Tensor, weight: torch.Tensor, compute_dtype: torch.dtype) -
     return F.linear(x.to(operand_dtype), linear_weight)
 
 
-def _format_eager_linear_weights_npu(model: nn.Module) -> None:
+def _format_eager_linear_weights_npu(
+    model: nn.Module,
+    extra_projection_types: tuple[type[nn.Module], ...] = (),
+) -> None:
     """Keep eager FP16 projection weights in the 310P cube's NZ layout.
 
     The custom Qwen4Exp layers use raw ``nn.Parameter`` weights rather than
@@ -472,7 +475,8 @@ def _format_eager_linear_weights_npu(model: nn.Module) -> None:
         _EagerMLP,
         _EagerSparseMoE,
         W4SparseMoE,
-    )
+        AscendQwen4ExpPLELayer,
+    ) + extra_projection_types
     weights_to_format: list[nn.Parameter] = []
     for module in model.modules():
         if not isinstance(module, projection_types):

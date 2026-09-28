@@ -19,6 +19,7 @@ from vllm_ascend.models.qwen4_exp.moe import route_topk
 from vllm_ascend.models.qwen4_exp.w4_moe import (
     FORMAT,
     KINDS,
+    MAX_CUBE_ROUTES,
     MAX_SHARED_EXPERT_OVERLAP_TOKENS,
     PackedExpertBank,
     W4SparseMoE,
@@ -174,10 +175,11 @@ def test_shared_expert_overlap_orders_auxiliary_stream_after_input():
     main_stream.record_event.return_value = input_ready
     shared_stream.record_event.return_value = shared_done
     fake_utils = SimpleNamespace(
+        current_stream=lambda: main_stream,
         npu_stream_switch=lambda stream: nullcontext(),
         shared_experts_calculation_stream=lambda: shared_stream,
     )
-    fake_npu = SimpleNamespace(current_stream=lambda: main_stream, Stream=object)
+    fake_npu = SimpleNamespace(Stream=object)
     with (
         patch.dict(sys.modules, {"vllm_ascend.utils": fake_utils}),
         patch.object(torch, "npu", fake_npu, create=True),
@@ -266,9 +268,9 @@ def test_deferred_reduce_uses_events_and_records_cross_stream_tensors():
     main_stream, reduce_stream = MagicMock(), MagicMock()
     main_stream.record_event.return_value = routed_ready
     reduce_stream.record_event.return_value = reduce_done
-    fake_utils = SimpleNamespace(npu_stream_switch=lambda stream: nullcontext())
+    fake_utils = SimpleNamespace(current_stream=lambda: main_stream, npu_stream_switch=lambda stream: nullcontext())
     stream_factory = MagicMock(return_value=reduce_stream)
-    fake_npu = SimpleNamespace(current_stream=lambda: main_stream, Stream=stream_factory)
+    fake_npu = SimpleNamespace(Stream=stream_factory)
     with (
         patch.dict(sys.modules, {"vllm_ascend.utils": fake_utils}),
         patch.object(torch, "npu", fake_npu, create=True),
@@ -455,12 +457,13 @@ def test_oversized_graph_fails_before_host_route_readback():
     cfg.hidden_size = cfg.moe_intermediate_size = 256
     cfg.ascend_expert_quantization.update(group_size=128, backend="cube_310_routed")
     layer = W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy())
+    oversized_tokens = MAX_CUBE_ROUTES // layer.top_k + 1
     with (
         patch.object(torch, "npu", SimpleNamespace(is_current_stream_capturing=lambda: True), create=True),
         patch.object(layer, "_forward_host_routed") as host,
     ):
-        with pytest.raises(RuntimeError, match="exceeds 80 routes"):
-            layer(torch.zeros(27, 256).half())
+        with pytest.raises(RuntimeError, match=f"exceeds {MAX_CUBE_ROUTES} routes"):
+            layer(torch.zeros(oversized_tokens, 256).half())
         host.assert_not_called()
 
 

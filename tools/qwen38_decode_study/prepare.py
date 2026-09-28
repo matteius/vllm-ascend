@@ -43,7 +43,9 @@ def replace_once(text: str, old: str, new: str) -> str:
     return text.replace(old, new, 1)
 
 
-def patch_mtp(text: str, draft_eager: bool = True) -> str:
+def patch_mtp(text: str, draft_eager: bool | None = True) -> str:
+    if draft_eager is None:
+        draft_eager = True
     tree = ast.parse(text)
     bank = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "_MTPFP16MoE")
     eager = next(node for node in bank.body if isinstance(node, ast.FunctionDef) and node.name == "_forward_eager")

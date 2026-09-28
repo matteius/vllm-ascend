@@ -72,9 +72,13 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
     runner.speculative_config = SimpleNamespace(method="mtp")
     runner._qwen4exp_mtp_ple = False
     runner.update_stream = MagicMock()
+    main_stream = MagicMock()
     runner._all_gather_hidden_states_and_aux = MagicMock()
 
     calls = []
+
+    runner.update_stream.wait_stream.side_effect = lambda stream: calls.append("update_wait")
+    main_stream.wait_stream.side_effect = lambda stream: calls.append("main_wait")
 
     def fake_update(*args):
         calls.append("update")
@@ -90,9 +94,12 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
         capturing=False,
     )
 
-    with patch(
-        "vllm_ascend._310p.model_runner_310p.get_forward_context",
-        return_value=forward_context,
+    with (
+        patch(
+            "vllm_ascend._310p.model_runner_310p.get_forward_context",
+            return_value=forward_context,
+        ),
+        patch.object(torch.npu, "current_stream", return_value=main_stream),
     ):
         hidden_states = runner._model_forward(
             8,
@@ -100,7 +107,10 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
             positions=torch.tensor([0]),
         )
 
-    assert calls == ["update", "model"]
+    assert calls == ["update_wait", "update", "main_wait", "model"]
+    runner.update_stream.wait_stream.assert_called_once_with(main_stream)
+    main_stream.wait_stream.assert_called_once_with(runner.update_stream)
+    main_stream.synchronize.assert_not_called()
     torch.testing.assert_close(hidden_states, torch.ones(1))
 
 

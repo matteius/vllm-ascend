@@ -145,7 +145,7 @@ def routed_reference(x, banks, ids):
     return sorted_output[torch.argsort(order)]
 
 
-@pytest.mark.parametrize("rows", [1, 3, 16, 30, 60, 80])
+@pytest.mark.parametrize("rows", [1, 3, 16, 30, 60, 80, 90, 120, 128])
 @pytest.mark.parametrize("width,outputs", [(256, 640), (640, 2560), (2560, 1280)])
 def test_native_routed_decode_matches_sorted_reference(rows, width, outputs):
     x, banks = payload(rows, width, outputs)
@@ -157,7 +157,7 @@ def test_native_routed_decode_matches_sorted_reference(rows, width, outputs):
     assert torch.count_nonzero(actual[(ids < 0) | (ids >= 3)]) == 0
 
 
-@pytest.mark.parametrize("rows", [3, 60, 80])
+@pytest.mark.parametrize("rows", [3, 60, 80, 120, 128])
 @pytest.mark.parametrize("outputs", [128, 640, 1280])
 def test_native_routed_changing_input_and_ids_graph(rows, outputs):
     x, banks = payload(rows, 640, outputs)
@@ -242,9 +242,9 @@ def test_native_routed_rejects_nonintegral_route_factor():
 
 def test_native_routed_rejects_oversized_or_scalar_metadata():
     op = torch.ops._C_ascend.npu_qwen_w4_a8_int4_matmul_310
-    x, banks = payload(81, 256, 128)
+    x, banks = payload(129, 256, 128)
     with pytest.raises(RuntimeError, match="routed decode"):
-        op(*pack_activation_device(x.npu()), *banks, torch.zeros(81, dtype=torch.int32, device="npu"))
+        op(*pack_activation_device(x.npu()), *banks, torch.zeros(129, dtype=torch.int32, device="npu"))
     with pytest.raises(RuntimeError, match="routed decode"):
         op(
             *[v.npu() for v in quantize_activation_limbs(x[:3])],

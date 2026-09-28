@@ -14,7 +14,7 @@ from tests.ut.qwen38_1m.test_qwen4exp_assembly import (
     _vllm_config,
 )
 from vllm_ascend.models.qwen4_exp.dtype_policy import Qwen4ExpDtypePolicy
-from vllm_ascend.models.qwen4_exp.mtp import AscendQwen4ExpMTP, _MTPFP16MoE
+from vllm_ascend.models.qwen4_exp.mtp import AscendQwen4ExpMTP, _MTPFP16MoE, _MTPPredictor
 
 
 def _build(*, expert_sharding: tuple[int, int] = (0, 1), qsa: bool = False) -> AscendQwen4ExpMTP:
@@ -132,6 +132,13 @@ def test_checkpoint_weights_load_into_fp16_experts_and_projection():
     torch.testing.assert_close(bank.down_proj[3], down[3])
     torch.testing.assert_close(model.model.fc_hidden, fc)
     torch.testing.assert_close(model.model.pre_fc_norm_hidden, norm)
+
+
+def test_mtp_load_formats_static_draft_projections() -> None:
+    model = _build()
+    with patch("vllm_ascend.models.qwen4_exp.mtp._format_eager_linear_weights_npu") as formatter:
+        model.load_weights([])
+    formatter.assert_called_once_with(model.model, (_MTPPredictor, _MTPFP16MoE))
 
 
 def test_checkpoint_experts_are_sliced_by_tp_rank_and_invalid_weights_fail():

@@ -13,7 +13,7 @@ constexpr int64_t OUTPUT_TILE = 16;
 constexpr int64_t MIN_K = 256;
 constexpr int64_t MAX_K = 2560;
 constexpr int64_t MAX_N = 2 * MAX_K;
-constexpr int64_t DECODE_ROUTE_LIMIT = 80;
+constexpr int64_t DECODE_ROUTE_LIMIT = 128;
 
 static ge::graphStatus TileQwenW4A8Int4(gert::TilingContext* context) {
   auto platform = context->GetPlatformInfo();
@@ -56,7 +56,7 @@ static ge::graphStatus TileQwenW4A8Int4(gert::TilingContext* context) {
   OP_CHECK_IF(lanes == 8 && (xs.GetDim(2) != 8 || sums.GetDim(2) != 8),
               OP_LOGE(context, "W4A8 broadcast metadata requires eight lanes"), return ge::GRAPH_FAILED);
   OP_CHECK_IF(routed && (rows > DECODE_ROUTE_LIMIT || lanes != 8),
-              OP_LOGE(context, "native routed decode requires <=80 rows and broadcast metadata"),
+              OP_LOGE(context, "native routed decode requires <=128 rows and broadcast metadata"),
               return ge::GRAPH_FAILED);
   const uint32_t cores = device.GetCoreNumAic();
   OP_CHECK_IF(cores == 0, OP_LOGE(context, "no AI cores"), return ge::GRAPH_FAILED);

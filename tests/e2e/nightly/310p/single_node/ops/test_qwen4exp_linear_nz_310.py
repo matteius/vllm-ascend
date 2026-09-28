@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """310P regression test for preformatted Qwen4Exp eager linear weights."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -9,6 +11,8 @@ from torch import nn
 
 from vllm_ascend.models.qwen4_exp.dtype_policy import ASCEND_QWEN4EXP_DTYPE_POLICY
 from vllm_ascend.models.qwen4_exp.model import _format_eager_linear_weights_npu, _GatedResidual, _grouped_rms_norm
+from vllm_ascend.models.qwen4_exp.mtp import _MTPFP16MoE
+from vllm_ascend.models.qwen4_exp.ple_layer import AscendQwen4ExpPLELayer
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 
@@ -35,6 +39,60 @@ def test_eager_linear_nz_preserves_output_and_skips_small_weight() -> None:
     assert torch_npu.get_npu_format(layer.input_mix_weight_up) == ACL_FORMAT_FRACTAL_NZ
     assert torch_npu.get_npu_format(layer.block_inject_weight) != ACL_FORMAT_FRACTAL_NZ
     assert torch.equal(before, F.linear(x, layer.input_mix_weight_down))
+
+
+def test_ple_projection_nz_preserves_output_and_skips_conv_filter() -> None:
+    if not torch_npu.npu.is_available() or "310" not in torch_npu.npu.get_device_name(0):
+        pytest.skip("requires Ascend 310P")
+
+    config = SimpleNamespace(
+        hidden_size=64,
+        hc_count=2,
+        ple_embed_dim=32,
+        ple_conv_kernel_size=4,
+        ngram_size=3,
+        heads_per_ngram=1,
+        rms_norm_eps=1e-6,
+    )
+    layer = AscendQwen4ExpPLELayer(config=config, layer_idx=1).to("npu:0")
+    embeddings = torch.randn(3, config.ple_embed_dim, dtype=torch.float16, device="npu:0")
+    expected = layer.project(embeddings)
+
+    _format_eager_linear_weights_npu(layer)
+
+    assert torch_npu.get_npu_format(layer.kv_proj_weight) == ACL_FORMAT_FRACTAL_NZ
+    assert torch_npu.get_npu_format(layer.conv_weight) != ACL_FORMAT_FRACTAL_NZ
+    actual = layer.project(embeddings)
+    for value, reference in zip(actual, expected, strict=True):
+        assert torch.equal(value, reference)
+
+
+def test_mtp_static_fp16_projections_use_nz_without_reformatting_int8_experts() -> None:
+    if not torch_npu.npu.is_available() or "310" not in torch_npu.npu.get_device_name(0):
+        pytest.skip("requires Ascend 310P")
+
+    config = SimpleNamespace(
+        num_experts=16,
+        num_experts_per_tok=2,
+        hidden_size=64,
+        moe_intermediate_size=32,
+        shared_expert_intermediate_size=64,
+        norm_topk_prob=True,
+        routed_scaling_factor=1.0,
+    )
+    layer = _MTPFP16MoE(
+        config,
+        ASCEND_QWEN4EXP_DTYPE_POLICY,
+        (0, 1),
+        quantize_experts=True,
+    ).to("npu:0")
+
+    _format_eager_linear_weights_npu(layer, (_MTPFP16MoE,))
+
+    for weight in (layer.gate, layer.shared_gate_up, layer.shared_down):
+        assert torch_npu.get_npu_format(weight) == ACL_FORMAT_FRACTAL_NZ
+    assert layer.gate_up_proj[0].dtype == torch.int8
+    assert torch_npu.get_npu_format(layer.gate_up_proj[0]) != ACL_FORMAT_FRACTAL_NZ
 
 
 @pytest.mark.parametrize("tokens", [1, 256, 2048])

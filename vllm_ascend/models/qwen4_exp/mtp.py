@@ -25,6 +25,7 @@ from .model import (
     AscendQwen4ExpDecoderLayer,
     AscendQwen4ExpForCausalLM,
     _cached_gemma_affine,
+    _format_eager_linear_weights_npu,
     _GatedResidual,
     _GemmaAffineCache,
     _grouped_rms_norm,
@@ -503,6 +504,7 @@ class AscendQwen4ExpMTP(nn.Module, SupportsPP, MixtureOfExperts):
         for module in self.model.modules():
             if isinstance(module, _GatedResidual):
                 module.prepare_norm_affine()
+        _format_eager_linear_weights_npu(self.model, (_MTPPredictor, _MTPFP16MoE))
         self.model.prepare_norm_affines()
         return loaded
 

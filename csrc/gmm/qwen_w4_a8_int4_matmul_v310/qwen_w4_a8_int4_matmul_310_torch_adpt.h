@@ -9,7 +9,7 @@ at::Tensor npu_qwen_w4_a8_int4_matmul_310(const at::Tensor& low, const at::Tenso
                                           const at::Tensor& weight_sum, const at::Tensor& group_ends) {
   constexpr int64_t GROUP = 128, MAX_ROUTES = 5120, MIN_K = 256, MAX_K = 2560;
   constexpr int64_t MAX_N = 2 * MAX_K;
-  constexpr int64_t DECODE_ROUTE_LIMIT = 80;
+  constexpr int64_t DECODE_ROUTE_LIMIT = 128;
   TORCH_CHECK(low.device().type() == c10::DeviceType::PrivateUse1, "native INT4 requires NPU");
   for (const auto& tensor :
        {low, high, activation_scale, activation_sum, codes, scale, offset, weight_sum, group_ends}) {
@@ -41,7 +41,7 @@ at::Tensor npu_qwen_w4_a8_int4_matmul_310(const at::Tensor& low, const at::Tenso
   TORCH_CHECK(activation_scale.dim() == 2 || activation_scale.size(2) == 8,
               "native INT4 broadcast metadata requires eight lanes");
   TORCH_CHECK(!routed || (output_rows <= DECODE_ROUTE_LIMIT && activation_scale.dim() == 3),
-              "native routed decode requires <=80 rows and broadcast metadata");
+              "native routed decode requires <=128 rows and broadcast metadata");
   const c10_npu::OptionalNPUGuard guard(low.device());
   auto out = at::empty({output_rows, n}, low.options().dtype(at::kHalf));
   EXEC_NPU_CMD(aclnnQwenW4A8Int4MatmulV310, low, high, activation_scale, activation_sum, codes, scale, offset,

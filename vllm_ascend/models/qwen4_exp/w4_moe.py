@@ -38,7 +38,10 @@ CUBE_FRACTAL_SIZE = 16
 CUBE_DEVICE_ROUTED_BACKENDS = ("cube_310_routed", "cube_310_grouped", NATIVE_INT4_BACKEND)
 CUBE_BACKENDS = ("cube_310", "cube_310_tiled", *CUBE_DEVICE_ROUTED_BACKENDS)
 CUBE_TILED_BACKENDS = ("cube_310_tiled", "cube_310_routed", "cube_310_grouped")
-MAX_CUBE_ROUTES = 80
+# Decode/MTP reaches 120 routes at the supported four-request shape. Keep
+# those rows on the native routed kernel so decode does not build and sort a
+# grouped-routing descriptor in every MoE layer.
+MAX_CUBE_ROUTES = 128
 # Bound route expansion and the device count matrix independently of the
 # configured context window. Shape-only chunking never inspects device ids.
 MAX_GROUPED_TOKENS = 512
@@ -382,9 +385,9 @@ class W4SparseMoE(nn.Module):
         self, block_input: torch.Tensor
     ) -> tuple[torch.Tensor, torch.npu.Stream, torch.npu.Event]:
         # Keep the NPU runtime optional for host-side model and loader tests.
-        from vllm_ascend.utils import npu_stream_switch, shared_experts_calculation_stream
+        from vllm_ascend.utils import current_stream, npu_stream_switch, shared_experts_calculation_stream
 
-        main_stream = torch.npu.current_stream()
+        main_stream = current_stream()
         input_ready = main_stream.record_event()
         shared_stream = shared_experts_calculation_stream()
         block_input.record_stream(shared_stream)
@@ -397,11 +400,11 @@ class W4SparseMoE(nn.Module):
 
     def _start_deferred_reduce(self, routed: torch.Tensor) -> tuple[torch.Tensor, torch.npu.Stream, torch.npu.Event]:
         """Enqueue the routed reduction before independent shared compute."""
-        from vllm_ascend.utils import npu_stream_switch
+        from vllm_ascend.utils import current_stream, npu_stream_switch
 
         if self._tp_reduce is None:
             raise RuntimeError("W4 expert TP requires all-reduce")
-        main_stream = torch.npu.current_stream()
+        main_stream = current_stream()
         routed_ready = main_stream.record_event()
         if self.deferred_reduce_stream is None:
             raise RuntimeError("deferred all-reduce stream was not configured")

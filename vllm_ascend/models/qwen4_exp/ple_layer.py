@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from .dtype_policy import ASCEND_QWEN4EXP_DTYPE_POLICY, Qwen4ExpDtypePolicy
 from .ops.ple import ple_gate, ple_short_conv
@@ -159,7 +160,7 @@ class AscendQwen4ExpPLELayer(nn.Module):
     def project(self, embeddings: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Merged key/value projection, split into ``(key, value)``."""
         weight = self.kv_proj_weight.to(embeddings.dtype)
-        kv = torch.matmul(embeddings, weight.t())
+        kv = F.linear(embeddings, weight)
         key, value = kv.split(self.output_sizes, dim=-1)
         return key, value
 

@@ -107,7 +107,7 @@ class Schedule {
   }
 
  private:
-  static constexpr uint32_t MAX_ROUTES = 80;
+  static constexpr uint32_t MAX_ROUTES = 128;
   __aicore__ inline void ProcessRoutes() {
     int32_t expertIds[MAX_ROUTES];
     uint32_t counts[MAX_ROUTES], groupOfRow[MAX_ROUTES], starts[MAX_ROUTES + 1];

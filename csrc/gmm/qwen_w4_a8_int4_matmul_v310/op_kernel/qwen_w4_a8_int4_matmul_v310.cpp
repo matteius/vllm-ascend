@@ -207,7 +207,7 @@ template <uint32_t N>
 __aicore__ inline void RunSchedule(GM_ADDR low, GM_ADDR high, GM_ADDR xs, GM_ADDR sums, GM_ADDR codes, GM_ADDR scale,
                                    GM_ADDR offset, GM_ADDR weight_sum, GM_ADDR ends, GM_ADDR y,
                                    __gm__ const QwenW4A8Int4KernelTilingData* td) {
-  constexpr int64_t DECODE_ROUTE_LIMIT = 80;
+  constexpr int64_t DECODE_ROUTE_LIMIT = 128;
   if (td->numRows <= DECODE_ROUTE_LIMIT) {
     native_int4::Schedule<16, N> op;
     op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);

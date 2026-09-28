@@ -1025,13 +1025,18 @@ class NPUModelRunner310(NPUModelRunner):
 
         if self.enable_enpu or update_before_replay:
             if update_before_replay:
-                torch.npu.current_stream().synchronize()
+                main_stream = torch.npu.current_stream()
+                # Order the update after the previous replay without blocking
+                # the host. BreakableACLGraphWrapper retains the final host
+                # synchronization before replay, so mutable MTP/GDN metadata
+                # is still complete before the graph consumes it.
+                self.update_stream.wait_stream(main_stream)
             self._update_full_graph_params_if_needed(
                 forward_context,
                 num_tokens_padded,
             )
             if update_before_replay:
-                torch.npu.current_stream().wait_stream(self.update_stream)
+                main_stream.wait_stream(self.update_stream)
             hidden_states = run_model()
         else:
             hidden_states = run_model()
