@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU coverage for the Qwen4Exp FP16 MTP draft head."""
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -14,7 +15,12 @@ from tests.ut.qwen38_1m.test_qwen4exp_assembly import (
     _vllm_config,
 )
 from vllm_ascend.models.qwen4_exp.dtype_policy import Qwen4ExpDtypePolicy
-from vllm_ascend.models.qwen4_exp.mtp import AscendQwen4ExpMTP, _MTPFP16MoE, _MTPPredictor
+from vllm_ascend.models.qwen4_exp.mtp import (
+    AscendQwen4ExpMTP,
+    _MTPFP16MoE,
+    _MTPPredictor,
+    _select_local_mtp_routes,
+)
 
 
 def _build(*, expert_sharding: tuple[int, int] = (0, 1), qsa: bool = False) -> AscendQwen4ExpMTP:
@@ -26,6 +32,84 @@ def _build(*, expert_sharding: tuple[int, int] = (0, 1), qsa: bool = False) -> A
         patch("vllm_ascend.models.qwen4_exp.mtp._resolve_expert_sharding", return_value=expert_sharding),
     ):
         return AscendQwen4ExpMTP(vllm_config=vllm_config)
+
+
+@pytest.mark.parametrize(
+    ("flat_ids", "expert_offset", "num_local_experts", "top_k"),
+    [
+        ([0, 4, 5, 8, 6, 3, 7, 9], 4, 4, 2),
+        ([0, 1, 0, 1, 0, 1], 2, 2, 3),
+        ([2, 3, 2, 3], 2, 2, 2),
+    ],
+)
+def test_select_local_mtp_routes_matches_boolean_index_reference(
+    flat_ids: list[int], expert_offset: int, num_local_experts: int, top_k: int
+) -> None:
+    ids = torch.tensor(flat_ids, dtype=torch.int64)
+    weights = torch.arange(1, len(flat_ids) + 1, dtype=torch.float32) / 10
+    slots = torch.arange(ids.numel())
+    tokens = slots // top_k
+    local_ids = ids - expert_offset
+    local_mask = (local_ids >= 0) & (local_ids < num_local_experts)
+
+    actual = _select_local_mtp_routes(ids, weights, expert_offset, num_local_experts, top_k)
+    expected = (
+        local_ids[local_mask],
+        slots[local_mask],
+        tokens[local_mask],
+        weights[local_mask],
+    )
+
+    for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
+        torch.testing.assert_close(actual_tensor, expected_tensor)
+        assert actual_tensor.shape == expected_tensor.shape
+        assert actual_tensor.dtype == expected_tensor.dtype
+
+
+def test_select_local_mtp_routes_uses_one_nonzero() -> None:
+    ids = torch.tensor([0, 2, 4, 1, 3, 5], dtype=torch.int64)
+    weights = torch.arange(6, dtype=torch.float32)
+    original_nonzero = torch.nonzero
+
+    with patch("vllm_ascend.models.qwen4_exp.mtp.torch.nonzero", wraps=original_nonzero) as nonzero:
+        local_ids, slot_ids, token_ids, local_weights = _select_local_mtp_routes(ids, weights, 2, 2, 3)
+
+    assert nonzero.call_count == 1
+    torch.testing.assert_close(local_ids, torch.tensor([0, 1]))
+    torch.testing.assert_close(slot_ids, torch.tensor([1, 4]))
+    torch.testing.assert_close(token_ids, torch.tensor([0, 1]))
+    torch.testing.assert_close(local_weights, torch.tensor([1.0, 4.0]))
+
+
+def test_mtp_graph_capture_defers_eager_route_dispatch_into_stable_output() -> None:
+    config = _tiny_text_config(num_layers=1, moe=True, ple_layer_ids=())
+    bank = _MTPFP16MoE(config, Qwen4ExpDtypePolicy(), (0, 1))
+    x = torch.randn(2, config.hidden_size, dtype=torch.float16)
+    expected = torch.randn_like(x)
+
+    class FakeCapture:
+        _capturing = True
+        callback = None
+
+        def add_eager(self, callback) -> None:
+            self.callback = callback
+
+    capture = FakeCapture()
+    fake_utils = ModuleType("vllm_ascend.utils")
+    fake_utils.weak_ref_tensor = lambda tensor: tensor
+    with (
+        patch("vllm_ascend.models.qwen4_exp.mtp.BreakableCUDAGraphCapture.current", return_value=capture),
+        patch.dict(sys.modules, {"vllm_ascend.utils": fake_utils}),
+        patch.object(bank, "_forward_eager", return_value=expected) as forward_eager,
+    ):
+        output = bank(x)
+        assert capture.callback is not None
+        assert not forward_eager.called
+        capture.callback()
+
+    assert forward_eager.call_count == 1
+    assert forward_eager.call_args.args[0] is x
+    torch.testing.assert_close(output, expected)
 
 
 @pytest.mark.parametrize("projection,shape", [("gate_up_proj", (64, 64)), ("down_proj", (64, 32))])

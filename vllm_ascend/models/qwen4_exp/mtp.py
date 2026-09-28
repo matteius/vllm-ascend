@@ -36,6 +36,23 @@ from .model import (
 from .moe import _w8a16_linear_npu, route_topk, swiglu_gate_up
 
 
+def _select_local_mtp_routes(
+    flat_ids: torch.Tensor,
+    flat_weights: torch.Tensor,
+    expert_offset: int,
+    num_local_experts: int,
+    top_k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Select this rank's MTP routes with one device-side ``nonzero``."""
+    local_ids = flat_ids - expert_offset
+    local_mask = (local_ids >= 0) & (local_ids < num_local_experts)
+    slot_ids = torch.nonzero(local_mask, as_tuple=False).flatten()
+    local_ids = local_ids.index_select(0, slot_ids)
+    token_ids = slot_ids // top_k
+    flat_weights = flat_weights.index_select(0, slot_ids)
+    return local_ids, slot_ids, token_ids, flat_weights
+
+
 class _MTPFP16MoE(nn.Module):
     """Local slice of the FP16 MTP checkpoint, optionally stored as W8A16."""
 
@@ -143,14 +160,13 @@ class _MTPFP16MoE(nn.Module):
         )
         flat_ids = ids.flatten()
         flat_weights = weights.flatten()
-        slot_ids = torch.arange(flat_ids.numel(), device=x.device)
-        token_ids = slot_ids // self.top_k
-        local_ids = flat_ids - self.expert_offset
-        local_mask = (local_ids >= 0) & (local_ids < self.num_local_experts)
-        local_ids = local_ids[local_mask]
-        slot_ids = slot_ids[local_mask]
-        token_ids = token_ids[local_mask]
-        flat_weights = flat_weights[local_mask]
+        local_ids, slot_ids, token_ids, flat_weights = _select_local_mtp_routes(
+            flat_ids,
+            flat_weights,
+            self.expert_offset,
+            self.num_local_experts,
+            self.top_k,
+        )
         route_outputs = torch.zeros(
             (flat_ids.numel(), x.shape[-1]), dtype=self.policy.accumulation_dtype, device=x.device
         )
