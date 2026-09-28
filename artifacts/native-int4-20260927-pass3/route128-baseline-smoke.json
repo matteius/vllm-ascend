@@ -1,0 +1,194 @@
+[
+  {
+    "prompt": "State the capital of France in one word.",
+    "route128": {
+      "role": "assistant",
+      "content": "Paris",
+      "refusal": null,
+      "annotations": null,
+      "audio": null,
+      "function_call": null,
+      "reasoning": null
+    },
+    "baseline": {
+      "role": "assistant",
+      "content": "Paris",
+      "refusal": null,
+      "annotations": null,
+      "audio": null,
+      "function_call": null,
+      "reasoning": null
+    },
+    "equal": true,
+    "usage_route128": {
+      "prompt_tokens": 21,
+      "total_tokens": 23,
+      "completion_tokens": 2,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "created_cache_tokens": 0,
+        "multimodal_tokens": null
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "usage_baseline": {
+      "prompt_tokens": 21,
+      "total_tokens": 23,
+      "completion_tokens": 2,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "created_cache_tokens": 0,
+        "multimodal_tokens": null
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    }
+  },
+  {
+    "prompt": "Compute 37 * 19. Give only the integer.",
+    "route128": {
+      "role": "assistant",
+      "content": "703",
+      "refusal": null,
+      "annotations": null,
+      "audio": null,
+      "function_call": null,
+      "reasoning": null
+    },
+    "baseline": {
+      "role": "assistant",
+      "content": "703",
+      "refusal": null,
+      "annotations": null,
+      "audio": null,
+      "function_call": null,
+      "reasoning": null
+    },
+    "equal": true,
+    "usage_route128": {
+      "prompt_tokens": 26,
+      "total_tokens": 30,
+      "completion_tokens": 4,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "created_cache_tokens": 0,
+        "multimodal_tokens": null
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "usage_baseline": {
+      "prompt_tokens": 26,
+      "total_tokens": 30,
+      "completion_tokens": 4,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "created_cache_tokens": 0,
+        "multimodal_tokens": null
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    }
+  },
+  {
+    "prompt": "Continue the sequence: 2, 3, 5, 8, 13,",
+    "route128": {
+      "role": "assistant",
+      "content": "To continue the sequence **2, 3, 5, 8, 13**, we need to identify the pattern governing the progression of the numbers.\n\n### Step 1: Analyze the Differences\nLet's look at the difference between consecutive terms:\n*   $3 - 2 = ",
+      "refusal": null,
+      "annotations": null,
+      "audio": null,
+      "function_call": null,
+      "reasoning": null
+    },
+    "baseline": {
+      "role": "assistant",
+      "content": "To continue the sequence **2, 3, 5, 8, 13**, we need to identify the pattern governing the progression of the numbers.\n\n### Step 1: Analyze the Pattern\nLet's look at the relationship between consecutive terms:\n*   $2 + 3 = ",
+      "refusal": null,
+      "annotations": null,
+      "audio": null,
+      "function_call": null,
+      "reasoning": null
+    },
+    "equal": false,
+    "usage_route128": {
+      "prompt_tokens": 32,
+      "total_tokens": 96,
+      "completion_tokens": 64,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "created_cache_tokens": 0,
+        "multimodal_tokens": null
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "usage_baseline": {
+      "prompt_tokens": 32,
+      "total_tokens": 96,
+      "completion_tokens": 64,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "created_cache_tokens": 0,
+        "multimodal_tokens": null
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    }
+  },
+  {
+    "prompt": "Write a Python function that returns the larger of two integers.",
+    "route128": {
+      "role": "assistant",
+      "content": "```python\ndef larger_of_two(a: int, b: int) -> int:\n    \"\"\"Return the larger of two integers.\"\"\"\n    return a if a >= b else b\n```",
+      "refusal": null,
+      "annotations": null,
+      "audio": null,
+      "function_call": null,
+      "reasoning": null
+    },
+    "baseline": {
+      "role": "assistant",
+      "content": "```python\ndef larger_of_two(a: int, b: int) -> int:\n    \"\"\"Return the larger of two integers.\"\"\"\n    return a if a >= b else b\n```",
+      "refusal": null,
+      "annotations": null,
+      "audio": null,
+      "function_call": null,
+      "reasoning": null
+    },
+    "equal": true,
+    "usage_route128": {
+      "prompt_tokens": 24,
+      "total_tokens": 65,
+      "completion_tokens": 41,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "created_cache_tokens": 0,
+        "multimodal_tokens": null
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "usage_baseline": {
+      "prompt_tokens": 24,
+      "total_tokens": 65,
+      "completion_tokens": 41,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "created_cache_tokens": 0,
+        "multimodal_tokens": null
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    }
+  }
+]

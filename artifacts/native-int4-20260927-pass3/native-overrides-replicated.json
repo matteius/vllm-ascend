@@ -1,0 +1,16 @@
+{
+  "text_config": {
+    "ascend_expert_quantization": {
+      "backend": "cube_310_int4_a8",
+      "activation_quantization": "int8_per_group",
+      "bits": 4,
+      "format": "qwen4exp_w4a16_group_v1",
+      "group_size": 128,
+      "offset_dtype": "int8",
+      "packing": "signed_int4_low_nibble_first_in_axis",
+      "scale_dtype": "float16",
+      "shared_expert_execution": "replicated",
+      "symmetric": false
+    }
+  }
+}
