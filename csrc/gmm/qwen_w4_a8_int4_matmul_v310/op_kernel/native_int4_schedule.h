@@ -3,27 +3,33 @@
 #ifndef NATIVE_INT4_SCHEDULE_H
 #define NATIVE_INT4_SCHEDULE_H
 #include "kernel_operator.h"
-#include "qwen_w4_a8_int4_matmul_v310_tiling_data.h"
 
 namespace native_int4 {
 using namespace AscendC;
 // Separate bounded decode/MTP and prefill schedules. A packed activation tile
 // feeds N outputs; the full packed K weight tile stays in L1 across M tiles.
-template <uint32_t M, uint32_t N = 64>
+template <uint32_t M, uint32_t N = 64, bool COMBINE_ROUTES = false>
 class Schedule {
   static constexpr uint32_t GROUP = 128, BLOCK = 16, K0 = 64, LANES = 8;
   static constexpr uint32_t A_BYTES = M * GROUP / 2, B_BYTES = N * GROUP / 2;
   static constexpr uint32_t ELEMENTS = M * N, COLUMN_ELEMENTS = M * BLOCK;
   static constexpr uint32_t MAX_K = 2560;
   static constexpr uint32_t END_CACHE_SIZE = 32;
+  static constexpr uint32_t MAX_COMBINED_ROUTES = 30;
 
  public:
+  template <typename TilingData>
   __aicore__ inline void Init(GM_ADDR low, GM_ADDR high, GM_ADDR xs, GM_ADDR sums, GM_ADDR codes, GM_ADDR scale,
-                              GM_ADDR offset, GM_ADDR weightSum, GM_ADDR ends, GM_ADDR y,
-                              __gm__ const QwenW4A8Int4KernelTilingData* td) {
+                              GM_ADDR offset, GM_ADDR weightSum, GM_ADDR ends, GM_ADDR routeWeights, GM_ADDR y,
+                              __gm__ const TilingData* td) {
     routed_ = td->routed != 0;
     broadcastFactor_ = td->broadcastFactor;
     routeIds_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(ends));
+    if constexpr (COMBINE_ROUTES) {
+      routeWeights_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(routeWeights));
+      combinedY_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(y));
+      topK_ = td->topK;
+    }
     rows_ = td->numRows;
     experts_ = td->numExperts;
     n_ = td->nDim;
@@ -38,7 +44,7 @@ class Schedule {
     zw_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(offset));
     ws_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(weightSum));
     ends_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(ends));
-    y_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(y));
+    if constexpr (!COMBINE_ROUTES) y_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(y));
     pipe_.InitBuffer(a1_, 2 * A_BYTES);
     pipe_.InitBuffer(b1_, N * MAX_K / 2);
     pipe_.InitBuffer(a2_, 2 * A_BYTES);
@@ -52,6 +58,9 @@ class Schedule {
     pipe_.InitBuffer(output_, ELEMENTS * sizeof(half));
     pipe_.InitBuffer(endCache_, END_CACHE_SIZE * sizeof(int64_t));
     pipe_.InitBuffer(routeCache_, MAX_ROUTES * sizeof(int32_t));
+    if constexpr (COMBINE_ROUTES) {
+      pipe_.InitBuffer(routeOutput_, MAX_COMBINED_ROUTES * N * sizeof(half));
+    }
   }
 
   __aicore__ inline void Process() {
@@ -145,6 +154,35 @@ class Schedule {
       sourceRows_[row] = row / broadcastFactor_;
       if (groupOfRow[row] != MAX_ROUTES) routeRows_[counts[groupOfRow[row]]++] = row;
     }
+    const uint32_t tiles = n_ / N;
+    const uint32_t partitions = GetBlockNum() > tiles && GetBlockNum() % tiles == 0 ? GetBlockNum() / tiles : 1;
+    if constexpr (COMBINE_ROUTES) {
+      if (rows_ > MAX_COMBINED_ROUTES || topK_ == 0 || rows_ % topK_ != 0 || partitions != 1) {
+        ASCENDC_ASSERT(false, { KERNEL_LOG(KERNEL_ERROR, "invalid fused W4 route reduction dimensions"); });
+        return;
+      }
+      // A single core owns each N-wide output tile. Keep the FP16 projection
+      // boundary in UB, then reduce the original route slots in order.
+      for (int64_t tile = GetBlockIdx(); tile < tiles; tile += GetBlockNum()) {
+        for (uint32_t group = 0; group < groups; ++group) {
+          const int64_t expert = expertIds[group];
+          DataCopy(b1_.Get<int8_t>(), codes_[(expert * n_ + tile * N) * k_ / 2], N * k_ / 2);
+          SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
+          WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
+          for (uint32_t row = starts[group]; row < starts[group + 1]; row += M) {
+            Project(expert, tile, row, Min(M, starts[group + 1] - row));
+          }
+          SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+          WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+        }
+        CombineRoutes(cachedIds, tile);
+      }
+      return;
+    }
+    if (partitions > 1) {
+      ProcessPartitionedRoutes(expertIds, groupOfRow, starts, groups, tiles, partitions);
+      return;
+    }
     // Zero all route slots first, so peer rows never retain stale graph data.
     auto out = output_.Get<half>();
     Duplicate(out, static_cast<half>(0), ELEMENTS);
@@ -171,7 +209,80 @@ class Schedule {
       }
     }
   }
+
+  __aicore__ inline void ProcessPartitionedRoutes(const int32_t* expertIds, const uint32_t* groupOfRow,
+                                                  const uint32_t* starts, uint32_t groups, uint32_t tiles,
+                                                  uint32_t partitions) {
+    // N=320 leaves four gate/up tiles on the eight 310P AI cores. Assign two
+    // route partitions to each tile, halving activation gathers while keeping
+    // every core occupied. Valid rows are always overwritten by their group
+    // owner; only invalid/peer rows require explicit graph-replay clearing.
+    const uint32_t tile = GetBlockIdx() % tiles;
+    const uint32_t partition = GetBlockIdx() / tiles;
+    auto out = output_.Get<half>();
+    Duplicate(out, static_cast<half>(0), ELEMENTS);
+    SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
+    WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
+    for (uint32_t row = partition; row < rows_; row += partitions) {
+      if (groupOfRow[row] != MAX_ROUTES) continue;
+      for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
+        DataCopy(y_[static_cast<int64_t>(row) * n_ + tile * N + nb * BLOCK], out[nb * COLUMN_ELEMENTS], BLOCK);
+      }
+    }
+    SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
+    WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
+    for (uint32_t group = partition; group < groups; group += partitions) {
+      const int64_t expert = expertIds[group];
+      DataCopy(b1_.Get<int8_t>(), codes_[(expert * n_ + tile * N) * k_ / 2], N * k_ / 2);
+      SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
+      WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
+      for (uint32_t row = starts[group]; row < starts[group + 1]; row += M) {
+        Project(expert, tile, row, Min(M, starts[group + 1] - row));
+      }
+      SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+      WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
+    }
+  }
   __aicore__ inline uint32_t Min(int64_t a, int64_t b) { return a < b ? a : b; }
+  __aicore__ inline void StageRoutes(LocalTensor<half> out, int64_t row, uint32_t count) {
+    auto staged = routeOutput_.Get<half>();
+    for (uint32_t m = 0; m < count; ++m) {
+      const uint32_t route = routeRows_[row + m];
+      for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
+        Adds(staged[route * N + nb * BLOCK], out[nb * COLUMN_ELEMENTS + m * BLOCK], static_cast<half>(0), BLOCK);
+      }
+    }
+    PipeBarrier<PIPE_V>();
+  }
+
+  __aicore__ inline void CombineRoutes(LocalTensor<int32_t> cachedIds, int64_t tile) {
+    auto staged = routeOutput_.Get<half>();
+    auto values = result_.Get<float>();
+    auto accumulator = values[N];
+    const uint32_t tokens = rows_ / topK_;
+    for (uint32_t token = 0; token < tokens; ++token) {
+      Duplicate(accumulator, 0.0f, N);
+      PipeBarrier<PIPE_V>();
+      for (uint32_t route = 0; route < topK_; ++route) {
+        const uint32_t slot = token * topK_ + route;
+        const int32_t expert = cachedIds.GetValue(slot);
+        // Peer slots were never initialized. Check ownership before the load.
+        if (expert < 0 || expert >= experts_) continue;
+        Cast(values, staged[slot * N], RoundMode::CAST_NONE, N);
+        PipeBarrier<PIPE_V>();
+        Muls(values, values, routeWeights_.GetValue(slot), N);
+        PipeBarrier<PIPE_V>();
+        Add(accumulator, accumulator, values, N);
+        PipeBarrier<PIPE_V>();
+      }
+      SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
+      WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
+      DataCopy(combinedY_[static_cast<int64_t>(token) * n_ + tile * N], accumulator, N);
+      SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
+      WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
+    }
+  }
+
   __aicore__ inline void Store(LocalTensor<half> out, int64_t tile, int64_t row, uint32_t count) {
     DataCopyParams copy{static_cast<uint16_t>(count), 1, 0, static_cast<uint16_t>(n_ / BLOCK - 1)};
     for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
@@ -447,11 +558,16 @@ class Schedule {
     PipeBarrier<PIPE_V>();
     auto out = output_.Get<half>();
     Cast(out, accumulator, RoundMode::CAST_NONE, ELEMENTS);
-    SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
-    WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
-    Store(out, tile, row, count);
-    SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
-    WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
+    if constexpr (COMBINE_ROUTES) {
+      PipeBarrier<PIPE_V>();
+      StageRoutes(out, row, count);
+    } else {
+      SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
+      WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
+      Store(out, tile, row, count);
+      SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
+      WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
+    }
   }
   TPipe pipe_;
   TBuf<TPosition::A1> a1_;
@@ -459,16 +575,18 @@ class Schedule {
   TBuf<TPosition::A2> a2_;
   TBuf<TPosition::B2> b2_;
   TBuf<TPosition::CO1> c_;
-  TBuf<TPosition::VECCALC> packing_, integers_, result_, metadata_, activation_, output_, endCache_, routeCache_;
+  TBuf<TPosition::VECCALC> packing_, integers_, result_, metadata_, activation_, output_, endCache_, routeCache_,
+      routeOutput_;
   GlobalTensor<int8_t> low_, high_, codes_;
   GlobalTensor<float> xs_, sums_;
   GlobalTensor<half> sw_, zw_, ws_, y_;
+  GlobalTensor<float> routeWeights_, combinedY_;
   GlobalTensor<int64_t> ends_;
   GlobalTensor<int32_t> routeIds_;
   uint32_t routeRows_[MAX_ROUTES];
   uint32_t sourceRows_[MAX_ROUTES];
   bool routed_;
-  int64_t rows_, experts_, n_, k_, groups_, broadcastFactor_;
+  int64_t rows_, experts_, n_, k_, groups_, broadcastFactor_, topK_;
 };
 }  // namespace native_int4
 #endif

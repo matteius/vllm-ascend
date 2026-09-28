@@ -96,6 +96,6 @@ def test_worker_resolves_lazy_operator_registration_before_layout(monkeypatch, e
     if enabled:
         assert policy.configure_w4_backend(config).backend == NATIVE_INT4_BACKEND
     else:
-        with pytest.raises(ValueError, match="both rebuilt operators"):
+        with pytest.raises(ValueError, match="rebuilt native operators"):
             policy.configure_w4_backend(config)
     assert registrations == [True]

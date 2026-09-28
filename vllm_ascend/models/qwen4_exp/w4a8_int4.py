@@ -32,6 +32,15 @@ def pack_activation_device(inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
     return torch.ops._C_ascend.npu_qwen_w4_a8_pack_310(inputs)
 
 
+def swiglu_pack_activation_device(gate_up: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """Fuse FP32 SwiGLU, FP16 rounding, and native-INT4 activation packing."""
+    if gate_up.device.type != "npu":
+        raise ValueError("native INT4 SwiGLU packing requires NPU inputs")
+    if not hasattr(torch.ops._C_ascend, "npu_qwen_w4_a8_swiglu_pack_310"):
+        raise RuntimeError("native INT4 requires the rebuilt SwiGLU pack operator")
+    return torch.ops._C_ascend.npu_qwen_w4_a8_swiglu_pack_310(gate_up)
+
+
 def pack_nibbles(values: torch.Tensor) -> torch.Tensor:
     return ((values[..., ::2] & 15) | ((values[..., 1::2] & 15) << 4)).to(torch.int8)
 

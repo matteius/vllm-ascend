@@ -111,6 +111,7 @@ def _vllm_config(cfg: SimpleNamespace) -> SimpleNamespace:
         hf_text_config=cfg,
         hf_config=SimpleNamespace(text_config=cfg, vision_config=None),
         dtype=torch.float16,
+        head_dtype=None,
         multimodal_config=None,
     )
     return SimpleNamespace(
@@ -120,6 +121,7 @@ def _vllm_config(cfg: SimpleNamespace) -> SimpleNamespace:
         parallel_config=SimpleNamespace(tensor_parallel_size=1),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=16),
         speculative_config=None,
+        compilation_config=SimpleNamespace(static_forward_context={}),
     )
 
 
@@ -128,22 +130,41 @@ def _single_rank_tp():
     """Shim TP collectives to identity so the model runs on one CPU process."""
     vmod = "vllm.model_executor.layers.vocab_parallel_embedding"
     lmod = "vllm.model_executor.layers.logits_processor"
+    avmod = "vllm_ascend.ops.vocab_parallel_embedding"
+    qmod = "vllm_ascend.models.qwen4_exp.model"
     with (
         patch(f"{vmod}.get_tensor_model_parallel_rank", return_value=0),
         patch(f"{vmod}.get_tensor_model_parallel_world_size", return_value=1),
         patch(f"{vmod}.tensor_model_parallel_all_reduce", side_effect=lambda x: x),
-        patch(f"{lmod}.get_tensor_model_parallel_world_size", return_value=1),
-        patch(f"{lmod}.tensor_model_parallel_gather", side_effect=lambda x: x),
-        patch(f"{lmod}.tensor_model_parallel_all_gather", side_effect=lambda x, dim=-1: x),
+        patch(f"{lmod}.get_tensor_model_parallel_world_size", return_value=1, create=True),
+        patch(f"{lmod}.tensor_model_parallel_gather", side_effect=lambda x: x, create=True),
+        patch(f"{lmod}.tensor_model_parallel_all_gather", side_effect=lambda x, dim=-1: x, create=True),
+        patch(f"{qmod}._resolve_attn_backend", return_value=object),
+        contextlib.ExitStack() as stack,
     ):
+        if avmod in sys.modules:
+            stack.enter_context(patch(f"{avmod}.lmhead_tp_enable", return_value=False))
+            stack.enter_context(patch(f"{avmod}.embedding_tp_enable", return_value=False))
+            stack.enter_context(
+                patch(
+                    f"{avmod}.get_ascend_config",
+                    return_value=SimpleNamespace(enable_reduce_sample=False),
+                )
+            )
+            stack.enter_context(
+                patch(f"{avmod}.get_tp_group", return_value=SimpleNamespace(world_size=1, rank_in_group=0))
+            )
         yield
 
 
 def _build(cfg: SimpleNamespace):
+    from vllm.config import set_current_vllm_config
+
     from vllm_ascend.models.qwen4_exp.model import AscendQwen4ExpForCausalLM
 
-    with _single_rank_tp():
-        return AscendQwen4ExpForCausalLM(vllm_config=_vllm_config(cfg))
+    vllm_config = _vllm_config(cfg)
+    with _single_rank_tp(), set_current_vllm_config(vllm_config):
+        return AscendQwen4ExpForCausalLM(vllm_config=vllm_config)
 
 
 def _load_dummy_weights(model, *, seed: int = 0) -> tuple[int, int]:

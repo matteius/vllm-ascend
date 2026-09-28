@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from vllm.config import set_current_vllm_config
 
 from tests.ut.qwen38_1m.test_qwen4exp_assembly import (
     _single_rank_tp,
@@ -29,6 +30,7 @@ def _build(*, expert_sharding: tuple[int, int] = (0, 1), qsa: bool = False) -> A
     vllm_config = _vllm_config(config)
     with (
         _single_rank_tp(),
+        set_current_vllm_config(vllm_config),
         patch("vllm_ascend.models.qwen4_exp.mtp._resolve_expert_sharding", return_value=expert_sharding),
     ):
         return AscendQwen4ExpMTP(vllm_config=vllm_config)
@@ -132,6 +134,7 @@ def test_mtp_lm_head_sharing_requires_identical_loaded_weights():
     draft = _build()
     original = draft.lm_head
     target_head = torch.nn.Linear(original.weight.shape[1], original.weight.shape[0], bias=False).half()
+    target_head.quant_method = original.quant_method
     target = SimpleNamespace(lm_head=target_head)
     with torch.no_grad():
         original.weight.zero_()

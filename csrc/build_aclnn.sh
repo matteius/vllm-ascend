@@ -132,6 +132,11 @@ invalidate_stale_kernel_cache() {
                  grep -q .; then
             # Routed projections share the group-W4 Cube implementation.
             stale_kernel_cache=1
+        elif [[ "${op_name}" == "qwen_w4_a8_int4_down_reduce_v310" ]] &&
+             find "${ROOT_DIR}/csrc/gmm/qwen_w4_a8_int4_matmul_v310/op_kernel" -type f -newer "${source_stamp}" \
+                 -print -quit | grep -q .; then
+            # The fused down projection shares the native INT4 schedule.
+            stale_kernel_cache=1
         fi
         if [[ "${stale_kernel_cache}" -eq 0 ]]; then
             generated_launcher="${ROOT_DIR}/csrc/build/impl/dynamic/${op_name}.py"
@@ -271,7 +276,9 @@ if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
         "qwen_w4_routed_matmul_v310"
         "qwen_w4_grouped_matmul_v310"
         "qwen_w4_a8_int4_matmul_v310"
+        "qwen_w4_a8_int4_down_reduce_v310"
         "qwen_w4_a8_pack_v310"
+        "qwen_w4_a8_swiglu_pack_v310"
         "rms_norm_dynamic_quant"
         "add_rms_norm_dynamic_quant"
     )

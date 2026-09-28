@@ -11,6 +11,13 @@ namespace {
 using namespace AscendC;
 constexpr uint32_t TILE = 16, GROUP = 128, FRACTAL_K = 64;
 constexpr uint32_t PACKED_TILE = TILE * GROUP / 2, ELEMENTS = TILE * TILE;
+constexpr int64_t DECODE_ROUTE_LIMIT = 128;
+constexpr int64_t MODEL_C1_ROUTE_LIMIT = 30;
+constexpr int64_t MODEL_GATE_UP_OUTPUTS = 1280;
+constexpr int64_t MODEL_GATE_UP_INPUTS = 2560;
+constexpr int64_t MODEL_DOWN_OUTPUTS = 2560;
+constexpr int64_t MODEL_DOWN_INPUTS = 640;
+constexpr uint32_t MODEL_DECODE_COLUMNS = 320;
 
 class NativeInt4 {
  public:
@@ -207,18 +214,17 @@ template <uint32_t N>
 __aicore__ inline void RunSchedule(GM_ADDR low, GM_ADDR high, GM_ADDR xs, GM_ADDR sums, GM_ADDR codes, GM_ADDR scale,
                                    GM_ADDR offset, GM_ADDR weight_sum, GM_ADDR ends, GM_ADDR y,
                                    __gm__ const QwenW4A8Int4KernelTilingData* td) {
-  constexpr int64_t DECODE_ROUTE_LIMIT = 128;
   if (td->numRows <= DECODE_ROUTE_LIMIT) {
     native_int4::Schedule<16, N> op;
-    op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
+    op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, nullptr, y, td);
     op.Process();
   } else if (td->numRows > td->numExperts * 64) {
     native_int4::Schedule<128> op;
-    op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
+    op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, nullptr, y, td);
     op.Process();
   } else {
     native_int4::Schedule<32, N> op;
-    op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
+    op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, nullptr, y, td);
     op.Process();
   }
 }
@@ -234,7 +240,18 @@ extern "C" __global__ __aicore__ void qwen_w4_a8_int4_matmul_v310(GM_ADDR low, G
     // Keep every core equally occupied at the model's projection widths.
     // Dense prefill retains N=64 to fit the M=128 accumulator in UB.
     constexpr uint32_t WIDE_COLUMNS = 160, MEDIUM_COLUMNS = 80;
-    if (td->nDim % (GetBlockNum() * WIDE_COLUMNS) == 0) {
+    const bool modelC1GateUp = td->numRows <= MODEL_C1_ROUTE_LIMIT && td->nDim == MODEL_GATE_UP_OUTPUTS &&
+                               td->kDim == MODEL_GATE_UP_INPUTS;
+    const bool modelDecodeDown = td->numRows <= DECODE_ROUTE_LIMIT && td->nDim == MODEL_DOWN_OUTPUTS &&
+                                 td->kDim == MODEL_DOWN_INPUTS;
+    if (modelC1GateUp || modelDecodeDown) {
+      // One 320-column tile per AI core halves route-plan and activation
+      // preparation for the model's down projection. Gate/up has only four
+      // tiles at this width, so its c1 path splits route groups across two
+      // cores per tile. Larger gate/up concurrency and every prefill shape
+      // keep their proven schedules.
+      RunSchedule<MODEL_DECODE_COLUMNS>(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
+    } else if (td->nDim % (GetBlockNum() * WIDE_COLUMNS) == 0) {
       RunSchedule<WIDE_COLUMNS>(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);
     } else if (td->nDim % (GetBlockNum() * MEDIUM_COLUMNS) == 0) {
       RunSchedule<MEDIUM_COLUMNS>(low, high, xs, sums, codes, scale, offset, weight_sum, ends, y, td);

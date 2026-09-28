@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+#ifndef QWEN_W4A8_INT4_DOWN_REDUCE_TILING_DATA_H
+#define QWEN_W4A8_INT4_DOWN_REDUCE_TILING_DATA_H
+#include <cstdint>
+struct QwenW4A8Int4DownReduceKernelTilingData {
+  int64_t numRows;
+  int64_t numExperts;
+  int64_t nDim;
+  int64_t kDim;
+  int64_t metadataLanes;
+  int64_t routed;
+  int64_t broadcastFactor;
+  int64_t topK;
+};
+#endif

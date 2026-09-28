@@ -116,6 +116,16 @@ def test_metadata_and_eager_gate_fail_closed():
     with pytest.raises(ValueError, match="shared_expert_execution"):
         w4_config(bad)
 
+    bad = config()
+    bad.ascend_expert_quantization["lm_head_execution"] = "automatic"
+    with pytest.raises(ValueError, match="lm_head_execution"):
+        w4_config(bad)
+
+    bad = config()
+    bad.ascend_expert_quantization["lm_head_execution"] = "w8a8_dynamic"
+    with pytest.raises(ValueError, match="native INT4 backend"):
+        w4_config(bad)
+
 
 @pytest.mark.parametrize(
     "mode,expected_width",

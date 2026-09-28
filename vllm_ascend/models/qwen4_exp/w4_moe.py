@@ -18,7 +18,13 @@ from torch import nn
 from .dtype_policy import ASCEND_QWEN4EXP_DTYPE_POLICY, Qwen4ExpDtypePolicy
 from .grouped_expert_dispatch import build_grouped_expert_dispatch
 from .moe import route_topk
-from .w4a8_int4 import NATIVE_INT4_BACKEND, pack_activation_device, pack_native_metadata, pack_native_weight
+from .w4a8_int4 import (
+    NATIVE_INT4_BACKEND,
+    pack_activation_device,
+    pack_native_metadata,
+    pack_native_weight,
+    swiglu_pack_activation_device,
+)
 from .weight_mapping import local_expert_range
 
 FORMAT = "qwen4exp_w4a16_group_v1"
@@ -42,6 +48,11 @@ CUBE_TILED_BACKENDS = ("cube_310_tiled", "cube_310_routed", "cube_310_grouped")
 # those rows on the native routed kernel so decode does not build and sort a
 # grouped-routing descriptor in every MoE layer.
 MAX_CUBE_ROUTES = 128
+# The fused down-projection epilogue stages one FP16 tile per route in UB.
+# Model c1 decode has at most three tokens times ten routes.
+MAX_FUSED_DOWN_ROUTES = 30
+FUSED_DOWN_INPUTS = 640
+FUSED_DOWN_OUTPUTS = 2560
 # Bound route expansion and the device count matrix independently of the
 # configured context window. Shape-only chunking never inspects device ids.
 MAX_GROUPED_TOKENS = 512
@@ -57,6 +68,7 @@ SHARED_EXPERT_EXECUTIONS = (
     "replicated_overlap",
     "replicated_deferred",
 )
+LM_HEAD_EXECUTIONS = ("float16", "w8a8_dynamic")
 
 
 class DeferredReduceStream:
@@ -99,6 +111,11 @@ def w4_config(config: object) -> dict | None:
     shared_execution = metadata.get("shared_expert_execution", "tp_sharded")
     if shared_execution not in SHARED_EXPERT_EXECUTIONS:
         raise ValueError(f"shared_expert_execution must be one of {SHARED_EXPERT_EXECUTIONS}")
+    lm_head_execution = metadata.get("lm_head_execution", "float16")
+    if lm_head_execution not in LM_HEAD_EXECUTIONS:
+        raise ValueError(f"lm_head_execution must be one of {LM_HEAD_EXECUTIONS}")
+    if lm_head_execution == "w8a8_dynamic" and backend != NATIVE_INT4_BACKEND:
+        raise ValueError("dynamic-W8A8 LM head requires the hardware-qualified native INT4 backend")
     group = metadata.get("group_size")
     if type(group) is not int or group <= 0 or group % 2:
         raise ValueError("W4 group_size must be a positive even integer")
@@ -239,6 +256,24 @@ class PackedExpertBank(nn.Module):
             *prepared, self.weight, self.weight_scale, self.weight_offset, self.weight_sum, group_ends
         )
 
+    def native_down_reduce(
+        self, prepared: tuple[torch.Tensor, ...], route_ids: torch.Tensor, route_weights: torch.Tensor
+    ) -> torch.Tensor:
+        """Project route rows, then apply FP32 route weights in slot order."""
+        if self.backend != NATIVE_INT4_BACKEND:
+            raise ValueError("packed activation inputs require native INT4")
+        if not hasattr(torch.ops._C_ascend, "npu_qwen_w4_a8_int4_down_reduce_310"):
+            raise RuntimeError("native INT4 down-reduce requires the rebuilt custom operator; refusing silent fallback")
+        return torch.ops._C_ascend.npu_qwen_w4_a8_int4_down_reduce_310(
+            *prepared,
+            self.weight,
+            self.weight_scale,
+            self.weight_offset,
+            self.weight_sum,
+            route_ids,
+            route_weights.contiguous(),
+        )
+
 
 class W4SparseMoE(nn.Module):
     """Same router/shared/TP contract as W8, but separate packed weight banks."""
@@ -260,6 +295,9 @@ class W4SparseMoE(nn.Module):
         self.max_chunk_tokens = MAX_CUBE_TOKENS if metadata["backend"] in CUBE_BACKENDS else MAX_EAGER_TOKENS
         self.device_routing = metadata["backend"] in CUBE_DEVICE_ROUTED_BACKENDS
         self.native_int4 = metadata["backend"] == NATIVE_INT4_BACKEND
+        self.fused_native_down_reduce = (
+            self.native_int4 and intermediate == FUSED_DOWN_INPUTS and hidden == FUSED_DOWN_OUTPUTS
+        )
         self.grouped_routing = metadata["backend"] in ("cube_310_grouped", NATIVE_INT4_BACKEND)
         self.fused_gate_up = self.device_routing
         self.num_experts = int(config.num_experts)
@@ -485,9 +523,15 @@ class W4SparseMoE(nn.Module):
         else:
             inputs = block_input[:, None, :].expand(-1, self.top_k, -1).reshape(-1, hidden).contiguous()
             gate_up = self.projections["gate_up_proj"].routed_linear(inputs, local_ids)
-        gate, up = gate_up.to(self.compute_dtype).chunk(2, -1)
-        activation = (F.silu(gate) * up).to(self.params_dtype)
-        output = self.projections["down_proj"].routed_linear(activation, local_ids).to(self.compute_dtype)
+        if self.native_int4:
+            prepared_activation = swiglu_pack_activation_device(gate_up)
+            if self.fused_native_down_reduce and tokens * self.top_k <= MAX_FUSED_DOWN_ROUTES:
+                return self.projections["down_proj"].native_down_reduce(prepared_activation, local_ids, weights)
+            output = self.projections["down_proj"].native_linear(prepared_activation, local_ids).to(self.compute_dtype)
+        else:
+            gate, up = gate_up.to(self.compute_dtype).chunk(2, -1)
+            activation = (F.silu(gate) * up).to(self.params_dtype)
+            output = self.projections["down_proj"].routed_linear(activation, local_ids).to(self.compute_dtype)
         return (output.reshape(tokens, self.top_k, hidden) * weights.unsqueeze(-1)).sum(dim=1)
 
     def _forward_host_routed(self, block_input: torch.Tensor, weights: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:

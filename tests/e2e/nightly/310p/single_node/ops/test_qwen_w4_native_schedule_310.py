@@ -158,7 +158,7 @@ def test_native_routed_decode_matches_sorted_reference(rows, width, outputs):
 
 
 @pytest.mark.parametrize("rows", [3, 60, 80, 120, 128])
-@pytest.mark.parametrize("outputs", [128, 640, 1280])
+@pytest.mark.parametrize("outputs", [128, 640, 1280, 2560])
 def test_native_routed_changing_input_and_ids_graph(rows, outputs):
     x, banks = payload(rows, 640, outputs)
     device_x = x.npu()
@@ -229,6 +229,36 @@ def test_native_routed_reused_activation_graph_replay():
         ids.copy_(routes)
         graph.replay()
         expected = op(*pack_activation_device(changed.repeat_interleave(routes_per_token, dim=0).npu()), *banks, ids)
+        torch.testing.assert_close(captured.cpu(), expected.cpu(), rtol=0, atol=0)
+
+
+def test_model_c1_gate_up_partitioned_schedule_graph_replay():
+    tokens, routes_per_token = 3, 10
+    x, banks = payload(tokens, 2560, 1280)
+    device_x = x.npu()
+    ids = torch.zeros(tokens * routes_per_token, dtype=torch.int32, device="npu")
+    op = torch.ops._C_ascend.npu_qwen_w4_a8_int4_matmul_310
+
+    def invoke():
+        return op(*pack_activation_device(device_x), *banks, ids)
+
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        for _ in range(3):
+            invoke()
+    torch.npu.current_stream().wait_stream(stream)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, stream=stream):
+        captured = invoke()
+    for phase in range(4):
+        changed = x * (phase - 1) + 0.02 * phase
+        routes = (torch.arange(tokens * routes_per_token, dtype=torch.int32) * 7 + phase) % 5 - 1
+        device_x.copy_(changed)
+        ids.copy_(routes)
+        graph.replay()
+        expanded = changed.repeat_interleave(routes_per_token, dim=0).npu()
+        expected = op(*pack_activation_device(expanded), *banks, ids)
         torch.testing.assert_close(captured.cpu(), expected.cpu(), rtol=0, atol=0)
 
 

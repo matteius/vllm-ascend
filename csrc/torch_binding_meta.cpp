@@ -688,6 +688,20 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_qwen_w4_a8_pack_3
             at::empty_symint(metadata, x.options().dtype(at::kFloat))};
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_qwen_w4_a8_swiglu_pack_310_meta(
+    const at::Tensor& gate_up)
+{
+    const auto rows = gate_up.sym_size(0);
+    const auto width = gate_up.sym_size(1) / 2;
+    c10::SymDimVector packed{rows, width / 2};
+    c10::SymDimVector metadata{rows, width / 128, 8};
+    auto low = at::empty_symint(packed, gate_up.options().dtype(at::kChar));
+    auto high = at::empty_like(low);
+    auto scale = at::empty_symint(metadata, gate_up.options().dtype(at::kFloat));
+    auto sum = at::empty_like(scale);
+    return {low, high, scale, sum};
+}
+
 at::Tensor npu_qwen_w4_a8_int4_matmul_310_meta(
     const at::Tensor& low, const at::Tensor& high, const at::Tensor& activation_scale,
     const at::Tensor& activation_sum, const at::Tensor& codes, const at::Tensor& scale,
@@ -696,6 +710,24 @@ at::Tensor npu_qwen_w4_a8_int4_matmul_310_meta(
     c10::SymDimVector shape{group_ends.scalar_type() == at::kInt ? group_ends.sym_size(0) : low.sym_size(0),
                             codes.sym_size(1)};
     return at::empty_symint(shape, low.options().dtype(at::kHalf));
+}
+
+at::Tensor npu_qwen_w4_a8_int4_down_reduce_310_meta(
+    const at::Tensor& low, const at::Tensor& high, const at::Tensor& activation_scale,
+    const at::Tensor& activation_sum, const at::Tensor& codes, const at::Tensor& scale,
+    const at::Tensor& offset, const at::Tensor& weight_sum, const at::Tensor& route_ids,
+    const at::Tensor& route_weights)
+{
+    (void)low;
+    (void)high;
+    (void)activation_scale;
+    (void)activation_sum;
+    (void)scale;
+    (void)offset;
+    (void)weight_sum;
+    (void)route_ids;
+    c10::SymDimVector shape{route_weights.sym_size(0), codes.sym_size(1)};
+    return at::empty_symint(shape, route_weights.options().dtype(at::kFloat));
 }
 
 at::Tensor npu_recurrent_gated_delta_rule_310_meta(
@@ -2187,7 +2219,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_qwen_w4_routed_matmul_310", &vllm_ascend::meta::npu_qwen_w4_routed_matmul_310_meta);
     ops.impl("npu_qwen_w4_grouped_matmul_310", &vllm_ascend::meta::npu_qwen_w4_routed_matmul_310_meta);
     ops.impl("npu_qwen_w4_a8_pack_310", &vllm_ascend::meta::npu_qwen_w4_a8_pack_310_meta);
+    ops.impl("npu_qwen_w4_a8_swiglu_pack_310", &vllm_ascend::meta::npu_qwen_w4_a8_swiglu_pack_310_meta);
     ops.impl("npu_qwen_w4_a8_int4_matmul_310", &vllm_ascend::meta::npu_qwen_w4_a8_int4_matmul_310_meta);
+    ops.impl("npu_qwen_w4_a8_int4_down_reduce_310",
+             &vllm_ascend::meta::npu_qwen_w4_a8_int4_down_reduce_310_meta);
     // npu_recurrent_gated_delta_rule_310
     ops.impl("npu_recurrent_gated_delta_rule_310", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_310_meta);
     // npu_qsa_sparse_attention_310

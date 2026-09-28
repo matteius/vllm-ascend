@@ -119,6 +119,7 @@ from .kv_cache import (
     make_qsa_compressed_spec,
     make_qsa_raw_ring_spec,
 )
+from .lm_head_w8a8 import enable_dynamic_w8a8_lm_head
 from .moe import (
     route_topk,
     swiglu_gate_up,
@@ -375,7 +376,7 @@ class Qwen4ExpVLMultiModalProcessor(Qwen3VLMultiModalProcessor):
 # ===========================================================================
 # Eager math helpers (Triton-free, deterministic)
 # ===========================================================================
-_NPU_GROUPED_RMS_NORM_MIN_TOKENS = 256
+_NPU_GROUPED_RMS_NORM_MIN_TOKENS = 1
 _GemmaAffineCache = tuple[tuple[object, ...], torch.Tensor]
 
 
@@ -478,9 +479,15 @@ def _format_eager_linear_weights_npu(
         AscendQwen4ExpPLELayer,
     ) + extra_projection_types
     weights_to_format: list[nn.Parameter] = []
+    gdn_layers: list[_GDNAttention] = []
+    ple_layers: list[AscendQwen4ExpPLELayer] = []
     for module in model.modules():
         if not isinstance(module, projection_types):
             continue
+        if isinstance(module, _GDNAttention) and module.conv_weight.device.type == "npu":
+            gdn_layers.append(module)
+        if isinstance(module, AscendQwen4ExpPLELayer) and module.conv_weight.device.type == "npu":
+            ple_layers.append(module)
         for name, param in module.named_parameters(recurse=False):
             if (
                 name != "conv_weight"
@@ -490,7 +497,7 @@ def _format_eager_linear_weights_npu(
                 and min(param.shape) >= 16
             ):
                 weights_to_format.append(param)
-    if not weights_to_format:
+    if not weights_to_format and not gdn_layers and not ple_layers:
         return
 
     import torch_npu
@@ -500,6 +507,10 @@ def _format_eager_linear_weights_npu(
     with torch.no_grad():
         for param in weights_to_format:
             param.data = torch_npu.npu_format_cast(param.data, ACL_FORMAT_FRACTAL_NZ)
+        for layer in gdn_layers:
+            layer.prepare_native_conv_weight()
+        for layer in ple_layers:
+            layer.prepare_decode_conv_weight()
 
 
 class _GatedResidual(nn.Module):
@@ -533,7 +544,6 @@ class _GatedResidual(nn.Module):
         self.params_dtype = params_dtype
         self.compute_dtype = compute_dtype
         self.use_combine = use_combine
-
         self.hc_norm_weight = nn.Parameter(torch.zeros(self.hyper_hidden, dtype=params_dtype))
         self._hc_norm_affine_cache: _GemmaAffineCache | None = None
         self.register_buffer("_rms_unit_weight", torch.ones(self.hidden_size, dtype=torch.float32), persistent=False)
@@ -735,6 +745,7 @@ class _GDNAttention(nn.Module, MambaBase):
         self.dt_bias = nn.Parameter(torch.zeros(self.num_v_heads, dtype=self.params_dtype))
         self.norm_weight = nn.Parameter(torch.zeros(p.head_v_dim, dtype=self.params_dtype))
         self.out_proj = nn.Parameter(torch.zeros(hidden, self.value_dim, dtype=self.params_dtype))
+        self.register_buffer("_native_conv_weight", None, persistent=False)
         self._tp_reduce: object | None = None
         if self.tp_size > 1:
             try:
@@ -743,6 +754,16 @@ class _GDNAttention(nn.Module, MambaBase):
                 self._tp_reduce = tensor_model_parallel_all_reduce
             except Exception:
                 self._tp_reduce = None
+
+    def prepare_native_conv_weight(self) -> None:
+        """Materialize the native operator's static ``[K, C]`` filter once."""
+        if self.conv_weight.device.type != "npu":
+            return
+        self._native_conv_weight = self.conv_weight.detach().transpose(0, 1).contiguous()
+
+    def _native_conv_filter(self) -> torch.Tensor:
+        prepared = getattr(self, "_native_conv_weight", None)
+        return self.conv_weight.transpose(0, 1) if prepared is None else prepared
 
     def _stateful_short_conv(
         self,
@@ -761,7 +782,7 @@ class _GDNAttention(nn.Module, MambaBase):
             conv_metadata = spec_metadata.spec_causal_conv1d
             return torch.ops._C_ascend.npu_causal_conv1d_310(
                 mixed,
-                self.conv_weight.transpose(0, 1),
+                self._native_conv_filter(),
                 bias=None,
                 conv_states=cache,
                 query_start_loc=conv_metadata.query_start_loc,
@@ -777,7 +798,7 @@ class _GDNAttention(nn.Module, MambaBase):
             if metadata.num_prefills > 0:
                 return torch.ops._C_ascend.npu_causal_conv1d_310(
                     mixed,
-                    self.conv_weight.transpose(0, 1),
+                    self._native_conv_filter(),
                     bias=None,
                     conv_states=cache,
                     query_start_loc=query_start_loc,
@@ -792,7 +813,7 @@ class _GDNAttention(nn.Module, MambaBase):
                 num_decodes = metadata.num_decodes
                 return torch.ops._C_ascend.npu_causal_conv1d_310(
                     mixed[:num_decodes],
-                    self.conv_weight.transpose(0, 1),
+                    self._native_conv_filter(),
                     bias=None,
                     conv_states=cache,
                     query_start_loc=None,
@@ -2704,6 +2725,13 @@ class AscendQwen4ExpForCausalLM(
         )
         if getattr(config, "tie_word_embeddings", False):
             self.lm_head.weight = self.model.embed_tokens.weight
+        metadata = w4_config(config)
+        if metadata is not None and metadata.get("lm_head_execution", "float16") == "w8a8_dynamic":
+            enable_dynamic_w8a8_lm_head(
+                self.lm_head,
+                tied_embeddings=bool(getattr(config, "tie_word_embeddings", False)),
+                lora_enabled=getattr(vllm_config, "lora_config", None) is not None,
+            )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
 

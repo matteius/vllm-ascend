@@ -9,7 +9,14 @@ from vllm.logger import logger
 
 from .w4a8_int4 import NATIVE_INT4_BACKEND
 
-NATIVE_OPERATORS = frozenset({"npu_qwen_w4_a8_pack_310", "npu_qwen_w4_a8_int4_matmul_310"})
+NATIVE_OPERATORS = frozenset(
+    {
+        "npu_qwen_w4_a8_pack_310",
+        "npu_qwen_w4_a8_swiglu_pack_310",
+        "npu_qwen_w4_a8_int4_matmul_310",
+        "npu_qwen_w4_a8_int4_down_reduce_310",
+    }
+)
 ACTIVATION_POLICIES = ("float16", "int8_per_group")
 MIN_NATIVE_K = 256
 MAX_NATIVE_K = 2560
@@ -55,7 +62,7 @@ def resolve_w4_backend(
         if activation != "int8_per_group":
             raise ValueError("native INT4 requires explicit activation_quantization=int8_per_group permission")
         if not native_available:
-            raise ValueError("native INT4 requires Ascend 310P, supported G128 shapes, and both rebuilt operators")
+            raise ValueError("native INT4 requires Ascend 310P, supported G128 shapes, and rebuilt native operators")
         return BackendSelection(requested, "int8_per_group", "explicit experimental native INT4 override")
     if requested != "auto":
         return BackendSelection(requested, "float16", "explicit W4A16 backend")

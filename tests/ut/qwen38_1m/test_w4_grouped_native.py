@@ -89,6 +89,7 @@ def test_backend_dispatch_never_falls_back_to_python(backend, tokens):
 
 def test_native_routed_packs_unique_tokens_before_topk_expansion():
     layer = make_layer(NATIVE_INT4_BACKEND)
+    layer.fused_native_down_reduce = True
     tokens = 3
     x = torch.randn(tokens, 256).half()
     ids = torch.zeros(tokens, layer.top_k, dtype=torch.int64)
@@ -99,20 +100,28 @@ def test_native_routed_packs_unique_tokens_before_topk_expansion():
         assert local_ids.shape == (tokens * layer.top_k,)
         return torch.zeros(tokens * layer.top_k, 512).half()
 
+    def down(prepared, local_ids, route_weights):
+        assert prepared[0].shape == (tokens * layer.top_k, 256)
+        assert local_ids.shape == (tokens * layer.top_k,)
+        torch.testing.assert_close(route_weights, weights)
+        return torch.zeros(tokens, 256).float()
+
     with (
         patch("vllm_ascend.models.qwen4_exp.w4_moe.pack_activation_device", side_effect=lambda x: (x,)) as pack,
         patch.object(layer.projections["gate_up_proj"], "native_linear", side_effect=gate_up) as native,
-        patch.object(
-            layer.projections["down_proj"],
-            "routed_linear",
-            return_value=torch.zeros(tokens * layer.top_k, 256).half(),
-        ),
+        patch(
+            "vllm_ascend.models.qwen4_exp.w4_moe.swiglu_pack_activation_device",
+            side_effect=lambda x: (torch.zeros(x.shape[0], x.shape[1] // 2).half(),),
+        ) as swiglu_pack,
+        patch.object(layer.projections["down_proj"], "native_down_reduce", side_effect=down) as native_down,
     ):
         result = layer._forward_routed(x, weights, ids)
     assert result.shape == (tokens, 256)
     assert torch.count_nonzero(result) == 0
     pack.assert_called_once()
     native.assert_called_once()
+    swiglu_pack.assert_called_once()
+    native_down.assert_called_once()
 
 
 def test_w4a16_routed_keeps_expanded_inputs():

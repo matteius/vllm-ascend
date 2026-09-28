@@ -21,6 +21,7 @@ from vllm.model_executor.models.utils import make_empty_intermediate_tensors_fac
 from vllm.sequence import IntermediateTensors
 
 from .dtype_policy import Qwen4ExpDtypePolicy
+from .lm_head_w8a8 import enable_dynamic_w8a8_lm_head
 from .model import (
     AscendQwen4ExpDecoderLayer,
     AscendQwen4ExpForCausalLM,
@@ -34,6 +35,7 @@ from .model import (
     _resolve_expert_sharding,
 )
 from .moe import _w8a16_linear_npu, route_topk, swiglu_gate_up
+from .w4_moe import w4_config
 
 
 def _select_local_mtp_routes(
@@ -150,6 +152,18 @@ class _MTPFP16MoE(nn.Module):
             return _w8a16_linear_npu(x, weights[local_id], scales)
         return x.to(torch.float32) @ (weights[local_id].to(torch.float32) * scales.to(torch.float32)).to(torch.float32)
 
+    def _finish_output(self, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        """Apply the shared expert and TP reduction after routed experts."""
+        if self.local_shared_intermediate:
+            gate_up = _linear(x, self.shared_gate_up, self.policy.accumulation_dtype)
+            shared = _linear(swiglu_gate_up(gate_up), self.shared_down, self.policy.accumulation_dtype)
+            shared_gate = torch.sigmoid(_linear(x, self.shared_expert_gate, self.policy.accumulation_dtype))
+            output = output + shared.to(output.dtype) * shared_gate
+        if self.expert_tp_size > 1:
+            assert self._tp_reduce is not None
+            output = self._tp_reduce(output)
+        return output.to(self.policy.main_dtype)
+
     def _forward_eager(self, x: torch.Tensor) -> torch.Tensor:
         logits = _linear(x, self.gate, self.policy.router_dtype)
         weights, ids = route_topk(
@@ -191,15 +205,7 @@ class _MTPFP16MoE(nn.Module):
                 )
                 start = stop
         output = route_outputs.view(x.shape[0], self.top_k, x.shape[-1]).sum(dim=1)
-        if self.local_shared_intermediate:
-            gate_up = _linear(x, self.shared_gate_up, self.policy.accumulation_dtype)
-            shared = _linear(swiglu_gate_up(gate_up), self.shared_down, self.policy.accumulation_dtype)
-            shared_gate = torch.sigmoid(_linear(x, self.shared_expert_gate, self.policy.accumulation_dtype))
-            output = output + shared.to(output.dtype) * shared_gate
-        if self.expert_tp_size > 1:
-            assert self._tp_reduce is not None
-            output = self._tp_reduce(output)
-        return output.to(self.policy.main_dtype)
+        return self._finish_output(x, output)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         capture = BreakableCUDAGraphCapture.current()
@@ -379,6 +385,13 @@ class AscendQwen4ExpMTP(nn.Module, SupportsPP, MixtureOfExperts):
         )
         if getattr(config, "tie_word_embeddings", False):
             self.lm_head.weight = self.model.embed_tokens.weight
+        metadata = w4_config(config)
+        if metadata is not None and metadata.get("lm_head_execution", "float16") == "w8a8_dynamic":
+            enable_dynamic_w8a8_lm_head(
+                self.lm_head,
+                tied_embeddings=bool(getattr(config, "tie_word_embeddings", False)),
+                lora_enabled=getattr(vllm_config, "lora_config", None) is not None,
+            )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
 
@@ -390,9 +403,19 @@ class AscendQwen4ExpMTP(nn.Module, SupportsPP, MixtureOfExperts):
         target_head = getattr(target_model, "lm_head", None)
         if target_head is None:
             return False
+        if type(getattr(self.lm_head, "quant_method", None)) is not type(getattr(target_head, "quant_method", None)):
+            return False
         draft_weight = self.lm_head.weight
         target_weight = target_head.weight
         if draft_weight.shape != target_weight.shape or not torch.equal(draft_weight, target_weight):
+            return False
+        draft_scale = getattr(self.lm_head, "weight_scale", None)
+        target_scale = getattr(target_head, "weight_scale", None)
+        if (draft_scale is None) != (target_scale is None):
+            return False
+        if draft_scale is not None and (
+            draft_scale.shape != target_scale.shape or not torch.equal(draft_scale, target_scale)
+        ):
             return False
         self.lm_head = target_head
         return True
