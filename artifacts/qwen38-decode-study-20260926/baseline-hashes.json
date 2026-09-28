@@ -1,0 +1,8 @@
+{
+  "vllm_ascend/models/qwen4_exp/model.py": "92115b5dba4837864d92e960fce0189b28fe29142f88aee575b9b1db57f1a29c",
+  "vllm_ascend/models/qwen4_exp/moe.py": "f3f14677e2af54bdff8d493923032822ef7bccefa0889217c09588c443c61856",
+  "vllm_ascend/models/qwen4_exp/mtp.py": "6f92f223beb58c50f0ed2db9e73a04605675f727f3226611d806c9d180a32cc9",
+  "vllm_ascend/cpu_binding.py": "b2f29235a2eca792baf2f97cb6c5ad270973c0edf8138b4030dff9d8f0c9736f",
+  "vllm_ascend/vllm_ascend_C.cpython-312-x86_64-linux-gnu.so": "f079d9a462a9ea9ffe6a47a68e7bdee2d771f27e6172550ba404c8331f98b943",
+  "vllm_ascend/_310p/ops/fla/chunk_gated_delta_rule.py": "8d9adde2411c4d956413bc9de36c03676a51fb2df3332759a9724b720c286800"
+}

@@ -1,0 +1,60 @@
+{
+  "status": "RESTORED",
+  "arm": "affinity",
+  "port": 8001,
+  "boot_id": "90734c3b-43d6-4cdc-9d22-adeb0d85da61",
+  "verified_utc": "2026-09-26 23:16:36 UTC",
+  "models": {
+    "object": "list",
+    "data": [
+      {
+        "id": "qwen38-flash-next-w8a8",
+        "object": "model",
+        "created": 1790464557,
+        "owned_by": "vllm",
+        "root": "/srv/ai/models/Qwen3.8-Flash-Next-W8A8-DYNAMIC-300i",
+        "parent": null,
+        "max_model_len": 160000,
+        "permission": [
+          {
+            "id": "modelperm-90ed5b3bc16432ef",
+            "object": "model_permission",
+            "created": 1790464557,
+            "allow_create_engine": false,
+            "allow_sampling": true,
+            "allow_logprobs": true,
+            "allow_search_indices": false,
+            "allow_view": true,
+            "allow_fine_tuning": false,
+            "organization": "*",
+            "group": null,
+            "is_blocking": false
+          }
+        ]
+      }
+    ]
+  },
+  "smoke_passed": 6,
+  "smoke_total": 7,
+  "smoke_matches_baseline": true,
+  "sustained_decode": {
+    "request_id": "chatcmpl-a6df7f6683fc819e",
+    "usage": {
+      "prompt_tokens": 32,
+      "total_tokens": 544,
+      "completion_tokens": 512,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "created_cache_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "server_decode_tok_s": 19.219052060688576,
+    "acceptance": 0.8925925925925926
+  },
+  "plugin_root": "/srv/ai/src/qwen38-decode-study-20260926/affinity",
+  "log": "/home/matteius/logs/serve_qwen38_mtp_graph_8001.log",
+  "tmux": "qwen38-affinity"
+}

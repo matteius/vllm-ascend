@@ -1,0 +1,57 @@
+{
+  "audited_at_utc": "2026-09-26T23:50:48.758805+00:00",
+  "host": "192.168.53.187",
+  "audit_only": true,
+  "npu_execution_during_audit": false,
+  "torch_npu_version": "2.13.0.rc1",
+  "torch_npu_reported_git_revision": "462f4e18a8303698aca3997edfcc5dd3b1707968",
+  "op_plugin_submodule_at_reported_revision": "a365032e8d96befd8e554afba3d60f342a4e6578",
+  "submodule_provenance": "https://api.github.com/repos/Ascend/pytorch/contents/third_party/op-plugin?ref=462f4e18a8303698aca3997edfcc5dd3b1707968",
+  "candidate_functions_match_local_ast": true,
+  "limitations": [
+    "Installed torch_npu reported revision pins source but does not rule out unreported build patches.",
+    "Installed CANN source was read after recovery; no per-op failure trace or selected tiling key was captured."
+  ],
+  "files": [
+    {
+      "source": "/srv/ai/src/qwen38-decode-study-20260926/grouped/vllm_ascend/models/qwen4_exp/mtp.py",
+      "sha256": "374f83cf6b9c991627d691cb1d7edda10226cf14b76ea56e603a50ba67a5927b"
+    },
+    {
+      "source": "/srv/ai/src/qwen38-decode-study-20260926/grouped/vllm_ascend/_310p/qwen38_grouped_candidate.py",
+      "sha256": "646b15a94b7b4a0ba750bdfa57f62a0a94715d4ffaf03f4287638f1ec536f735"
+    },
+    {
+      "source": "/srv/ai/src/qwen38-decode-study-20260926/grouped/serve.log",
+      "sha256": "60fae738de0071afe9d1b11c5bdf5660eea7c03cd813a3d87403331cbbcc6687"
+    },
+    {
+      "source": "/srv/ai/src/vllm-opensensor/vllm/compilation/breakable_cudagraph.py",
+      "sha256": "3cc427612a08e2b9b3fee47548026400c1d0776e2d4747535e59ef5512bdf1e8"
+    },
+    {
+      "source": "/usr/local/Ascend/cann-9.1.0/opp/built-in/op_impl/ai_core/tbe/impl/ops_transformer/ascendc/moe_init_routing_v2/moe_init_routing_v2.cpp",
+      "sha256": "122b1b6a7875178db3d034feee3b0dd6ca79f5cbf91aa6b14b340d29d0113730"
+    },
+    {
+      "source": "/usr/local/Ascend/cann-9.1.0/opp/built-in/op_impl/ai_core/tbe/impl/ops_transformer/ascendc/moe_init_routing_v2/moe_v2_init_routing_fullload.h",
+      "sha256": "da6373f938b551c4e0a18a362fdb80e89a03e997e7f60211b57df2366b47ca30"
+    },
+    {
+      "source": "/usr/local/Ascend/cann-9.1.0/opp/built-in/op_impl/ai_core/tbe/impl/ops_transformer/ascendc/moe_init_routing_v2/moe_v2_common.h",
+      "sha256": "687dc3f022ce00e947ab06e62271825653a555059b37b36d9e25de1e364f7453"
+    },
+    {
+      "source": "/usr/local/Ascend/cann-9.1.0/opp/built-in/op_impl/ai_core/tbe/impl/ops_transformer/ascendc/quant_grouped_matmul_dequant/quant_grouped_matmul_dequant.h",
+      "sha256": "aeb48112d67cf374fa194ad22d47664451e66715a278e08139a59df7fa32a8c2"
+    },
+    {
+      "source": "/usr/local/Ascend/cann-9.1.0/opp/built-in/op_impl/ai_core/tbe/impl/ops_transformer/ascendc/quant_grouped_matmul_dequant/quant_matmul_dequant_grouped.h",
+      "sha256": "da34fddb1af794dca558a06acb126f717bf2247fb363a17670201cc1ec3521f6"
+    },
+    {
+      "source": "https://github.com/Ascend/op-plugin/blob/a365032e8d96befd8e554afba3d60f342a4e6578/op_plugin/ops/opapi/MoeInitRoutingV2KernelNpuOpApi.cpp",
+      "sha256": "5968a15fcaeced15af37890dca394271811b52d2e2b2744ba4d808d6e29952f1"
+    }
+  ]
+}
