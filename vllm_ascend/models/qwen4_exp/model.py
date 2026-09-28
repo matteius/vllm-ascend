@@ -153,7 +153,14 @@ from .qwen4exp_gdn import (
     gdn_short_conv,
 )
 from .w4_backend_policy import configure_w4_backend
-from .w4_moe import CUBE_DEVICE_ROUTED_BACKENDS, W4SparseMoE, require_eager_w4, validate_w4_inventory, w4_config
+from .w4_moe import (
+    CUBE_DEVICE_ROUTED_BACKENDS,
+    DeferredReduceStream,
+    W4SparseMoE,
+    require_eager_w4,
+    validate_w4_inventory,
+    w4_config,
+)
 from .w4_moe import EXPERT_NAME as W4_EXPERT_NAME
 from .weight_mapping import (
     TensorDtypeError,
@@ -2331,6 +2338,7 @@ class AscendQwen4ExpDecoderLayer(nn.Module):
         expert_sharding: tuple[int, int] = (0, 1),
         checkpoint_dir: str | None = None,
         num_speculative_tokens: int = 0,
+        deferred_reduce_stream: DeferredReduceStream | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -2408,6 +2416,7 @@ class AscendQwen4ExpDecoderLayer(nn.Module):
                 config=config,
                 dtype_policy=dtype_policy,
                 expert_sharding=expert_sharding,
+                **({"deferred_reduce_stream": deferred_reduce_stream} if moe_class is W4SparseMoE else {}),
             )
         else:
             self.mlp = _EagerMLP(
@@ -2507,6 +2516,12 @@ class AscendQwen4ExpModel(nn.Module):
         # when present, the PLE layer reads n-gram rows on demand instead of
         # materializing the 95.43 GiB host table.
         self.checkpoint_dir = _resolve_checkpoint_dir(vllm_config)
+        metadata = w4_config(config)
+        self.deferred_reduce_stream = (
+            DeferredReduceStream()
+            if metadata is not None and metadata.get("shared_expert_execution") == "replicated_deferred"
+            else None
+        )
         self.layers = nn.ModuleList(
             get_offloader().wrap_modules(
                 (
@@ -2519,6 +2534,7 @@ class AscendQwen4ExpModel(nn.Module):
                         expert_sharding=self.expert_sharding,
                         checkpoint_dir=self.checkpoint_dir,
                         num_speculative_tokens=getattr(vllm_config, "num_speculative_tokens", 0),
+                        deferred_reduce_stream=self.deferred_reduce_stream,
                     )
                     for idx in range(config.num_hidden_layers)
                 ),
@@ -2985,21 +3001,28 @@ class AscendQwen4ExpForCausalLM(
         tp_rank: int,
         tp_size: int,
     ) -> str | None:
-        """Place one TP-sliced shared-expert tensor into its local param slot.
+        """Place one sharded or replicated shared-expert checkpoint tensor.
 
         gate/up are column-parallel (split the intermediate dim across the rows
         of the fused ``shared_gate_up``); down is row-parallel (split across the
-        columns of ``shared_down``). Returns the target param name, or ``None``
-        to fall through to the generic remap path.
+        columns of ``shared_down``). Replicated W4 shared experts expose the
+        checkpoint's full intermediate dimension, which is copied on every
+        rank. Returns the target param name, or ``None`` to fall through to the
+        generic remap path.
         """
-        del tp_size
+        metadata = getattr(self.config, "ascend_expert_quantization", None)
+        shared_execution = metadata.get("shared_expert_execution", "tp_sharded") if metadata else "tp_sharded"
+        replicated = shared_execution.startswith("replicated")
         if name.endswith(".mlp.shared_expert.gate_proj.weight"):
             target_name = name[: -len(".mlp.shared_expert.gate_proj.weight")] + ".mlp.shared_gate_up"
             target = params.get(target_name)
             if target is None:
                 return None
             local = target.shape[0] // 2
-            src = tensor[tp_rank * local : (tp_rank + 1) * local]
+            expected_shape = (local if replicated else local * tp_size, target.shape[1])
+            if tuple(tensor.shape) != expected_shape:
+                raise ValueError(f"{name}: expected shared gate shape {expected_shape}, got {tuple(tensor.shape)}")
+            src = tensor if replicated else tensor[tp_rank * local : (tp_rank + 1) * local]
             with torch.no_grad():
                 target[0:local].copy_(src.to(target.dtype))
             return target_name
@@ -3009,7 +3032,10 @@ class AscendQwen4ExpForCausalLM(
             if target is None:
                 return None
             local = target.shape[0] // 2
-            src = tensor[tp_rank * local : (tp_rank + 1) * local]
+            expected_shape = (local if replicated else local * tp_size, target.shape[1])
+            if tuple(tensor.shape) != expected_shape:
+                raise ValueError(f"{name}: expected shared up shape {expected_shape}, got {tuple(tensor.shape)}")
+            src = tensor if replicated else tensor[tp_rank * local : (tp_rank + 1) * local]
             with torch.no_grad():
                 target[local : 2 * local].copy_(src.to(target.dtype))
             return target_name
@@ -3019,7 +3045,10 @@ class AscendQwen4ExpForCausalLM(
             if target is None:
                 return None
             local = target.shape[1]
-            src = tensor[:, tp_rank * local : (tp_rank + 1) * local]
+            expected_shape = (target.shape[0], local if replicated else local * tp_size)
+            if tuple(tensor.shape) != expected_shape:
+                raise ValueError(f"{name}: expected shared down shape {expected_shape}, got {tuple(tensor.shape)}")
+            src = tensor if replicated else tensor[:, tp_rank * local : (tp_rank + 1) * local]
             with torch.no_grad():
                 target.copy_(src.to(target.dtype))
             return target_name

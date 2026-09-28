@@ -3,8 +3,10 @@
 """Packed W4, real loader, TP partial sums, and W8 isolation (CPU only)."""
 
 import json
+import sys
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -17,6 +19,7 @@ from vllm_ascend.models.qwen4_exp.moe import route_topk
 from vllm_ascend.models.qwen4_exp.w4_moe import (
     FORMAT,
     KINDS,
+    MAX_SHARED_EXPERT_OVERLAP_TOKENS,
     PackedExpertBank,
     W4SparseMoE,
     dequantize,
@@ -106,6 +109,260 @@ def test_metadata_and_eager_gate_fail_closed():
         bad.ascend_expert_quantization[key] = value
         with pytest.raises(ValueError):
             w4_config(bad)
+
+    bad = config()
+    bad.ascend_expert_quantization["shared_expert_execution"] = "automatic"
+    with pytest.raises(ValueError, match="shared_expert_execution"):
+        w4_config(bad)
+
+
+@pytest.mark.parametrize(
+    "mode,expected_width",
+    [
+        ("tp_sharded", 6),
+        ("tp_sharded_overlap", 6),
+        ("replicated", 24),
+        ("replicated_overlap", 24),
+        ("replicated_deferred", 24),
+    ],
+)
+def test_shared_expert_execution_controls_resident_width(mode, expected_width):
+    cfg = config(num_layers=1, num_experts=8, top_k=2, shared_inter=24)
+    cfg.ascend_expert_quantization["shared_expert_execution"] = mode
+    layer = W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy(), expert_sharding=(1, 4))
+    assert layer.shared_expert_execution == mode
+    assert layer.local_shared_inter == expected_width
+    assert layer.shared_gate_up.shape == (2 * expected_width, cfg.hidden_size)
+    assert layer.shared_down.shape == (cfg.hidden_size, expected_width)
+
+
+@pytest.mark.parametrize(
+    "mode,expected",
+    [
+        ("tp_sharded", 10.0),
+        ("tp_sharded_overlap", 10.0),
+        ("replicated", 7.0),
+        ("replicated_overlap", 7.0),
+        ("replicated_deferred", 7.0),
+    ],
+)
+def test_shared_expert_execution_preserves_reduction_semantics(mode, expected):
+    cfg = config(num_layers=1, num_experts=4, top_k=1, shared_inter=8)
+    cfg.ascend_expert_quantization["shared_expert_execution"] = mode
+    layer = W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy(), expert_sharding=(0, 2))
+    inputs = torch.zeros(2, cfg.hidden_size, dtype=torch.float16)
+    routed = torch.full_like(inputs, 2.0, dtype=torch.float32)
+    shared = torch.full_like(inputs, 3.0, dtype=torch.float32)
+    with (
+        patch("vllm_ascend.models.qwen4_exp.w4_moe.route_topk", return_value=(torch.ones(2, 1), torch.zeros(2, 1))),
+        patch.object(layer, "_forward_host_routed", return_value=routed),
+        patch.object(layer, "_forward_shared", return_value=shared) as shared_forward,
+        patch.object(layer, "_tp_reduce", side_effect=lambda value: value * 2) as reduce,
+    ):
+        torch.testing.assert_close(layer(inputs), torch.full_like(inputs, expected))
+    shared_forward.assert_called_once_with(inputs)
+    reduce.assert_called_once()
+
+
+def test_shared_expert_overlap_orders_auxiliary_stream_after_input():
+    cfg = config(num_layers=1, num_experts=4, top_k=1, shared_inter=8)
+    cfg.ascend_expert_quantization["shared_expert_execution"] = "replicated_overlap"
+    layer = W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy(), expert_sharding=(0, 2))
+    inputs, expected = MagicMock(), MagicMock()
+    input_ready, shared_done = object(), object()
+    main_stream, shared_stream = MagicMock(), MagicMock()
+    main_stream.record_event.return_value = input_ready
+    shared_stream.record_event.return_value = shared_done
+    fake_utils = SimpleNamespace(
+        npu_stream_switch=lambda stream: nullcontext(),
+        shared_experts_calculation_stream=lambda: shared_stream,
+    )
+    fake_npu = SimpleNamespace(current_stream=lambda: main_stream, Stream=object)
+    with (
+        patch.dict(sys.modules, {"vllm_ascend.utils": fake_utils}),
+        patch.object(torch, "npu", fake_npu, create=True),
+        patch.object(layer, "_forward_shared", return_value=expected) as shared_forward,
+    ):
+        actual, returned_main, returned_done = layer._start_shared_overlap(inputs)
+    assert actual is expected
+    assert returned_main is main_stream
+    assert returned_done is shared_done
+    shared_stream.wait_event.assert_called_once_with(input_ready)
+    inputs.record_stream.assert_called_once_with(shared_stream)
+    expected.record_stream.assert_called_once_with(main_stream)
+    shared_forward.assert_called_once_with(inputs)
+
+
+@pytest.mark.parametrize(
+    "tokens,expected",
+    [
+        (MAX_SHARED_EXPERT_OVERLAP_TOKENS, True),
+        (MAX_SHARED_EXPERT_OVERLAP_TOKENS + 1, False),
+        (4, False),
+    ],
+)
+def test_tp_sharded_overlap_is_limited_to_decode_shapes_with_cube_headroom(tokens, expected):
+    cfg = config(num_layers=1, num_experts=4, top_k=1, shared_inter=8)
+    cfg.ascend_expert_quantization["shared_expert_execution"] = "tp_sharded_overlap"
+    layer = W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy(), expert_sharding=(0, 2))
+    inputs = SimpleNamespace(shape=(tokens, cfg.hidden_size), device=SimpleNamespace(type="npu"))
+    assert layer._should_overlap_shared_expert(inputs) is expected
+
+
+def test_tp_sharded_overlap_joins_shared_before_combined_reduce():
+    cfg = config(num_layers=1, num_experts=4, top_k=1, shared_inter=8)
+    cfg.hidden_size = cfg.moe_intermediate_size = 256
+    cfg.ascend_expert_quantization.update(
+        backend="cube_310_routed",
+        group_size=128,
+        shared_expert_execution="tp_sharded_overlap",
+    )
+    layer = W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy(), expert_sharding=(0, 2))
+    inputs = MagicMock()
+    inputs.shape = (1, cfg.hidden_size)
+    inputs.device = SimpleNamespace(type="npu")
+    routed = torch.full((1, cfg.hidden_size), 2.0, dtype=torch.float32)
+    shared = torch.full_like(routed, 3.0)
+    shared_done = object()
+    call_order = []
+    main_stream = MagicMock()
+    main_stream.wait_event.side_effect = lambda event: call_order.append("wait")
+
+    def start_shared(value):
+        assert value is inputs
+        call_order.append("shared")
+        return shared, main_stream, shared_done
+
+    def forward_routed(*args):
+        call_order.append("routed")
+        return routed
+
+    def reduce(value):
+        call_order.append("reduce")
+        return value * 2
+
+    with (
+        patch("vllm_ascend.models.qwen4_exp.w4_moe.F.linear", return_value=torch.zeros(1, cfg.num_experts)),
+        patch(
+            "vllm_ascend.models.qwen4_exp.w4_moe.route_topk",
+            return_value=(torch.ones(1, 1), torch.zeros(1, 1, dtype=torch.long)),
+        ),
+        patch.object(layer, "_start_shared_overlap", side_effect=start_shared),
+        patch.object(layer, "_forward_routed", side_effect=forward_routed),
+        patch.object(layer, "_tp_reduce", side_effect=reduce),
+    ):
+        actual = layer(inputs)
+    torch.testing.assert_close(actual, torch.full_like(actual, 10.0))
+    assert call_order == ["shared", "routed", "wait", "reduce"]
+    main_stream.wait_event.assert_called_once_with(shared_done)
+
+
+def test_deferred_reduce_uses_events_and_records_cross_stream_tensors():
+    cfg = config(num_layers=1, num_experts=4, top_k=1, shared_inter=8)
+    cfg.ascend_expert_quantization["shared_expert_execution"] = "replicated_deferred"
+    layer = W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy(), expert_sharding=(0, 2))
+    routed, reduced = MagicMock(), MagicMock()
+    routed_ready, reduce_done = object(), object()
+    main_stream, reduce_stream = MagicMock(), MagicMock()
+    main_stream.record_event.return_value = routed_ready
+    reduce_stream.record_event.return_value = reduce_done
+    fake_utils = SimpleNamespace(npu_stream_switch=lambda stream: nullcontext())
+    stream_factory = MagicMock(return_value=reduce_stream)
+    fake_npu = SimpleNamespace(current_stream=lambda: main_stream, Stream=stream_factory)
+    with (
+        patch.dict(sys.modules, {"vllm_ascend.utils": fake_utils}),
+        patch.object(torch, "npu", fake_npu, create=True),
+        patch.object(layer, "_tp_reduce", return_value=reduced) as reduce,
+    ):
+        actual, returned_main, returned_done = layer._start_deferred_reduce(routed)
+    assert actual is reduced
+    assert returned_main is main_stream
+    assert returned_done is reduce_done
+    stream_factory.assert_called_once_with()
+    routed.record_stream.assert_called_once_with(reduce_stream)
+    reduce_stream.wait_event.assert_called_once_with(routed_ready)
+    reduce.assert_called_once_with(routed)
+    reduced.record_stream.assert_called_once_with(main_stream)
+
+
+def test_deferred_reduce_waits_after_shared_compute():
+    cfg = config(num_layers=1, num_experts=4, top_k=1, shared_inter=8)
+    cfg.hidden_size = cfg.moe_intermediate_size = 256
+    cfg.ascend_expert_quantization.update(
+        backend="cube_310_routed",
+        group_size=128,
+        shared_expert_execution="replicated_deferred",
+    )
+    layer = W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy(), expert_sharding=(0, 2))
+    inputs = MagicMock()
+    inputs.shape = (2, cfg.hidden_size)
+    inputs.device = SimpleNamespace(type="npu")
+    routed = torch.full((2, cfg.hidden_size), 2.0, dtype=torch.float32)
+    shared = torch.full_like(routed, 3.0)
+    reduced = routed * 2
+    reduce_done = object()
+    call_order = []
+    main_stream = MagicMock()
+    main_stream.wait_event.side_effect = lambda event: call_order.append("wait")
+
+    def start_reduce(value):
+        assert value is routed
+        call_order.append("reduce")
+        return reduced, main_stream, reduce_done
+
+    def forward_shared(value):
+        assert value is inputs
+        call_order.append("shared")
+        return shared
+
+    with (
+        patch("vllm_ascend.models.qwen4_exp.w4_moe.F.linear", return_value=torch.zeros(2, cfg.num_experts)),
+        patch(
+            "vllm_ascend.models.qwen4_exp.w4_moe.route_topk",
+            return_value=(torch.ones(2, 1), torch.zeros(2, 1, dtype=torch.long)),
+        ),
+        patch.object(layer, "_forward_routed", return_value=routed),
+        patch.object(layer, "_start_deferred_reduce", side_effect=start_reduce),
+        patch.object(layer, "_forward_shared", side_effect=forward_shared),
+        patch.object(layer, "_tp_reduce", MagicMock()),
+    ):
+        actual = layer(inputs)
+    torch.testing.assert_close(actual, torch.full_like(actual, 7.0))
+    assert call_order == ["reduce", "shared", "wait"]
+    main_stream.wait_event.assert_called_once_with(reduce_done)
+
+
+@pytest.mark.parametrize(
+    "mode,replicated",
+    [("tp_sharded", False), ("tp_sharded_overlap", False), ("replicated", True)],
+)
+def test_shared_expert_loader_places_shard_or_full_replica(mode, replicated):
+    prefix = "model.layers.0.mlp"
+    hidden, shared, rank, tp_size = 8, 12, 2, 4
+    local = shared if replicated else shared // tp_size
+    params = {
+        f"{prefix}.shared_gate_up": torch.zeros(2 * local, hidden, dtype=torch.float16),
+        f"{prefix}.shared_down": torch.zeros(hidden, local, dtype=torch.float16),
+    }
+    gate = torch.arange(shared * hidden, dtype=torch.float16).reshape(shared, hidden)
+    up = gate + 1000
+    down = torch.arange(hidden * shared, dtype=torch.float16).reshape(hidden, shared) + 2000
+    owner = SimpleNamespace(config=SimpleNamespace(ascend_expert_quantization={"shared_expert_execution": mode}))
+    method = AscendQwen4ExpForCausalLM._place_shared_expert_tensor
+    for projection, tensor in (("gate_proj", gate), ("up_proj", up), ("down_proj", down)):
+        loaded = method(
+            owner,
+            params,
+            f"{prefix}.shared_expert.{projection}.weight",
+            tensor,
+            rank,
+            tp_size,
+        )
+        assert loaded == f"{prefix}.{'shared_down' if projection == 'down_proj' else 'shared_gate_up'}"
+    start = 0 if replicated else rank * local
+    torch.testing.assert_close(params[f"{prefix}.shared_gate_up"][:local], gate[start : start + local])
+    torch.testing.assert_close(params[f"{prefix}.shared_gate_up"][local:], up[start : start + local])
+    torch.testing.assert_close(params[f"{prefix}.shared_down"], down[:, start : start + local])
 
 
 def test_real_loader_chooses_w4_and_preserves_w8_default():

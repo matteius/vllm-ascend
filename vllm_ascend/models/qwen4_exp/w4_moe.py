@@ -43,6 +43,32 @@ MAX_CUBE_ROUTES = 80
 # configured context window. Shape-only chunking never inspects device ids.
 MAX_GROUPED_TOKENS = 512
 MAX_GROUPED_ROUTES = 5120
+# Concurrent shared/routed GEMMs help only while decode leaves Cube headroom.
+# Multi-request MTP can split work into two-row MoE calls, where the concurrent
+# GEMMs contend and regress aggregate throughput. Restrict overlap to one row.
+MAX_SHARED_EXPERT_OVERLAP_TOKENS = 1
+SHARED_EXPERT_EXECUTIONS = (
+    "tp_sharded",
+    "tp_sharded_overlap",
+    "replicated",
+    "replicated_overlap",
+    "replicated_deferred",
+)
+
+
+class DeferredReduceStream:
+    """Lazily own one communication stream shared by all model layers."""
+
+    def __init__(self) -> None:
+        self._stream = None
+
+    def get(self) -> torch.npu.Stream:
+        if self._stream is None:
+            # HCCL graph capture requires the communication stream to use the
+            # default priority on 310P. A high-priority stream aborts the HCCL
+            # watchdog while the first decode graph is captured.
+            self._stream = torch.npu.Stream()
+        return self._stream
 
 
 def w4_config(config: object) -> dict | None:
@@ -67,6 +93,9 @@ def w4_config(config: object) -> dict | None:
         raise ValueError("unsupported W4 activation_quantization policy")
     if backend == NATIVE_INT4_BACKEND and activation != "int8_per_group":
         raise ValueError("native INT4 requires explicit activation_quantization=int8_per_group permission")
+    shared_execution = metadata.get("shared_expert_execution", "tp_sharded")
+    if shared_execution not in SHARED_EXPERT_EXECUTIONS:
+        raise ValueError(f"shared_expert_execution must be one of {SHARED_EXPERT_EXECUTIONS}")
     group = metadata.get("group_size")
     if type(group) is not int or group <= 0 or group % 2:
         raise ValueError("W4 group_size must be a positive even integer")
@@ -211,7 +240,14 @@ class PackedExpertBank(nn.Module):
 class W4SparseMoE(nn.Module):
     """Same router/shared/TP contract as W8, but separate packed weight banks."""
 
-    def __init__(self, *, config: object, dtype_policy: Qwen4ExpDtypePolicy, expert_sharding=(0, 1)) -> None:
+    def __init__(
+        self,
+        *,
+        config: object,
+        dtype_policy: Qwen4ExpDtypePolicy,
+        expert_sharding=(0, 1),
+        deferred_reduce_stream: DeferredReduceStream | None = None,
+    ) -> None:
         super().__init__()
         metadata = w4_config(config)
         if metadata is None:
@@ -240,6 +276,13 @@ class W4SparseMoE(nn.Module):
         self.expert_offset, stop = local_expert_range(self.num_experts, self.expert_tp_size, self.expert_tp_rank)
         self.num_local_experts = stop - self.expert_offset
         self.params_dtype, self.compute_dtype = dtype_policy.main_dtype, dtype_policy.accumulation_dtype
+        self.shared_expert_execution = metadata.get("shared_expert_execution", "tp_sharded")
+        self.shared_expert_replicated = self.shared_expert_execution.startswith("replicated")
+        self.overlap_shared_expert = self.shared_expert_execution.endswith("_overlap")
+        self.defer_shared_expert_sync = self.shared_expert_execution == "replicated_deferred"
+        self.deferred_reduce_stream = None
+        if self.defer_shared_expert_sync:
+            self.deferred_reduce_stream = deferred_reduce_stream or DeferredReduceStream()
         self.renormalize = bool(getattr(config, "norm_topk_prob", True))
         self.routed_scaling_factor = float(getattr(config, "routed_scaling_factor", 1.0) or 1.0)
         self.gate = nn.Parameter(torch.zeros(self.num_experts, hidden, dtype=self.params_dtype))
@@ -269,9 +312,9 @@ class W4SparseMoE(nn.Module):
         )
         shared = int(getattr(config, "shared_expert_intermediate_size", 0) or 0)
         self.has_shared_expert = shared > 0
-        self.local_shared_inter = shared // self.expert_tp_size
-        if shared % self.expert_tp_size:
+        if not self.shared_expert_replicated and shared % self.expert_tp_size:
             raise ValueError("shared expert intermediate dimension must divide TP")
+        self.local_shared_inter = shared if self.shared_expert_replicated else shared // self.expert_tp_size
         if self.has_shared_expert:
             self.shared_gate_up = nn.Parameter(
                 torch.zeros(2 * self.local_shared_inter, hidden, dtype=self.params_dtype)
@@ -322,7 +365,74 @@ class W4SparseMoE(nn.Module):
             target.copy_(tensor)
         return f"projections.{bank_name}.{kind}"
 
+    def _forward_shared(self, block_input: torch.Tensor) -> torch.Tensor:
+        # Match production W8's NPU projection policy. Converting NZ FP16
+        # weights to FP32 on every call both copies weights and selects an
+        # aclop Cast that cannot be captured. Keep the CPU/eager reference
+        # unchanged; the routed backend uses its resident FP16 weights.
+        operand_dtype = (
+            self.params_dtype if block_input.device.type == "npu" and self.fused_gate_up else self.compute_dtype
+        )
+        inputs = block_input.to(operand_dtype)
+        gate, up = F.linear(inputs, self.shared_gate_up.to(operand_dtype)).chunk(2, -1)
+        shared = F.linear(F.silu(gate) * up, self.shared_down.to(operand_dtype))
+        return shared * torch.sigmoid(F.linear(inputs, self.shared_expert_gate.to(operand_dtype)))
+
+    def _start_shared_overlap(
+        self, block_input: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.npu.Stream, torch.npu.Event]:
+        # Keep the NPU runtime optional for host-side model and loader tests.
+        from vllm_ascend.utils import npu_stream_switch, shared_experts_calculation_stream
+
+        main_stream = torch.npu.current_stream()
+        input_ready = main_stream.record_event()
+        shared_stream = shared_experts_calculation_stream()
+        block_input.record_stream(shared_stream)
+        with npu_stream_switch(shared_stream):
+            shared_stream.wait_event(input_ready)
+            shared = self._forward_shared(block_input)
+            shared_done = shared_stream.record_event()
+        shared.record_stream(main_stream)
+        return shared, main_stream, shared_done
+
+    def _start_deferred_reduce(self, routed: torch.Tensor) -> tuple[torch.Tensor, torch.npu.Stream, torch.npu.Event]:
+        """Enqueue the routed reduction before independent shared compute."""
+        from vllm_ascend.utils import npu_stream_switch
+
+        if self._tp_reduce is None:
+            raise RuntimeError("W4 expert TP requires all-reduce")
+        main_stream = torch.npu.current_stream()
+        routed_ready = main_stream.record_event()
+        if self.deferred_reduce_stream is None:
+            raise RuntimeError("deferred all-reduce stream was not configured")
+        reduce_stream = self.deferred_reduce_stream.get()
+        routed.record_stream(reduce_stream)
+        with npu_stream_switch(reduce_stream):
+            reduce_stream.wait_event(routed_ready)
+            reduced = self._tp_reduce(routed)
+            reduce_done = reduce_stream.record_event()
+        reduced.record_stream(main_stream)
+        return reduced, main_stream, reduce_done
+
+    def _should_overlap_shared_expert(self, block_input: torch.Tensor) -> bool:
+        return (
+            self.has_shared_expert
+            and self.overlap_shared_expert
+            and block_input.device.type == "npu"
+            and (
+                self.shared_expert_execution != "tp_sharded_overlap"
+                or block_input.shape[0] <= MAX_SHARED_EXPERT_OVERLAP_TOKENS
+            )
+        )
+
     def forward(self, block_input: torch.Tensor) -> torch.Tensor:
+        shared = None
+        main_stream = None
+        shared_done = None
+        reduce_done = None
+        if self._should_overlap_shared_expert(block_input):
+            shared, main_stream, shared_done = self._start_shared_overlap(block_input)
+
         weights, ids = route_topk(
             F.linear(block_input, self.gate),
             self.top_k,
@@ -337,22 +447,27 @@ class W4SparseMoE(nn.Module):
             if self.device_routing and torch.npu.is_current_stream_capturing():
                 raise RuntimeError(f"W4 decode graph exceeds {MAX_CUBE_ROUTES} routes; reduce capture sizes")
             result = self._forward_host_routed(block_input, weights, ids)
-        if self.has_shared_expert:
-            # Match production W8's NPU projection policy. Converting NZ FP16
-            # weights to FP32 on every call both copies weights and selects an
-            # aclop Cast that cannot be captured. Keep the CPU/eager reference
-            # unchanged; the routed backend uses its resident FP16 weights.
-            operand_dtype = (
-                self.params_dtype if block_input.device.type == "npu" and self.fused_gate_up else self.compute_dtype
-            )
-            inputs = block_input.to(operand_dtype)
-            gate, up = F.linear(inputs, self.shared_gate_up.to(operand_dtype)).chunk(2, -1)
-            shared = F.linear(F.silu(gate) * up, self.shared_down.to(operand_dtype))
-            result += shared * torch.sigmoid(F.linear(inputs, self.shared_expert_gate.to(operand_dtype)))
+        if self.has_shared_expert and not self.shared_expert_replicated:
+            if shared is None:
+                shared = self._forward_shared(block_input)
+            else:
+                main_stream.wait_event(shared_done)
+            result += shared
         if self.expert_tp_size > 1:
             if self._tp_reduce is None:
                 raise RuntimeError("W4 expert TP requires all-reduce")
-            result = self._tp_reduce(result)
+            if self.defer_shared_expert_sync and self.has_shared_expert and block_input.device.type == "npu":
+                result, main_stream, reduce_done = self._start_deferred_reduce(result)
+            else:
+                result = self._tp_reduce(result)
+        if self.has_shared_expert and self.shared_expert_replicated:
+            if shared is None:
+                shared = self._forward_shared(block_input)
+            else:
+                main_stream.wait_event(shared_done)
+            if reduce_done is not None:
+                main_stream.wait_event(reduce_done)
+            result += shared
         return result.to(self.params_dtype)
 
     def _forward_routed(self, block_input: torch.Tensor, weights: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
