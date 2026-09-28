@@ -188,6 +188,58 @@ def test_native_routed_changing_input_and_ids_graph(rows, outputs):
         torch.testing.assert_close(captured.cpu(), routed_reference(changed, banks, routes), rtol=0.005, atol=0.003)
 
 
+@pytest.mark.parametrize("tokens", [1, 3, 8])
+@pytest.mark.parametrize("width,outputs", [(256, 640), (640, 2560)])
+def test_native_routed_reuses_packed_token_across_experts(tokens, width, outputs):
+    routes_per_token = 10
+    x, banks = payload(tokens, width, outputs)
+    ids = (torch.arange(tokens * routes_per_token, dtype=torch.int32) * 7 + 1) % 5 - 1
+    op = torch.ops._C_ascend.npu_qwen_w4_a8_int4_matmul_310
+    actual = op(*pack_activation_device(x.npu()), *banks, ids.npu()).cpu()
+    expanded = x.repeat_interleave(routes_per_token, dim=0)
+    expected = op(*pack_activation_device(expanded.npu()), *banks, ids.npu()).cpu()
+    assert actual.shape == expected.shape
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert torch.count_nonzero(actual[(ids < 0) | (ids >= 3)]) == 0
+
+
+def test_native_routed_reused_activation_graph_replay():
+    tokens, routes_per_token = 3, 10
+    x, banks = payload(tokens, 640, 1280)
+    device_x = x.npu()
+    ids = torch.zeros(tokens * routes_per_token, dtype=torch.int32, device="npu")
+    op = torch.ops._C_ascend.npu_qwen_w4_a8_int4_matmul_310
+
+    def invoke():
+        return op(*pack_activation_device(device_x), *banks, ids)
+
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        for _ in range(3):
+            invoke()
+    torch.npu.current_stream().wait_stream(stream)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, stream=stream):
+        captured = invoke()
+    for phase in range(4):
+        changed = x * (phase - 1) + 0.02 * phase
+        routes = (torch.arange(tokens * routes_per_token, dtype=torch.int32) * 7 + phase) % 5 - 1
+        device_x.copy_(changed)
+        ids.copy_(routes)
+        graph.replay()
+        expected = op(*pack_activation_device(changed.repeat_interleave(routes_per_token, dim=0).npu()), *banks, ids)
+        torch.testing.assert_close(captured.cpu(), expected.cpu(), rtol=0, atol=0)
+
+
+def test_native_routed_rejects_nonintegral_route_factor():
+    x, banks = payload(3, 256, 128)
+    with pytest.raises(RuntimeError, match="unsupported native INT4 dimensions"):
+        torch.ops._C_ascend.npu_qwen_w4_a8_int4_matmul_310(
+            *pack_activation_device(x.npu()), *banks, torch.zeros(29, dtype=torch.int32, device="npu")
+        )
+
+
 def test_native_routed_rejects_oversized_or_scalar_metadata():
     op = torch.ops._C_ascend.npu_qwen_w4_a8_int4_matmul_310
     x, banks = payload(81, 256, 128)

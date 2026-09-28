@@ -232,6 +232,33 @@ def test_qsa_dense_prefill_fast_path_uses_host_list_fallback():
     assert _QSAAttention._dense_prefill_is_exact(metadata, token_budget=2048)
 
 
+@pytest.mark.parametrize(
+    ("state_name", "num_prefills", "num_decodes", "sequence_length", "expected"),
+    [
+        ("ChunkedPrefill", 1, 0, 2048, False),
+        ("DecodeOnly", 0, 1, 2048, False),
+        ("ChunkedPrefill", 1, 0, 2049, True),
+        ("DecodeOnly", 0, 1, 2049, True),
+    ],
+)
+def test_qsa_index_query_is_only_needed_for_sparse_attention(
+    state_name,
+    num_prefills,
+    num_decodes,
+    sequence_length,
+    expected,
+):
+    metadata = SimpleNamespace(
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
+        attn_state=SimpleNamespace(name=state_name),
+        seq_lens_cpu=torch.tensor([sequence_length], dtype=torch.int32),
+        seq_lens_list=None,
+    )
+
+    assert _QSAAttention._needs_sparse_index_query(metadata, token_budget=2048) is expected
+
+
 def test_qsa_layer_registers_custom_cache_spec_owner():
     """The registered layer must own both the main and index-cache spec."""
     static_forward_context = {}

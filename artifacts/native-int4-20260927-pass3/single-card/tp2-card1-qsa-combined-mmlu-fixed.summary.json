@@ -1,0 +1,10 @@
+{
+  "label": "tp2-card1-qsa-combined-fixed",
+  "dataset_sha256": "de4f0a3b2a14bab908865733f639b66428116eee33f2958495814920745cd27b",
+  "samples": 228,
+  "correct": 205,
+  "invalid": 0,
+  "accuracy": 0.8991228070175439,
+  "elapsed_seconds": 223.02040875899547,
+  "scope": "fixed sampled zero-shot MMLU; not the official full-dataset score"
+}

@@ -1,0 +1,27 @@
+{
+  "request_id": "chatcmpl-b867d233f74b5179",
+  "usage": {
+    "prompt_tokens": 79236,
+    "total_tokens": 79748,
+    "completion_tokens": 512,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "created_cache_tokens": 79104
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 0
+    }
+  },
+  "finish_reason": "length",
+  "ttft_s": 360.5058522259933,
+  "decode_s": 28.28372153401142,
+  "client_decode_tok_s": 18.066929395607225,
+  "e2e_s": 388.78970456800016,
+  "text_sha256": "4348d6f6c3c93d25575bc5557b80cf6712c53095a223a69fc43170a2b66e0206",
+  "prefix_path": "/srv/ai/src/native-int4-w4a8.KiuhBN/pass3/single-card/prefix-79200.txt",
+  "prefix_sha256": "51e88a617824a4fd94ab806080a6f4bac56c7a7f19feb331ba1b24c9b869f871",
+  "max_tokens": 512,
+  "drafted_delta": 378.0,
+  "accepted_delta": 324.0,
+  "acceptance": 0.8571428571428571
+}

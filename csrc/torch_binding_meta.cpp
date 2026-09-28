@@ -693,7 +693,8 @@ at::Tensor npu_qwen_w4_a8_int4_matmul_310_meta(
     const at::Tensor& activation_sum, const at::Tensor& codes, const at::Tensor& scale,
     const at::Tensor& offset, const at::Tensor& weight_sum, const at::Tensor& group_ends)
 {
-    c10::SymDimVector shape{low.sym_size(0), codes.sym_size(1)};
+    c10::SymDimVector shape{group_ends.scalar_type() == at::kInt ? group_ends.sym_size(0) : low.sym_size(0),
+                            codes.sym_size(1)};
     return at::empty_symint(shape, low.options().dtype(at::kHalf));
 }
 

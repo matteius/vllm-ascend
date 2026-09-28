@@ -1,0 +1,10 @@
+{
+  "label": "live-rows",
+  "dataset_sha256": "de4f0a3b2a14bab908865733f639b66428116eee33f2958495814920745cd27b",
+  "samples": 228,
+  "correct": 206,
+  "invalid": 0,
+  "accuracy": 0.9035087719298246,
+  "elapsed_seconds": 176.249253107002,
+  "scope": "fixed sampled zero-shot MMLU; not the official full-dataset score"
+}

@@ -97,6 +97,14 @@ def test_mtp_recycles_multi_stream_state_and_applies_embedding_to_each_stream():
     )
     expected = (hidden_norm + embedding_norm[:, None, :]).flatten(-2).half()
     torch.testing.assert_close(recycled, expected, atol=0.001, rtol=0.001)
+    first_affine = model.model._embedding_affine_cache
+    assert first_affine is not None
+    with torch.no_grad():
+        model.model.pre_fc_norm_embedding.add_(0.25)
+    with _single_rank_tp(), torch.no_grad():
+        model(None, torch.arange(2), hidden.flatten(-2), inputs_embeds=embedding)
+    assert model.model._embedding_affine_cache is not first_affine
+    assert torch.equal(model.model._embedding_affine_cache[1], 1.0 + model.model.pre_fc_norm_embedding.float())
     with pytest.raises(ValueError, match="multi-stream"):
         model(None, torch.arange(2), hidden[:, 0], inputs_embeds=embedding)
 

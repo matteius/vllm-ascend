@@ -1,0 +1,10 @@
+{
+  "label": "tp2-card1-qsa-shared-rope",
+  "dataset_sha256": "dd128175e4db0cb44555561cd62e3bfbca6eea5c527280df0185354233b63caa",
+  "samples": 228,
+  "correct": 206,
+  "invalid": 0,
+  "accuracy": 0.9035087719298246,
+  "elapsed_seconds": 221.56715692700527,
+  "scope": "fixed sampled zero-shot MMLU; not the official full-dataset score"
+}

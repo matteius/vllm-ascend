@@ -1,0 +1,42 @@
+{
+  "logical_npu_0": {
+    "context_tokens": 262144,
+    "selected_tokens": 2048,
+    "qsa_layers": 12,
+    "bytes_h2d_per_layer": 2097152,
+    "repeats": 1000,
+    "median_ms": {
+      "selection_ms": 0.08520700066583231,
+      "gather_ms": 0.10975400073220953,
+      "h2d_ms": 0.6455019974964671,
+      "total_ms": 0.8488640014547855
+    },
+    "p90_ms": {
+      "selection_ms": 0.09727499855216593,
+      "gather_ms": 0.14328201359603554,
+      "h2d_ms": 0.7157410000218078,
+      "total_ms": 0.9571199916535988
+    },
+    "estimated_12_layer_serial_ms": 10.186368017457426
+  },
+  "logical_npu_1": {
+    "context_tokens": 262144,
+    "selected_tokens": 2048,
+    "qsa_layers": 12,
+    "bytes_h2d_per_layer": 2097152,
+    "repeats": 1000,
+    "median_ms": {
+      "selection_ms": 0.0861590015119873,
+      "gather_ms": 0.11251400428591296,
+      "h2d_ms": 0.6644039967795834,
+      "total_ms": 0.8742474965401925
+    },
+    "p90_ms": {
+      "selection_ms": 0.09752500045578927,
+      "gather_ms": 0.16541499644517899,
+      "h2d_ms": 0.7228549948194996,
+      "total_ms": 0.9759859967743978
+    },
+    "estimated_12_layer_serial_ms": 10.49096995848231
+  }
+}

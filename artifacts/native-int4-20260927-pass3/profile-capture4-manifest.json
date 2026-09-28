@@ -1,0 +1,17 @@
+{
+  "phase": "decode",
+  "profiled_not_benchmark_baseline": true,
+  "profiler_config": {
+    "profiler": "torch",
+    "torch_profiler_dir": "/srv/ai/src/native-int4-w4a8.KiuhBN/pass3/profile-npu",
+    "torch_profiler_with_stack": false,
+    "torch_profiler_with_memory": false,
+    "ignore_frontend": true,
+    "delay_iterations": 4,
+    "max_iterations": 12
+  },
+  "npu_trace_requested": true,
+  "client_command_sha256": "ca60ba9ed4a0587dfacb9fb25b5e9a85c358860336c14abe795b5c32e719c927",
+  "cpu_pid": null,
+  "success": true
+}

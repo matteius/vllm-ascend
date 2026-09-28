@@ -1,0 +1,57 @@
+{
+  "api_pid": 3656411,
+  "health": "passed",
+  "model": "qwen38-w4-experimental",
+  "port": 8001,
+  "backend": "cube_310_int4_a8",
+  "activation_quantization": "int8_per_group",
+  "operator_package": "/srv/ai/src/native-int4-w4a8.KiuhBN/ops-pass3-route-cache",
+  "operator_hashes_match_tested_package": true,
+  "workers": [
+    {
+      "pid": 3657379,
+      "cpu_affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "pid": 3657380,
+      "cpu_affinity": [
+        8,
+        9,
+        10,
+        11,
+        12,
+        13
+      ]
+    },
+    {
+      "pid": 3657381,
+      "cpu_affinity": [
+        16,
+        17,
+        18,
+        19,
+        20,
+        21
+      ]
+    },
+    {
+      "pid": 3657382,
+      "cpu_affinity": [
+        24,
+        25,
+        26,
+        27,
+        28,
+        29
+      ]
+    }
+  ],
+  "left_running_per_user_request": true
+}

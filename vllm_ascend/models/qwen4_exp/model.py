@@ -369,6 +369,18 @@ class Qwen4ExpVLMultiModalProcessor(Qwen3VLMultiModalProcessor):
 # Eager math helpers (Triton-free, deterministic)
 # ===========================================================================
 _NPU_GROUPED_RMS_NORM_MIN_TOKENS = 256
+_GemmaAffineCache = tuple[tuple[object, ...], torch.Tensor]
+
+
+def _cached_gemma_affine(
+    weight: torch.Tensor, compute_dtype: torch.dtype, cached: _GemmaAffineCache | None
+) -> _GemmaAffineCache:
+    """Keep the static ``1 + weight`` affine in normalization precision."""
+    key = (weight.data_ptr(), weight._version, weight.device, weight.dtype, compute_dtype)
+    if cached is not None and cached[0] == key:
+        return cached
+    with torch.no_grad():
+        return key, 1.0 + weight.to(compute_dtype)
 
 
 def _grouped_rms_norm(
@@ -378,11 +390,12 @@ def _grouped_rms_norm(
     group_size: int,
     compute_dtype: torch.dtype,
     unit_weight: torch.Tensor | None = None,
+    affine: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """GemmaRMSNorm applied per contiguous ``group_size`` lane (``*(1+w)``)."""
     num_tokens, channels = x.shape
     xc = x.to(compute_dtype)
-    wc = weight.to(compute_dtype)
+    affine_weight = affine if affine is not None else 1.0 + weight.to(compute_dtype)
     grouped = xc.view(num_tokens, channels // group_size, group_size)
     if (
         x.device.type == "npu"
@@ -396,10 +409,10 @@ def _grouped_rms_norm(
         import torch_npu
 
         normalized, _ = torch_npu.npu_rms_norm(grouped.reshape(-1, group_size), unit_weight, eps)
-        return normalized.view(num_tokens, channels) * (1.0 + wc)
+        return normalized.view(num_tokens, channels) * affine_weight
     variance = grouped.square().mean(dim=-1, keepdim=True)
     normalized = (grouped * torch.rsqrt(variance + eps)).reshape(num_tokens, channels)
-    return normalized * (1.0 + wc)
+    return normalized * affine_weight
 
 
 def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float, compute_dtype: torch.dtype) -> torch.Tensor:
@@ -511,13 +524,24 @@ class _GatedResidual(nn.Module):
         self.use_combine = use_combine
 
         self.hc_norm_weight = nn.Parameter(torch.zeros(self.hyper_hidden, dtype=params_dtype))
+        self._hc_norm_affine_cache: _GemmaAffineCache | None = None
         self.register_buffer("_rms_unit_weight", torch.ones(self.hidden_size, dtype=torch.float32), persistent=False)
         self.input_mix_weight_down = nn.Parameter(torch.zeros(lowrank, self.hyper_hidden, dtype=params_dtype))
         self.input_mix_weight_up = nn.Parameter(torch.zeros(self.hyper_hidden, lowrank, dtype=params_dtype))
         if use_combine:
             self.block_inject_weight = nn.Parameter(torch.zeros(hc_count, self.hyper_hidden, dtype=params_dtype))
 
+    def prepare_norm_affine(self) -> None:
+        self._hc_norm_affine_cache = _cached_gemma_affine(
+            self.hc_norm_weight, self.compute_dtype, self._hc_norm_affine_cache
+        )
+
     def _normalize(self, hyper_input: torch.Tensor) -> torch.Tensor:
+        affine = None
+        if not torch.is_grad_enabled():
+            self.prepare_norm_affine()
+            assert self._hc_norm_affine_cache is not None
+            affine = self._hc_norm_affine_cache[1]
         return _grouped_rms_norm(
             hyper_input,
             self.hc_norm_weight,
@@ -525,6 +549,7 @@ class _GatedResidual(nn.Module):
             self.hidden_size,
             self.compute_dtype,
             self._rms_unit_weight,
+            affine,
         )
 
     def mix(self, hyper_input: torch.Tensor) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
@@ -1141,6 +1166,64 @@ class _GDNAttention(nn.Module, MambaBase):
         return out.to(self.params_dtype)
 
 
+_QSARopeStepCache = dict[tuple[object, ...], tuple[torch.Tensor, torch.Tensor]]
+
+
+def _step_rope_cos_sin(
+    positions: torch.Tensor,
+    source_positions: torch.Tensor,
+    cache: _QSARopeStepCache | None,
+    purpose: str,
+    *,
+    rotary_dim: int,
+    base: float,
+    dtype: torch.dtype,
+    compute_dtype: torch.dtype = torch.float32,
+    frequency_axes: torch.Tensor | None = None,
+    mrope_section: list[int] | None = None,
+    mrope_interleaved: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Share dynamic RoPE tables between QSA layers in one model forward.
+
+    The caller creates ``cache`` inside forward(), so no result survives into a
+    later eager step or graph capture. A captured table remains a graph-produced
+    tensor: changing-input replay recomputes it from the current positions.
+    ``source_positions`` identifies the model input even when group-start
+    positions are separately materialized by each QSA layer.
+    """
+    key = (
+        purpose,
+        source_positions.device,
+        source_positions.dtype,
+        source_positions.data_ptr(),
+        source_positions._version,
+        tuple(source_positions.shape),
+        tuple(source_positions.stride()),
+        tuple(positions.shape),
+        rotary_dim,
+        base,
+        dtype,
+        compute_dtype,
+        tuple(mrope_section) if mrope_section is not None else None,
+        mrope_interleaved,
+    )
+    if cache is not None and key in cache:
+        return cache[key]
+    tables = partial_rope_cos_sin(
+        positions,
+        rotary_dim=rotary_dim,
+        base=base,
+        dtype=dtype,
+        compute_dtype=compute_dtype,
+        frequency_axes=frequency_axes,
+        mrope_section=mrope_section,
+        mrope_interleaved=mrope_interleaved,
+    )
+    if cache is not None:
+        cache[key] = tables
+    return tables
+
+
 class _QSAAttention(nn.Module, AttentionLayerBase):
     """QSA layer backed by dedicated 310P index and sparse-attention kernels."""
 
@@ -1352,6 +1435,13 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
         seq_lens_list = getattr(metadata, "seq_lens_list", None)
         return bool(seq_lens_list) and max(seq_lens_list) <= token_budget
 
+    @classmethod
+    def _needs_sparse_index_query(cls, metadata: object, token_budget: int) -> bool:
+        """Whether this step consumes the learned QSA query projection."""
+        return not (
+            cls._dense_prefill_is_exact(metadata, token_budget) or cls._dense_decode_is_exact(metadata, token_budget)
+        )
+
     def _dense_decode_310(
         self,
         query: torch.Tensor,
@@ -1467,7 +1557,12 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
             )
         return output
 
-    def forward(self, block_input: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        block_input: torch.Tensor,
+        positions: torch.Tensor,
+        qsa_rope_cache: _QSARopeStepCache | None = None,
+    ) -> torch.Tensor:
         metadata_by_layer = get_forward_context().attn_metadata if is_forward_context_available() else None
         metadata = metadata_by_layer.get(self.prefix) if isinstance(metadata_by_layer, dict) else None
         if metadata is None or block_input.device.type != "npu":
@@ -1510,17 +1605,23 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
         k = _linear(block_input, self.k_proj, self.compute_dtype).view(seq_len, self.num_kv_heads, self.head_dim)
         v = _linear(block_input, self.v_proj, self.compute_dtype).view(seq_len, self.num_kv_heads, self.head_dim)
         gate = _linear(block_input, self.gate_proj, self.compute_dtype).view(seq_len, self.num_heads, self.head_dim)
-        index_q = _linear(block_input, self.iq_proj, self.compute_dtype).view(
-            seq_len, self.index_n_heads, self.index_head_dim
-        )
+        needs_sparse_index_query = self._needs_sparse_index_query(metadata, self.indexer.token_topk)
+        index_q = None
+        if needs_sparse_index_query:
+            index_q = _linear(block_input, self.iq_proj, self.compute_dtype).view(
+                seq_len, self.index_n_heads, self.index_head_dim
+            )
         index_k = _linear(block_input, self.ik_proj, self.compute_dtype)
         # Q, K and index-query use the same current positions/rotary policy.
         # Keep tables in accumulation precision and recompute on every replay;
         # index-key group-start positions below intentionally remain separate.
         query_cos_sin = None
         if self.reuse_query_rope:
-            query_cos_sin = partial_rope_cos_sin(
+            query_cos_sin = _step_rope_cos_sin(
                 positions,
+                positions,
+                qsa_rope_cache,
+                "query",
                 rotary_dim=self.attn.rotary_dim,
                 base=self.attn.rope_theta,
                 dtype=self.compute_dtype,
@@ -1534,22 +1635,23 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
         k = k.to(self.params_dtype)
         v = v.to(self.params_dtype)
         gate = gate.to(self.params_dtype)
-        index_q = gemma_rmsnorm(
-            index_q,
-            self.indexer.q_layernorm_weight,
-            self.indexer.rms_norm_eps,
-            self.compute_dtype,
-        )
-        index_q = apply_partial_rope(
-            index_q,
-            positions,
-            self.attn.rotary_dim,
-            self.attn.rope_theta,
-            self.compute_dtype,
-            mrope_section=self.attn.mrope_section,
-            mrope_interleaved=self.attn.mrope_interleaved,
-            cos_sin=query_cos_sin,
-        ).to(self.params_dtype)
+        if index_q is not None:
+            index_q = gemma_rmsnorm(
+                index_q,
+                self.indexer.q_layernorm_weight,
+                self.indexer.rms_norm_eps,
+                self.compute_dtype,
+            )
+            index_q = apply_partial_rope(
+                index_q,
+                positions,
+                self.attn.rotary_dim,
+                self.attn.rope_theta,
+                self.compute_dtype,
+                mrope_section=self.attn.mrope_section,
+                mrope_interleaved=self.attn.mrope_interleaved,
+                cos_sin=query_cos_sin,
+            ).to(self.params_dtype)
         if positions.ndim == 1:
             index_key_positions = positions - torch.remainder(logical_positions, self.indexer.compress_ratio)
         else:
@@ -1557,8 +1659,11 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
             # Preserve their exact per-token coordinates; causal group/tail
             # accounting independently uses logical_positions below.
             index_key_positions = positions
-        index_key_cos, index_key_sin = partial_rope_cos_sin(
+        index_key_cos, index_key_sin = _step_rope_cos_sin(
             index_key_positions,
+            positions,
+            qsa_rope_cache,
+            f"index_key_{self.indexer.compress_ratio}",
             rotary_dim=self.attn.rotary_dim,
             base=self.attn.rope_theta,
             dtype=self.params_dtype,
@@ -1587,11 +1692,12 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
             rotary_dim=self.attn.rotary_dim,
             norm_eps=self.indexer.rms_norm_eps,
         )
-        if self._dense_prefill_is_exact(metadata, self.indexer.token_topk):
+        if not needs_sparse_index_query and self._dense_prefill_is_exact(metadata, self.indexer.token_topk):
             out = self._dense_prefill_310(q, k, v, key_cache, value_cache, metadata)
-        elif self._dense_decode_is_exact(metadata, self.indexer.token_topk):
+        elif not needs_sparse_index_query:
             out = self._dense_decode_310(q, key_cache, value_cache, metadata)
         else:
+            assert index_q is not None
             seq_lens_cpu = getattr(metadata, "seq_lens_cpu", None)
             max_visible_groups = None
             max_visible_tokens = None
@@ -2317,13 +2423,17 @@ class AscendQwen4ExpDecoderLayer(nn.Module):
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
         ngram_context: torch.Tensor | None = None,
+        qsa_rope_cache: _QSARopeStepCache | None = None,
     ) -> torch.Tensor:
         # PLE injects into the multi-stream state before the attention block.
         if self.ple is not None:
             hidden_states = self.ple(hidden_states, input_ids, query_start_loc, ngram_context)
 
         block_input, residual = self.attn_hyper_connection.mix(hidden_states)
-        attn_out = self.attention(block_input, positions)
+        if self.uses_qsa:
+            attn_out = self.attention(block_input, positions, qsa_rope_cache)
+        else:
+            attn_out = self.attention(block_input, positions)
         hidden_states = self.attn_hyper_connection.combine(attn_out, residual)
 
         block_input, residual = self.mlp_hyper_connection.mix(hidden_states)
@@ -2491,6 +2601,9 @@ class AscendQwen4ExpModel(nn.Module):
             if input_ids is not None
             else torch.zeros(hidden_states.shape[0], dtype=torch.int64, device=hidden_states.device)
         )
+        # All QSA layers use the same positions and RoPE geometry. Keep the
+        # table tensors alive only for this forward (and its captured graph).
+        qsa_rope_cache: _QSARopeStepCache = {}
         for layer in self.layers:
             hidden_states = layer(
                 hidden_states,
@@ -2498,6 +2611,7 @@ class AscendQwen4ExpModel(nn.Module):
                 raw_input_ids,
                 query_start_loc,
                 ngram_context,
+                qsa_rope_cache,
             )
 
         # Retain the multi-stream state for the MTP drafter (scheme A). The
@@ -3244,6 +3358,9 @@ class AscendQwen4ExpForCausalLM(
         elif expert_index:
             validate_expert_weight_map(expert_index, geometry, tp_size=tp_size, tp_rank=tp_rank)
         _format_eager_linear_weights_npu(self.model)
+        for module in self.model.modules():
+            if isinstance(module, _GatedResidual):
+                module.prepare_norm_affine()
         return loaded
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:

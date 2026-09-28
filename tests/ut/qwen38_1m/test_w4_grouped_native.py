@@ -87,6 +87,61 @@ def test_backend_dispatch_never_falls_back_to_python(backend, tokens):
     assert routed.call_count == int(tokens * 3 <= 80)
 
 
+def test_native_routed_packs_unique_tokens_before_topk_expansion():
+    layer = make_layer(NATIVE_INT4_BACKEND)
+    tokens = 3
+    x = torch.randn(tokens, 256).half()
+    ids = torch.zeros(tokens, layer.top_k, dtype=torch.int64)
+    weights = torch.full((tokens, layer.top_k), 1 / layer.top_k)
+
+    def gate_up(prepared, local_ids):
+        assert prepared[0].shape == (tokens, 256)
+        assert local_ids.shape == (tokens * layer.top_k,)
+        return torch.zeros(tokens * layer.top_k, 512).half()
+
+    with (
+        patch("vllm_ascend.models.qwen4_exp.w4_moe.pack_activation_device", side_effect=lambda x: (x,)) as pack,
+        patch.object(layer.projections["gate_up_proj"], "native_linear", side_effect=gate_up) as native,
+        patch.object(
+            layer.projections["down_proj"],
+            "routed_linear",
+            return_value=torch.zeros(tokens * layer.top_k, 256).half(),
+        ),
+    ):
+        result = layer._forward_routed(x, weights, ids)
+    assert result.shape == (tokens, 256)
+    assert torch.count_nonzero(result) == 0
+    pack.assert_called_once()
+    native.assert_called_once()
+
+
+def test_w4a16_routed_keeps_expanded_inputs():
+    layer = make_layer("cube_310_grouped")
+    tokens = 3
+    x = torch.randn(tokens, 256).half()
+    ids = torch.zeros(tokens, layer.top_k, dtype=torch.int64)
+    weights = torch.full((tokens, layer.top_k), 1 / layer.top_k)
+
+    def gate_up(inputs, local_ids):
+        assert inputs.shape == (tokens * layer.top_k, 256)
+        assert local_ids.shape == (tokens * layer.top_k,)
+        torch.testing.assert_close(inputs, x.repeat_interleave(layer.top_k, dim=0))
+        return torch.zeros(tokens * layer.top_k, 512).half()
+
+    with (
+        patch.object(layer.projections["gate_up_proj"], "routed_linear", side_effect=gate_up) as routed,
+        patch.object(
+            layer.projections["down_proj"],
+            "routed_linear",
+            return_value=torch.zeros(tokens * layer.top_k, 256).half(),
+        ),
+        patch("vllm_ascend.models.qwen4_exp.w4_moe.pack_activation_device", side_effect=AssertionError("W4A16 pack")),
+    ):
+        result = layer._forward_routed(x, weights, ids)
+    assert result.shape == (tokens, 256)
+    routed.assert_called_once()
+
+
 def test_two_int4_limb_identity_covers_every_int8():
     q = torch.arange(-128, 128, dtype=torch.int16)
     low = unpack_signed_int4(pack_nibbles((q & 15) - 8)).int()

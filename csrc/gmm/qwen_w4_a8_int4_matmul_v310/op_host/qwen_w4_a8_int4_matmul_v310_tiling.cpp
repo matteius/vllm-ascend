@@ -31,10 +31,11 @@ static ge::graphStatus TileQwenW4A8Int4(gert::TilingContext* context) {
                   ends.GetDimNum() != 1,
               OP_LOGE(context, "expected x[R,K], banks[E,N,*], group_ends[E]"), return ge::GRAPH_FAILED);
   const bool routed = context->GetInputDesc(8)->GetDataType() == ge::DT_INT32;
-  const int64_t rows = x.GetDim(0), k = x.GetDim(1) * 2, experts = codes.GetDim(0), n = codes.GetDim(1);
+  const int64_t input_rows = x.GetDim(0), rows = routed ? ends.GetDim(0) : input_rows;
+  const int64_t k = x.GetDim(1) * 2, experts = codes.GetDim(0), n = codes.GetDim(1);
   OP_CHECK_IF(rows <= 0 || rows > MAX_ROUTES || experts <= 0 || n <= 0 || n > MAX_N || n % GROUP_SIZE != 0 ||
-                  k < MIN_K || k > MAX_K || k % GROUP_SIZE != 0 || codes.GetDim(2) * 2 != k ||
-                  ends.GetDim(0) != (routed ? rows : experts),
+                  k < MIN_K || k > MAX_K || k % GROUP_SIZE != 0 || codes.GetDim(2) * 2 != k || input_rows <= 0 ||
+                  rows < input_rows || rows % input_rows != 0 || (!routed && ends.GetDim(0) != experts),
               OP_LOGE(context, "invalid Qwen W4 grouped dimensions"), return ge::GRAPH_FAILED);
   for (const auto& shape : {scales, offsets}) {
     OP_CHECK_IF(shape.GetDim(0) != experts || shape.GetDim(1) != n || shape.GetDim(2) != k / GROUP_SIZE,
@@ -47,8 +48,8 @@ static ge::graphStatus TileQwenW4A8Int4(gert::TilingContext* context) {
   OP_CHECK_IF(high.GetDimNum() != 2 || (xs.GetDimNum() != 2 && xs.GetDimNum() != 3) ||
                   sums.GetDimNum() != xs.GetDimNum() || ws.GetDimNum() != 3,
               OP_LOGE(context, "invalid W4A8 auxiliary ranks"), return ge::GRAPH_FAILED);
-  OP_CHECK_IF(high.GetDim(0) != rows || high.GetDim(1) != k / 2 || xs.GetDim(0) != rows ||
-                  xs.GetDim(1) != k / GROUP_SIZE || sums.GetDim(0) != rows || sums.GetDim(1) != k / GROUP_SIZE ||
+  OP_CHECK_IF(high.GetDim(0) != input_rows || high.GetDim(1) != k / 2 || xs.GetDim(0) != input_rows ||
+                  xs.GetDim(1) != k / GROUP_SIZE || sums.GetDim(0) != input_rows || sums.GetDim(1) != k / GROUP_SIZE ||
                   ws.GetDim(0) != experts || ws.GetDim(1) != n || ws.GetDim(2) != k / GROUP_SIZE,
               OP_LOGE(context, "invalid W4A8 auxiliary dimensions"), return ge::GRAPH_FAILED);
   const int64_t lanes = xs.GetDimNum() == 3 ? 8 : 1;
@@ -67,6 +68,7 @@ static ge::graphStatus TileQwenW4A8Int4(gert::TilingContext* context) {
   data.set_kDim(k);
   data.set_metadataLanes(lanes);
   data.set_routed(routed);
+  data.set_broadcastFactor(rows / input_rows);
   auto workspace = context->GetWorkspaceSizes(1);
   OP_CHECK_NULL_WITH_CONTEXT(context, workspace);
   // All native INT4 tiles and accumulators are on chip.

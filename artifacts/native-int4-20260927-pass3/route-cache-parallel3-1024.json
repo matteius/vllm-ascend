@@ -1,0 +1,51 @@
+{
+  "concurrency": 3,
+  "max_tokens_per_stream": 1024,
+  "total_completion_tokens": 3072,
+  "aggregate_e2e_tok_s": 25.54835292259423,
+  "aggregate_decode_tok_s": 25.601317919074933,
+  "median_stream_decode_tok_s": 8.576412881504282,
+  "max_running": 3.0,
+  "max_waiting": 0.0,
+  "streams": [
+    {
+      "stream": 0,
+      "prompt_tokens": 25,
+      "completion_tokens": 1024,
+      "started": 101899.04870724,
+      "first": 101900.010066645,
+      "last": 102016.98314848,
+      "finished": 102016.983325587,
+      "ttft_s": 0.9613594050024403,
+      "decode_s": 116.97308183499263,
+      "client_decode_tok_s": 8.745601842337443,
+      "e2e_s": 117.93461834700429
+    },
+    {
+      "stream": 1,
+      "prompt_tokens": 25,
+      "completion_tokens": 1024,
+      "started": 101899.048498453,
+      "first": 101900.010203024,
+      "last": 102019.290840994,
+      "finished": 102019.290918531,
+      "ttft_s": 0.9617045709892409,
+      "decode_s": 119.28063797000505,
+      "client_decode_tok_s": 8.576412881504282,
+      "e2e_s": 120.2424200779933
+    },
+    {
+      "stream": 2,
+      "prompt_tokens": 25,
+      "completion_tokens": 1024,
+      "started": 101899.048333449,
+      "first": 101899.414199889,
+      "last": 102018.756209241,
+      "finished": 102018.756368935,
+      "ttft_s": 0.3658664399990812,
+      "decode_s": 119.34200935199624,
+      "client_decode_tok_s": 8.572002478881409,
+      "e2e_s": 119.70803548600816
+    }
+  ]
+}

@@ -27,9 +27,11 @@ at::Tensor npu_qwen_w4_a8_int4_matmul_310(const at::Tensor& low, const at::Tenso
               "invalid native INT4 input ranks");
   const bool routed = group_ends.scalar_type() == at::kInt;
   const int64_t rows = low.size(0), k = low.size(1) * 2, experts = codes.size(0), n = codes.size(1);
-  TORCH_CHECK(rows > 0 && rows <= MAX_ROUTES && k >= MIN_K && k <= MAX_K && k % GROUP == 0 && n > 0 && n <= MAX_N &&
+  const int64_t output_rows = routed ? group_ends.size(0) : rows;
+  TORCH_CHECK(rows > 0 && rows <= MAX_ROUTES && output_rows >= rows && output_rows <= MAX_ROUTES &&
+                  output_rows % rows == 0 && k >= MIN_K && k <= MAX_K && k % GROUP == 0 && n > 0 && n <= MAX_N &&
                   n % GROUP == 0 && experts > 0 && codes.size(2) * 2 == k && high.sizes() == low.sizes() &&
-                  group_ends.size(0) == (routed ? rows : experts),
+                  (routed || group_ends.size(0) == experts),
               "unsupported native INT4 dimensions");
   TORCH_CHECK(activation_scale.size(0) == rows && activation_scale.size(1) == k / GROUP &&
                   activation_sum.sizes() == activation_scale.sizes() && scale.size(0) == experts &&
@@ -38,10 +40,10 @@ at::Tensor npu_qwen_w4_a8_int4_matmul_310(const at::Tensor& low, const at::Tenso
               "native INT4 metadata shape mismatch");
   TORCH_CHECK(activation_scale.dim() == 2 || activation_scale.size(2) == 8,
               "native INT4 broadcast metadata requires eight lanes");
-  TORCH_CHECK(!routed || (rows <= DECODE_ROUTE_LIMIT && activation_scale.dim() == 3),
+  TORCH_CHECK(!routed || (output_rows <= DECODE_ROUTE_LIMIT && activation_scale.dim() == 3),
               "native routed decode requires <=80 rows and broadcast metadata");
   const c10_npu::OptionalNPUGuard guard(low.device());
-  auto out = at::empty({rows, n}, low.options().dtype(at::kHalf));
+  auto out = at::empty({output_rows, n}, low.options().dtype(at::kHalf));
   EXEC_NPU_CMD(aclnnQwenW4A8Int4MatmulV310, low, high, activation_scale, activation_sum, codes, scale, offset,
                weight_sum, group_ends, out);
   return out;

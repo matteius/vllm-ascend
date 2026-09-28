@@ -24,7 +24,9 @@ from .dtype_policy import Qwen4ExpDtypePolicy
 from .model import (
     AscendQwen4ExpDecoderLayer,
     AscendQwen4ExpForCausalLM,
+    _cached_gemma_affine,
     _GatedResidual,
+    _GemmaAffineCache,
     _grouped_rms_norm,
     _linear,
     _remap_non_expert,
@@ -225,6 +227,8 @@ class _MTPPredictor(nn.Module):
         self.fc_hidden = nn.Parameter(torch.zeros(self.hidden_size, self.hidden_size, dtype=policy.main_dtype))
         self.pre_fc_norm_embedding = nn.Parameter(torch.zeros(self.hidden_size, dtype=policy.main_dtype))
         self.pre_fc_norm_hidden = nn.Parameter(torch.zeros(self.hc_count * self.hidden_size, dtype=policy.main_dtype))
+        self._embedding_affine_cache: _GemmaAffineCache | None = None
+        self._hidden_affine_cache: _GemmaAffineCache | None = None
         self.expert_sharding = _resolve_expert_sharding(vllm_config)
         runtime_device = getattr(getattr(vllm_config, "device_config", None), "device", None)
         quantize_experts = getattr(runtime_device, "type", None) == "npu"
@@ -269,6 +273,14 @@ class _MTPPredictor(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def prepare_norm_affines(self) -> None:
+        self._embedding_affine_cache = _cached_gemma_affine(
+            self.pre_fc_norm_embedding, self.policy.accumulation_dtype, self._embedding_affine_cache
+        )
+        self._hidden_affine_cache = _cached_gemma_affine(
+            self.pre_fc_norm_hidden, self.policy.accumulation_dtype, self._hidden_affine_cache
+        )
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -291,12 +303,19 @@ class _MTPPredictor(nn.Module):
                 if input_ids is None:
                     raise ValueError("MTP requires input_ids or inputs_embeds")
                 inputs_embeds = self.embed_input_ids(input_ids)
+            embedding_affine = hidden_affine = None
+            if not torch.is_grad_enabled():
+                self.prepare_norm_affines()
+                assert self._embedding_affine_cache is not None and self._hidden_affine_cache is not None
+                embedding_affine = self._embedding_affine_cache[1]
+                hidden_affine = self._hidden_affine_cache[1]
             embedding = _grouped_rms_norm(
                 inputs_embeds,
                 self.pre_fc_norm_embedding,
                 float(self.config.rms_norm_eps),
                 self.hidden_size,
                 self.policy.accumulation_dtype,
+                affine=embedding_affine,
             )
             embedding = _linear(embedding, self.fc_embedding, self.policy.accumulation_dtype)
             hidden_states = _grouped_rms_norm(
@@ -305,6 +324,7 @@ class _MTPPredictor(nn.Module):
                 float(self.config.rms_norm_eps),
                 self.hidden_size,
                 self.policy.accumulation_dtype,
+                affine=hidden_affine,
             )
             hidden_states = hidden_states.reshape(-1, self.hc_count, self.hidden_size)
             projected = _linear(hidden_states, self.fc_hidden, self.policy.accumulation_dtype)
@@ -480,6 +500,10 @@ class AscendQwen4ExpMTP(nn.Module, SupportsPP, MixtureOfExperts):
                     else:
                         target[offset : offset + source.shape[0]].copy_(source.to(target.dtype))
                 loaded.add(target_name)
+        for module in self.model.modules():
+            if isinstance(module, _GatedResidual):
+                module.prepare_norm_affine()
+        self.model.prepare_norm_affines()
         return loaded
 
 

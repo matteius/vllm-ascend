@@ -29,7 +29,7 @@ from __future__ import annotations
 import contextlib
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -380,6 +380,30 @@ def test_embedding_tie_shares_lm_head_weight():
     cfg = _tiny_text_config(num_layers=4, tie=True)
     model = _build(cfg)
     assert model.lm_head.weight is model.model.embed_tokens.weight
+
+
+def test_qsa_layers_share_only_the_current_forwards_rope_cache():
+    cfg = _tiny_text_config(num_layers=8, moe=False, ple_layer_ids=())
+    model = _build(cfg)
+    caches = []
+
+    def record_cache(self, block_input, positions, qsa_rope_cache=None):
+        del self, positions
+        caches.append(qsa_rope_cache)
+        return torch.zeros_like(block_input)
+
+    for layer in model.model.layers:
+        if layer.uses_qsa:
+            layer.attention.forward = MethodType(record_cache, layer.attention)
+
+    input_ids = torch.arange(1, 5, dtype=torch.int64)
+    with torch.no_grad(), _single_rank_tp():
+        model.model(input_ids, torch.arange(4))
+        model.model(input_ids, torch.arange(100, 104))
+    assert len(caches) == 4
+    assert caches[0] is caches[1]
+    assert caches[2] is caches[3]
+    assert caches[0] is not caches[2]
 
 
 # ---------------------------------------------------------------------------

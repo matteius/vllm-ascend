@@ -22,6 +22,7 @@ class Schedule {
                               GM_ADDR offset, GM_ADDR weightSum, GM_ADDR ends, GM_ADDR y,
                               __gm__ const QwenW4A8Int4KernelTilingData* td) {
     routed_ = td->routed != 0;
+    broadcastFactor_ = td->broadcastFactor;
     routeIds_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(ends));
     rows_ = td->numRows;
     experts_ = td->numExperts;
@@ -42,14 +43,15 @@ class Schedule {
     pipe_.InitBuffer(b1_, N * MAX_K / 2);
     pipe_.InitBuffer(a2_, 2 * A_BYTES);
     pipe_.InitBuffer(b2_, 2 * B_BYTES);
-    pipe_.InitBuffer(c_, ELEMENTS * sizeof(int32_t));
+    pipe_.InitBuffer(c_, (M <= 32 ? 2 : 1) * ELEMENTS * sizeof(int32_t));
     pipe_.InitBuffer(packing_, 2 * A_BYTES);
-    pipe_.InitBuffer(integers_, ELEMENTS * sizeof(int32_t));
+    pipe_.InitBuffer(integers_, (M <= 32 ? 2 : 1) * ELEMENTS * sizeof(int32_t));
     pipe_.InitBuffer(result_, 3 * ELEMENTS * sizeof(float));
     pipe_.InitBuffer(metadata_, 3 * N * sizeof(half) + 3 * N * sizeof(float));
     pipe_.InitBuffer(activation_, 2 * M * LANES * sizeof(float));
     pipe_.InitBuffer(output_, ELEMENTS * sizeof(half));
     pipe_.InitBuffer(endCache_, END_CACHE_SIZE * sizeof(int64_t));
+    pipe_.InitBuffer(routeCache_, MAX_ROUTES * sizeof(int32_t));
   }
 
   __aicore__ inline void Process() {
@@ -110,8 +112,18 @@ class Schedule {
     int32_t expertIds[MAX_ROUTES];
     uint32_t counts[MAX_ROUTES], groupOfRow[MAX_ROUTES], starts[MAX_ROUTES + 1];
     uint32_t groups = 0;
+    auto cachedIds = routeCache_.Get<int32_t>();
+    const uint32_t aligned = rows_ / 8 * 8;
+    if (aligned > 0) {
+      SetFlag<HardEvent::S_MTE2>(EVENT_ID0);
+      WaitFlag<HardEvent::S_MTE2>(EVENT_ID0);
+      DataCopy(cachedIds, routeIds_[0], aligned);
+      SetFlag<HardEvent::MTE2_S>(EVENT_ID0);
+      WaitFlag<HardEvent::MTE2_S>(EVENT_ID0);
+    }
+    for (uint32_t row = aligned; row < rows_; ++row) cachedIds.SetValue(row, routeIds_.GetValue(row));
     for (uint32_t row = 0; row < rows_; ++row) {
-      const int32_t expert = routeIds_.GetValue(row);
+      const int32_t expert = cachedIds.GetValue(row);
       groupOfRow[row] = MAX_ROUTES;
       if (expert < 0 || expert >= experts_) continue;
       uint32_t group = 0;
@@ -130,6 +142,7 @@ class Schedule {
       counts[group] = starts[group];
     }
     for (uint32_t row = 0; row < rows_; ++row) {
+      sourceRows_[row] = row / broadcastFactor_;
       if (groupOfRow[row] != MAX_ROUTES) routeRows_[counts[groupOfRow[row]]++] = row;
     }
     // Zero all route slots first, so peer rows never retain stale graph data.
@@ -196,7 +209,8 @@ class Schedule {
       const int64_t src = row * k_ / 2 + group * GROUP / 2 + kb * K0 / 2;
       if (routed_) {
         for (uint32_t m = 0; m < count; ++m) {
-          const int64_t routeSrc = static_cast<int64_t>(routeRows_[row + m]) * k_ / 2 + group * GROUP / 2 + kb * K0 / 2;
+          const int64_t routeSrc =
+              static_cast<int64_t>(sourceRows_[routeRows_[row + m]]) * k_ / 2 + group * GROUP / 2 + kb * K0 / 2;
           DataCopy(packed[(kb * M + m) * K0 / 2], low_[routeSrc], K0 / 2);
           DataCopy(packed[A_BYTES + (kb * M + m) * K0 / 2], high_[routeSrc], K0 / 2);
         }
@@ -213,7 +227,7 @@ class Schedule {
     WaitFlag<HardEvent::V_MTE2>(EVENT_ID0);
     if (routed_) {
       for (uint32_t m = 0; m < count; ++m) {
-        const int64_t index = (static_cast<int64_t>(routeRows_[row + m]) * groups_ + group) * LANES;
+        const int64_t index = (static_cast<int64_t>(sourceRows_[routeRows_[row + m]]) * groups_ + group) * LANES;
         DataCopy(xs[m * LANES], xs_[index], LANES);
         DataCopy(sums[m * LANES], sums_[index], LANES);
       }
@@ -262,6 +276,72 @@ class Schedule {
     WaitFlag<HardEvent::V_M>(EVENT_ID0);
   }
 
+  // Both INT4 activation limbs share the same packed weight tile. For
+  // sparse rows, one M=2M Cube operation computes both integer products.
+  __aicore__ inline void ProductPair(uint32_t weightBuffer, int64_t prefetchGroup = -1) {
+    SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
+    WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
+    MmadParams mm;
+    mm.m = 2 * M;
+    mm.n = N;
+    mm.k = GROUP;
+    mm.cmatrixInitVal = true;
+    Mmad(c_.Get<int32_t>(), a2_.Get<int8_t>().template ReinterpretCast<int4b_t>(),
+         b2_.Get<int8_t>()[weightBuffer * B_BYTES].template ReinterpretCast<int4b_t>(), mm);
+    if (prefetchGroup >= 0) LoadWeight(prefetchGroup);
+    SetFlag<HardEvent::M_V>(EVENT_ID0);
+    WaitFlag<HardEvent::M_V>(EVENT_ID0);
+    DataCopyParams copy{N / BLOCK, 2 * M / BLOCK, 0, 0};
+    DataCopyEnhancedParams enhanced;
+    enhanced.blockMode = BlockMode::BLOCK_MODE_MATRIX;
+    DataCopy(integers_.Get<int32_t>(), c_.Get<int32_t>(), copy, enhanced);
+    PipeBarrier<PIPE_V>();
+    Cast(result_.Get<float>(), integers_.Get<int32_t>(), RoundMode::CAST_NONE, 2 * ELEMENTS);
+    SetFlag<HardEvent::V_M>(EVENT_ID0);
+    WaitFlag<HardEvent::V_M>(EVENT_ID0);
+  }
+
+  // Sparse experts have fewer live rows than output strips. Traverse those
+  // rows and vectorize across strips, leaving padded Cube rows unprocessed.
+  template <uint32_t PRODUCT_ROWS>
+  __aicore__ inline void CorrectRows(LocalTensor<float> low, LocalTensor<float> high, LocalTensor<float> accumulator,
+                                     LocalTensor<float> sw, LocalTensor<float> zw, LocalTensor<float> ws,
+                                     LocalTensor<float> xs, LocalTensor<float> sums, uint32_t count) {
+    constexpr uint8_t PRODUCT_STRIDE = PRODUCT_ROWS * BLOCK / LANES;
+    constexpr uint8_t ACCUMULATOR_STRIDE = M * BLOCK / LANES;
+    constexpr uint8_t METADATA_STRIDE = BLOCK / LANES;
+    constexpr uint8_t REPEATS = N / BLOCK;
+    for (uint32_t row = 0; row < count; ++row)
+      Muls(high[row * BLOCK], high[row * BLOCK], 16.0f, BLOCK, REPEATS, {1, 1, PRODUCT_STRIDE, PRODUCT_STRIDE});
+    PipeBarrier<PIPE_V>();
+    for (uint32_t row = 0; row < count; ++row)
+      Add(low[row * BLOCK], low[row * BLOCK], high[row * BLOCK], BLOCK, REPEATS,
+          {1, 1, 1, PRODUCT_STRIDE, PRODUCT_STRIDE, PRODUCT_STRIDE});
+    PipeBarrier<PIPE_V>();
+    for (uint32_t row = 0; row < count; ++row)
+      Mul(high[row * BLOCK], zw, sums[row * LANES], BLOCK, REPEATS, {1, 1, 0, PRODUCT_STRIDE, METADATA_STRIDE, 0});
+    PipeBarrier<PIPE_V>();
+    for (uint32_t row = 0; row < count; ++row)
+      Sub(low[row * BLOCK], low[row * BLOCK], high[row * BLOCK], BLOCK, REPEATS,
+          {1, 1, 1, PRODUCT_STRIDE, PRODUCT_STRIDE, PRODUCT_STRIDE});
+    PipeBarrier<PIPE_V>();
+    for (uint32_t row = 0; row < count; ++row)
+      Add(low[row * BLOCK], low[row * BLOCK], ws, BLOCK, REPEATS,
+          {1, 1, 1, PRODUCT_STRIDE, PRODUCT_STRIDE, METADATA_STRIDE});
+    PipeBarrier<PIPE_V>();
+    for (uint32_t row = 0; row < count; ++row)
+      Mul(low[row * BLOCK], low[row * BLOCK], sw, BLOCK, REPEATS,
+          {1, 1, 1, PRODUCT_STRIDE, PRODUCT_STRIDE, METADATA_STRIDE});
+    PipeBarrier<PIPE_V>();
+    for (uint32_t row = 0; row < count; ++row)
+      Mul(low[row * BLOCK], low[row * BLOCK], xs[row * LANES], BLOCK, REPEATS,
+          {1, 1, 0, PRODUCT_STRIDE, PRODUCT_STRIDE, 0});
+    PipeBarrier<PIPE_V>();
+    for (uint32_t row = 0; row < count; ++row)
+      Add(accumulator[row * BLOCK], accumulator[row * BLOCK], low[row * BLOCK], BLOCK, REPEATS,
+          {1, 1, 1, ACCUMULATOR_STRIDE, ACCUMULATOR_STRIDE, PRODUCT_STRIDE});
+  }
+
   __aicore__ inline void Project(int64_t expert, int64_t tile, int64_t row, uint32_t count) {
     auto low = result_.Get<float>();
     auto high = low[ELEMENTS];
@@ -284,8 +364,17 @@ class Schedule {
       DataCopy(metadata[2 * N], ws_[index], metadataCopy);
       LoadActivation(row, group, count);
       // Alternate L0B buffers let next-group weight loads overlap integer GEMM.
-      Product(0, group % 2, low, group + 1 < groups_ ? group + 1 : -1);
-      Product(1, group % 2, high);
+      if constexpr (M <= 32) {
+        if (count <= N / BLOCK) {
+          ProductPair(group % 2, group + 1 < groups_ ? group + 1 : -1);
+        } else {
+          Product(0, group % 2, low, group + 1 < groups_ ? group + 1 : -1);
+          Product(1, group % 2, high);
+        }
+      } else {
+        Product(0, group % 2, low, group + 1 < groups_ ? group + 1 : -1);
+        Product(1, group % 2, high);
+      }
       SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
       WaitFlag<HardEvent::M_MTE1>(EVENT_ID0);
       SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
@@ -293,31 +382,63 @@ class Schedule {
       Cast(sw, metadata, RoundMode::CAST_NONE, 3 * N);
       PipeBarrier<PIPE_V>();
       Muls(ws, ws, 8.0f, N);
-      Muls(high, high, 16.0f, ELEMENTS);
-      PipeBarrier<PIPE_V>();
-      Add(low, low, high, ELEMENTS);
-      PipeBarrier<PIPE_V>();
-      // Each output strip is independent. Issue one correction stage across
-      // all strips before synchronizing, instead of fencing every strip.
-      for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
-        Mul(high[nb * COLUMN_ELEMENTS], zw[nb * BLOCK], sums, BLOCK, M, {1, 1, 0, 2, 0, 1});
+      if constexpr (M <= 32) {
+        if (count <= N / BLOCK) {
+          CorrectRows<2 * M>(low, low[M * BLOCK], accumulator, sw, zw, ws, xs, sums, count);
+        } else {
+          Muls(high, high, 16.0f, ELEMENTS);
+          PipeBarrier<PIPE_V>();
+          Add(low, low, high, ELEMENTS);
+          PipeBarrier<PIPE_V>();
+          // Each output strip is independent. Issue one correction stage across
+          // all strips before synchronizing, instead of fencing every strip.
+          for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
+            Mul(high[nb * COLUMN_ELEMENTS], zw[nb * BLOCK], sums, BLOCK, count, {1, 1, 0, 2, 0, 1});
+          }
+          PipeBarrier<PIPE_V>();
+          Sub(low, low, high, ELEMENTS);
+          PipeBarrier<PIPE_V>();
+          for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
+            Add(low[nb * COLUMN_ELEMENTS], low[nb * COLUMN_ELEMENTS], ws[nb * BLOCK], BLOCK, count, {1, 1, 1, 2, 2, 0});
+          }
+          PipeBarrier<PIPE_V>();
+          for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
+            Mul(low[nb * COLUMN_ELEMENTS], low[nb * COLUMN_ELEMENTS], sw[nb * BLOCK], BLOCK, count, {1, 1, 1, 2, 2, 0});
+          }
+          PipeBarrier<PIPE_V>();
+          for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
+            Mul(low[nb * COLUMN_ELEMENTS], low[nb * COLUMN_ELEMENTS], xs, BLOCK, count, {1, 1, 0, 2, 2, 1});
+          }
+          PipeBarrier<PIPE_V>();
+          Add(accumulator, accumulator, low, ELEMENTS);
+        }
+      } else {
+        Muls(high, high, 16.0f, ELEMENTS);
+        PipeBarrier<PIPE_V>();
+        Add(low, low, high, ELEMENTS);
+        PipeBarrier<PIPE_V>();
+        // Each output strip is independent. Issue one correction stage across
+        // all strips before synchronizing, instead of fencing every strip.
+        for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
+          Mul(high[nb * COLUMN_ELEMENTS], zw[nb * BLOCK], sums, BLOCK, count, {1, 1, 0, 2, 0, 1});
+        }
+        PipeBarrier<PIPE_V>();
+        Sub(low, low, high, ELEMENTS);
+        PipeBarrier<PIPE_V>();
+        for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
+          Add(low[nb * COLUMN_ELEMENTS], low[nb * COLUMN_ELEMENTS], ws[nb * BLOCK], BLOCK, count, {1, 1, 1, 2, 2, 0});
+        }
+        PipeBarrier<PIPE_V>();
+        for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
+          Mul(low[nb * COLUMN_ELEMENTS], low[nb * COLUMN_ELEMENTS], sw[nb * BLOCK], BLOCK, count, {1, 1, 1, 2, 2, 0});
+        }
+        PipeBarrier<PIPE_V>();
+        for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
+          Mul(low[nb * COLUMN_ELEMENTS], low[nb * COLUMN_ELEMENTS], xs, BLOCK, count, {1, 1, 0, 2, 2, 1});
+        }
+        PipeBarrier<PIPE_V>();
+        Add(accumulator, accumulator, low, ELEMENTS);
       }
-      PipeBarrier<PIPE_V>();
-      Sub(low, low, high, ELEMENTS);
-      PipeBarrier<PIPE_V>();
-      for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
-        Add(low[nb * COLUMN_ELEMENTS], low[nb * COLUMN_ELEMENTS], ws[nb * BLOCK], BLOCK, M, {1, 1, 1, 2, 2, 0});
-      }
-      PipeBarrier<PIPE_V>();
-      for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
-        Mul(low[nb * COLUMN_ELEMENTS], low[nb * COLUMN_ELEMENTS], sw[nb * BLOCK], BLOCK, M, {1, 1, 1, 2, 2, 0});
-      }
-      PipeBarrier<PIPE_V>();
-      for (uint32_t nb = 0; nb < N / BLOCK; ++nb) {
-        Mul(low[nb * COLUMN_ELEMENTS], low[nb * COLUMN_ELEMENTS], xs, BLOCK, M, {1, 1, 0, 2, 2, 1});
-      }
-      PipeBarrier<PIPE_V>();
-      Add(accumulator, accumulator, low, ELEMENTS);
       SetFlag<HardEvent::V_MTE2>(EVENT_ID0);
       WaitFlag<HardEvent::V_MTE2>(EVENT_ID0);
       SetFlag<HardEvent::MTE1_MTE3>(EVENT_ID0);
@@ -338,15 +459,16 @@ class Schedule {
   TBuf<TPosition::A2> a2_;
   TBuf<TPosition::B2> b2_;
   TBuf<TPosition::CO1> c_;
-  TBuf<TPosition::VECCALC> packing_, integers_, result_, metadata_, activation_, output_, endCache_;
+  TBuf<TPosition::VECCALC> packing_, integers_, result_, metadata_, activation_, output_, endCache_, routeCache_;
   GlobalTensor<int8_t> low_, high_, codes_;
   GlobalTensor<float> xs_, sums_;
   GlobalTensor<half> sw_, zw_, ws_, y_;
   GlobalTensor<int64_t> ends_;
   GlobalTensor<int32_t> routeIds_;
   uint32_t routeRows_[MAX_ROUTES];
+  uint32_t sourceRows_[MAX_ROUTES];
   bool routed_;
-  int64_t rows_, experts_, n_, k_, groups_;
+  int64_t rows_, experts_, n_, k_, groups_, broadcastFactor_;
 };
 }  // namespace native_int4
 #endif

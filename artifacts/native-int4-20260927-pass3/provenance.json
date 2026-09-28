@@ -1,0 +1,67 @@
+{
+  "base_commit": "7a04af2e9",
+  "binding_sha256": {
+    "vllm_ascend_C.cpython-312-x86_64-linux-gnu.so": "faf2a4667075bb3f28a7839031a5a93fdb969ed18f8daf8e7bb3b53af1942e65"
+  },
+  "final_runtime_source_sha256": {
+    "vllm_ascend/models/qwen4_exp/model.py": "e71d483749f90410ed131f7478822f8f703db4088468893e21b4066369781677",
+    "vllm_ascend/models/qwen4_exp/mtp.py": "279448e59e585735cb6de57da85ca9c6fb04f9112aa6a5cda2f3f03826e7854e",
+    "vllm_ascend/models/qwen4_exp/w4_moe.py": "4b07f62298160535516e081ef286f01d07882a7ff583b71877e259f8df5c696d"
+  },
+  "host_tiling_source_sha256": "c4c2d67d68f140b4b8fb5e47ba164ef3ddd53f39305964ebc785df2dde47a5eb",
+  "runtime_source_sha256": {
+    "csrc/gmm/qwen_w4_a8_int4_matmul_v310/qwen_w4_a8_int4_matmul_310_torch_adpt.h": "9ac54d6c8e31906f98f926bd6baf54e9570de3c49724d8ce466752509f45936b",
+    "csrc/torch_binding_meta.cpp": "de7ded4f600102c6fe3869a7dc11511643b92becf8a627d1d80682276672f171",
+    "vllm_ascend/models/qwen4_exp/w4_moe.py": "4b07f62298160535516e081ef286f01d07882a7ff583b71877e259f8df5c696d"
+  },
+  "variants": {
+    "broadcast": {
+      "operator_sha256": {
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_3a644bf0930547c10e04e17d2ef17784.o": "e4594318c003f4c3b95a9a1f353649a9950e3a5bca4867b74838957528656162",
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_f445ca91b09a2d95f71de7992df42bfd.o": "185fb609df8384578119da2957ec2df4561f93167d112a906b5795bb90cadfa5",
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/op_tiling/lib/linux/x86_64/libcust_opmaster_rt2.0.so": "136954a09dfec30360443fc2e688e48b08165bd16938a014df0c01c3a89dca26"
+      },
+      "source_sha256": {
+        "native_int4_schedule.h": "531830dbd637b573b95dd581d1d9b1475cf1de4cc4617186215aa6904ea06620",
+        "qwen_w4_a8_int4_matmul_v310.cpp": "19b1cf9617c525aa7efc1deb2c7f7c85d6aeae3c71170106934673c4da171ef8",
+        "qwen_w4_a8_int4_matmul_v310_tiling_data.h": "75355de444258e0edbc53dc917d3338d646a827ec8aba441782654e383686e53"
+      }
+    },
+    "live-rows": {
+      "operator_sha256": {
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_3a644bf0930547c10e04e17d2ef17784.o": "731b7e343efc25c5795923e4ca69a272a048f9fbfb0b753c5eddcead8e8bd550",
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_f445ca91b09a2d95f71de7992df42bfd.o": "56b4559442e11f18e913dbc28660921e8c4f06a6850757cdc0cd0aff90861c89",
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/op_tiling/lib/linux/x86_64/libcust_opmaster_rt2.0.so": "23d3b8ab462b1a159e180643ea1ce00e5447430c944340c32bb1ca975a0bcd38"
+      },
+      "source_sha256": {
+        "native_int4_schedule.h": "2dc6eb2a32293b01000995483f1eacf3f2a9f0dedaec2a1ef3290ad65e875459",
+        "qwen_w4_a8_int4_matmul_v310.cpp": "19b1cf9617c525aa7efc1deb2c7f7c85d6aeae3c71170106934673c4da171ef8",
+        "qwen_w4_a8_int4_matmul_v310_tiling_data.h": "05231bf596326b534894e9ebef972fb4a44c41ed32a8cc8cc31384adeac6021d"
+      }
+    },
+    "paired-mmad": {
+      "operator_sha256": {
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_3a644bf0930547c10e04e17d2ef17784.o": "a6eedecedb4508851f843de9eacec7957a30b973dcfa5eee81fc9c3ebf1efc75",
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_f445ca91b09a2d95f71de7992df42bfd.o": "b249d6b998b71f166b97af0c536995a550d1fd73032055154f66a7745456a8a5",
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/op_tiling/lib/linux/x86_64/libcust_opmaster_rt2.0.so": "23d3b8ab462b1a159e180643ea1ce00e5447430c944340c32bb1ca975a0bcd38"
+      },
+      "source_sha256": {
+        "native_int4_schedule.h": "f75b5c2f18d96a4cdc7deb32362a0bdb5896b7bb6fa1cbf35edc326650c015cf",
+        "qwen_w4_a8_int4_matmul_v310.cpp": "19b1cf9617c525aa7efc1deb2c7f7c85d6aeae3c71170106934673c4da171ef8",
+        "qwen_w4_a8_int4_matmul_v310_tiling_data.h": "05231bf596326b534894e9ebef972fb4a44c41ed32a8cc8cc31384adeac6021d"
+      }
+    },
+    "route-cache": {
+      "operator_sha256": {
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_3a644bf0930547c10e04e17d2ef17784.o": "2cda53e6eb95f3c834bbf9cbd1293474ab5c77387ec6536abed77a76aad8daa4",
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/kernel/ascend310p/qwen_w4_a8_int4_matmul_v310/QwenW4A8Int4MatmulV310_f445ca91b09a2d95f71de7992df42bfd.o": "6ee5b2d8238b4f6c694a3e8e53551c1961dc4f78b6f2926f0923d2a1a835462b",
+        "vendors/native_int4_w4a8_transformer/op_impl/ai_core/tbe/op_tiling/lib/linux/x86_64/libcust_opmaster_rt2.0.so": "136954a09dfec30360443fc2e688e48b08165bd16938a014df0c01c3a89dca26"
+      },
+      "source_sha256": {
+        "native_int4_schedule.h": "e161cbbd3fc60932406c341f09c8ff2af4e8f3d3e236933f318950465545c5d4",
+        "qwen_w4_a8_int4_matmul_v310.cpp": "19b1cf9617c525aa7efc1deb2c7f7c85d6aeae3c71170106934673c4da171ef8",
+        "qwen_w4_a8_int4_matmul_v310_tiling_data.h": "75355de444258e0edbc53dc917d3338d646a827ec8aba441782654e383686e53"
+      }
+    }
+  }
+}

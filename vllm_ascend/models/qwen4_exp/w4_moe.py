@@ -359,9 +359,15 @@ class W4SparseMoE(nn.Module):
         # Static route slots, dynamic device expert IDs. Peer routes produce
         # exact zero rows and must also overwrite rows on every graph replay.
         tokens, hidden = block_input.shape
-        inputs = block_input[:, None, :].expand(-1, self.top_k, -1).reshape(-1, hidden).contiguous()
         local_ids = (ids - self.expert_offset).to(torch.int32).flatten().contiguous()
-        gate, up = self.projections["gate_up_proj"].routed_linear(inputs, local_ids).to(self.compute_dtype).chunk(2, -1)
+        if self.native_int4:
+            # Each token has top_k routes, but its gate/up input is identical.
+            # The native op broadcasts packed rows by the fixed route factor.
+            gate_up = self.projections["gate_up_proj"].native_linear(pack_activation_device(block_input), local_ids)
+        else:
+            inputs = block_input[:, None, :].expand(-1, self.top_k, -1).reshape(-1, hidden).contiguous()
+            gate_up = self.projections["gate_up_proj"].routed_linear(inputs, local_ids)
+        gate, up = gate_up.to(self.compute_dtype).chunk(2, -1)
         activation = (F.silu(gate) * up).to(self.params_dtype)
         output = self.projections["down_proj"].routed_linear(activation, local_ids).to(self.compute_dtype)
         return (output.reshape(tokens, self.top_k, hidden) * weights.unsqueeze(-1)).sum(dim=1)

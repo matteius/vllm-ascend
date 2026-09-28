@@ -3,10 +3,12 @@
 """Precision and ownership gates for per-forward shared QSA query tables."""
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
 
+from vllm_ascend.models.qwen4_exp.model import _step_rope_cos_sin
 from vllm_ascend.models.qwen4_exp.qsa import (
     AscendQwen4ExpQSAAttention,
     _mrope_interleaved_dims,
@@ -110,3 +112,62 @@ def test_project_qk_shared_tables_preserve_norm_order_and_reject_distinct_positi
         torch.testing.assert_close(after, before, rtol=0, atol=0)
     with pytest.raises(ValueError, match="same positions tensor"):
         module.project_qk(query, key, positions, positions + 1, accum_dtype=torch.float32, cos_sin=tables)
+
+
+@pytest.mark.parametrize("position_kind", ["text", "mrope"])
+def test_step_cache_reuses_query_and_group_start_tables_across_layers(position_kind):
+    positions = torch.arange(23400, 23405, dtype=torch.int64)
+    kwargs = {}
+    if position_kind == "mrope":
+        positions = torch.stack((positions, positions.flip(0), positions % 7))
+        kwargs = {"mrope_section": [2, 1, 1], "mrope_interleaved": True}
+    cache = {}
+
+    def tables(key_positions, purpose):
+        return _step_rope_cos_sin(
+            key_positions,
+            positions,
+            cache,
+            purpose,
+            rotary_dim=8,
+            base=10000.0,
+            dtype=torch.float32,
+            **kwargs,
+        )
+
+    with patch("vllm_ascend.models.qwen4_exp.model.partial_rope_cos_sin", wraps=partial_rope_cos_sin) as compute:
+        first_query = tables(positions, "query")
+        group_start = positions if position_kind == "mrope" else positions - positions.remainder(4)
+        first_key = tables(group_start, "index_key_4")
+        for _ in range(11):
+            assert tables(positions, "query") is first_query
+            # Each QSA layer materializes its own group-start positions.
+            repeated_group_start = positions if position_kind == "mrope" else positions - positions.remainder(4)
+            assert tables(repeated_group_start, "index_key_4") is first_key
+        assert compute.call_count == 2
+
+    for actual, expected in zip(
+        first_key, partial_rope_cos_sin(group_start, rotary_dim=8, base=10000.0, dtype=torch.float32, **kwargs)
+    ):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_step_cache_uses_current_positions_on_next_forward_and_distinct_geometry():
+    positions = torch.tensor([3, 4, 5], dtype=torch.int64)
+    kwargs = {"rotary_dim": 8, "base": 10000.0, "dtype": torch.float32}
+    old_step = {}
+    old = _step_rope_cos_sin(positions, positions, old_step, "query", **kwargs)
+    positions.copy_(torch.tensor([163840, 163841, 163842]))
+    new_step = {}
+    current = _step_rope_cos_sin(positions, positions, new_step, "query", **kwargs)
+    assert current is not old
+    for actual, expected in zip(current, partial_rope_cos_sin(positions, **kwargs)):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert not torch.equal(current[0], old[0])
+
+    # An in-place change or a different RoPE configuration cannot hit an old
+    # entry even if a caller retains the same step cache accidentally.
+    modified = _step_rope_cos_sin(positions, positions, old_step, "query", **kwargs)
+    assert modified is not old
+    other_theta = _step_rope_cos_sin(positions, positions, new_step, "query", **{**kwargs, "base": 5000.0})
+    assert other_theta is not current
