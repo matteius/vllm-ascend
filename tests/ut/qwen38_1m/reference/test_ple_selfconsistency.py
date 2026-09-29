@@ -109,6 +109,23 @@ def test_short_conv_silu_applied():
     torch.testing.assert_close(silu, linear * torch.sigmoid(linear), rtol=PLE_CONV_RTOL, atol=PLE_CONV_ATOL)
 
 
+@pytest.mark.parametrize("activation", [None, "silu"])
+def test_short_conv_decode_shape_uses_only_current_tap(activation):
+    seq_len = dilation = 3
+    channels, kernel_size = 7, 4
+    conv_in = _rand((seq_len, channels), 32)
+    gated = _rand((seq_len, channels), 33)
+    outer = _rand((seq_len, channels), 34)
+    weight = _rand((channels, kernel_size), 35)
+
+    out = ple_short_conv(conv_in, gated, outer, weight, dilation, activation=activation)
+    conv = conv_in * weight[:, -1]
+    if activation == "silu":
+        conv = conv * torch.sigmoid(conv)
+    expected = outer + gated + conv
+    torch.testing.assert_close(out, expected, rtol=PLE_CONV_RTOL, atol=PLE_CONV_ATOL)
+
+
 def test_residual_only_when_conv_zero():
     """Zero conv weights -> output is exactly outer_residual + gated."""
     seq_len, channels = 8, 5

@@ -124,6 +124,13 @@ class AscendQwen4ExpPLELayer(nn.Module):
             torch.zeros(self.hc_hidden_size, self.conv_kernel_size, dtype=self.params_dtype),
             requires_grad=False,
         )
+        self.register_buffer("_decode_conv_weight", None, persistent=False)
+
+    def prepare_decode_conv_weight(self) -> None:
+        """Materialize the sole active MTP2 decode tap outside graph replay."""
+        if self.conv_weight.device.type != "npu":
+            return
+        self._decode_conv_weight = self.conv_weight.detach()[:, -1].to(self.norm_accumulation_dtype).contiguous()
 
     # -- gather ------------------------------------------------------------- #
 
@@ -206,6 +213,7 @@ class AscendQwen4ExpPLELayer(nn.Module):
             self.short_conv_dilation,
             activation=self.activation,
             accum_dtype=self.norm_accumulation_dtype,
+            current_weight=self._decode_conv_weight,
         )
         return output.to(hidden_states.dtype)
 

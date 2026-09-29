@@ -153,6 +153,7 @@ def ple_short_conv(
     *,
     activation: str | None = "silu",
     accum_dtype: torch.dtype = _DEFAULT_ACCUM_DTYPE,
+    current_weight: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Dilated causal depthwise short convolution added to the gated output.
 
@@ -168,6 +169,8 @@ def ple_short_conv(
         dilation: convolution dilation.
         activation: ``"silu"`` or ``None``.
         accum_dtype: convolution accumulation dtype (policy fp32 on device).
+        current_weight: optional precomputed final filter tap in accumulation
+            dtype. Decode uses it to keep static slicing outside graph replay.
 
     Returns:
         ``[T, C]`` PLE output.
@@ -189,20 +192,29 @@ def ple_short_conv(
     conv_in_c = conv_input.to(compute_dtype)
     gated_c = gated.to(compute_dtype)
     outer_c = outer_residual.to(compute_dtype)
-    weight_c = conv_weight.to(compute_dtype)
 
-    kernel_size = weight_c.shape[-1]
-    state_len = (kernel_size - 1) * dilation
-
-    x_t = conv_in_c.transpose(0, 1).unsqueeze(0)  # [1, C, T]
-    x_pad = F.pad(x_t, (state_len, 0))
-    conv = F.conv1d(
-        x_pad,
-        weight_c.unsqueeze(1),
-        groups=channels,
-        dilation=dilation,
-    )
-    conv = conv[..., :seq_len].squeeze(0).transpose(0, 1)  # [T, C]
+    kernel_size = conv_weight.shape[-1]
+    if seq_len <= dilation:
+        # The left padding makes every earlier dilated tap fall outside the
+        # sequence. Decode with MTP2 has T == dilation == 3, so the convolution
+        # is exactly one channelwise multiply. Avoid Conv2D's per-replay static
+        # weight layout conversion for this common graph shape.
+        current_weight_c = (
+            conv_weight[:, -1].to(compute_dtype) if current_weight is None else current_weight.to(compute_dtype)
+        )
+        conv = conv_in_c * current_weight_c
+    else:
+        weight_c = conv_weight.to(compute_dtype)
+        state_len = (kernel_size - 1) * dilation
+        x_t = conv_in_c.transpose(0, 1).unsqueeze(0)  # [1, C, T]
+        x_pad = F.pad(x_t, (state_len, 0))
+        conv = F.conv1d(
+            x_pad,
+            weight_c.unsqueeze(1),
+            groups=channels,
+            dilation=dilation,
+        )
+        conv = conv[..., :seq_len].squeeze(0).transpose(0, 1)  # [T, C]
     if activation == "silu":
         conv = conv * torch.sigmoid(conv)
     elif activation is not None:
