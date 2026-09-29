@@ -1,0 +1,49 @@
+{
+  "hardware": "2x Atlas 300I Duo (4x Ascend 310P3)",
+  "configuration": {
+    "tensor_parallel_size": 4,
+    "expert_parallel": true,
+    "mtp_speculative_tokens": 2,
+    "max_model_len": 262144,
+    "max_num_seqs": 4,
+    "max_num_batched_tokens": 512,
+    "gpu_memory_utilization": 0.965
+  },
+  "resident_baseline": {
+    "c1_tok_s": [28.173450014823736, 28.296118103833372, 28.058899453655496],
+    "c1_median_tok_s": 28.173450014823736,
+    "c4_aggregate_tok_s": [59.67589498247365, 58.31514406435415, 60.48220525873816],
+    "c4_aggregate_median_tok_s": 59.67589498247365
+  },
+  "c1_weight_pipeline": {
+    "c1_warmup_tok_s": 30.046056180725866,
+    "c1_tok_s": [29.951179016679788, 30.31914547814125, 29.86104432648593, 29.703970804768485, 29.691072597376927],
+    "c1_median_tok_s": 29.86104432648593,
+    "c1_mean_tok_s": 29.905282444690478,
+    "c1_peak_tok_s": 30.31914547814125,
+    "c4_warmup_aggregate_tok_s": 62.187198244488386,
+    "c4_aggregate_tok_s": [62.19135345971152, 59.52331078172743, 58.2282860090357],
+    "c4_aggregate_median_tok_s": 59.52331078172743,
+    "c4_aggregate_mean_tok_s": 59.98098341682489
+  },
+  "relative_change": {
+    "c1_median_percent": 5.989,
+    "c4_aggregate_median_percent": -0.256
+  },
+  "quality_gate": {
+    "scope": "fixed sampled zero-shot MMLU; not the official full-dataset score",
+    "dataset_sha256": "dd128175e4db0cb44555561cd62e3bfbca6eea5c527280df0185354233b63caa",
+    "samples": 228,
+    "correct": 206,
+    "invalid": 0
+  },
+  "mtp_service_intervals": {
+    "accepted_tokens": 7412,
+    "drafted_tokens": 9078,
+    "acceptance_rate": 0.8164794007490637
+  },
+  "real_npu_changing_input_graph_tests": {
+    "passed": 5,
+    "failed": 0
+  }
+}

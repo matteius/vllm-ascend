@@ -1,5 +1,9 @@
 # 原生 INT4 第三轮：稀疏路由与激活复用
 
+后续保留的 c1 权重流水线结果见
+[`WEIGHT-PIPELINE-C1-RESULTS.md`](WEIGHT-PIPELINE-C1-RESULTS.md)：c1 中位
+29.86 tok/s，c4 aggregate 中位 59.52 tok/s，固定质量门禁 206/228、零无效答案。
+
 基于 `7a04af2e9`，分支 `perf/native-int4-pass3-20260927`。模型为 Qwen3.8 Flash Next 的
 MoE W4 checkpoint；路由专家权重保持打包 INT4，激活按模型元数据许可进行 per-group INT8
 量化，Cube 计算为 INT4×INT4→INT32，输出为 FP16。注意力、GDN 和共享专家仍为 FP16。
