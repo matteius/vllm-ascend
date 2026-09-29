@@ -39,11 +39,22 @@ def payload(routes: int):
 
 
 def ordered_reference(prepared, banks, route_ids, route_weights):
-    route_rows = (
-        torch.ops._C_ascend.npu_qwen_w4_a8_int4_matmul_310(*prepared, *banks, route_ids)
-        .float()
-        .reshape(route_weights.shape[0], route_weights.shape[1], 2560)
-    )
+    """Use the resident-weight projection path, then reduce route slots in order."""
+    experts = banks[0].shape[0]
+    valid = (route_ids >= 0) & (route_ids < experts)
+    routing_labels = torch.where(valid, route_ids.long(), experts)
+    order = torch.argsort(routing_labels, stable=True)
+    inverse = torch.argsort(order)
+    ends = torch.bincount(routing_labels, minlength=experts + 1)[:experts].cumsum(0)
+    device_order = order.to(prepared[0].device)
+    device_inverse = inverse.to(prepared[0].device)
+    sorted_prepared = [value.index_select(0, device_order) for value in prepared]
+    route_rows = torch.ops._C_ascend.npu_qwen_w4_a8_int4_matmul_310(
+        *sorted_prepared,
+        *banks,
+        ends.to(prepared[0].device),
+    ).index_select(0, device_inverse)
+    route_rows = route_rows.float().reshape(route_weights.shape[0], route_weights.shape[1], 2560)
     result = torch.zeros(route_weights.shape[0], 2560, dtype=torch.float32, device="npu")
     for route in range(route_weights.shape[1]):
         result = result + route_rows[:, route] * route_weights[:, route, None]
@@ -72,7 +83,7 @@ def test_down_reduce_changing_inputs_routes_and_weights_graph():
     inputs, banks = payload(tokens * top_k)
     prepared = list(pack_activation_device(inputs.npu()))
     route_ids = torch.zeros(tokens * top_k, dtype=torch.int32, device="npu")
-    route_weights = torch.empty(tokens, top_k, dtype=torch.float32, device="npu")
+    route_weights = torch.full((tokens, top_k), 1 / top_k, dtype=torch.float32, device="npu")
     fused = torch.ops._C_ascend.npu_qwen_w4_a8_int4_down_reduce_310
 
     def invoke():
@@ -88,20 +99,24 @@ def test_down_reduce_changing_inputs_routes_and_weights_graph():
     with torch.npu.graph(graph, stream=stream):
         captured = invoke()
 
-    for phase in range(5):
+    route_phases = (
+        # The pipeline boundary: every live expert owns at most one M=16 tile.
+        torch.tensor([0] * 16 + [1] * 8 + [2] * 4 + [-1] * 2, dtype=torch.int32),
+        # One 17-row owner forces the resident full-weight fallback.
+        torch.tensor([0] * 17 + [1] * 7 + [2] * 4 + [-1] * 2, dtype=torch.int32),
+        torch.full((tokens * top_k,), -1, dtype=torch.int32),
+        torch.arange(tokens * top_k, dtype=torch.int32) % 3,
+        (torch.arange(tokens * top_k, dtype=torch.int32) * 7) % 6 - 1,
+    )
+    for phase, ids in enumerate(route_phases):
         changed = inputs * (phase - 1) + 0.0125 * phase
         changed_prepared = pack_activation_device(changed.npu())
         for target, value in zip(prepared, changed_prepared):
             target.copy_(value)
-        ids = (torch.arange(tokens * top_k, dtype=torch.int32) * 7 + phase) % 6 - 1
-        if phase == 2:
-            ids.fill_(-1)
-        elif phase == 4:
-            ids.copy_(torch.tensor(([2, 0, 2, 1, 3, -1, 0, 2, 1, 4] * tokens), dtype=torch.int32))
         weights = torch.rand(tokens, top_k, generator=torch.Generator().manual_seed(500 + phase), dtype=torch.float32)
         weights[:, 0] += 0.000031 * (phase + 1)
         route_ids.copy_(ids)
         route_weights.copy_(weights)
         graph.replay()
-        expected = ordered_reference(prepared, banks, route_ids, route_weights)
+        expected = ordered_reference(prepared, banks, ids, route_weights)
         torch.testing.assert_close(captured.cpu(), expected.cpu(), rtol=0, atol=0)

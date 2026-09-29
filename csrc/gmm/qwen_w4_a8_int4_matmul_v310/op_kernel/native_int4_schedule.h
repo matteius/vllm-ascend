@@ -8,7 +8,7 @@ namespace native_int4 {
 using namespace AscendC;
 // Separate bounded decode/MTP and prefill schedules. A packed activation tile
 // feeds N outputs; the full packed K weight tile stays in L1 across M tiles.
-template <uint32_t M, uint32_t N = 64, bool COMBINE_ROUTES = false>
+template <uint32_t M, uint32_t N = 64, bool COMBINE_ROUTES = false, bool PIPELINE_EXPERT_WEIGHTS = false>
 class Schedule {
   static constexpr uint32_t GROUP = 128, BLOCK = 16, K0 = 64, LANES = 8;
   static constexpr uint32_t A_BYTES = M * GROUP / 2, B_BYTES = N * GROUP / 2;
@@ -16,6 +16,12 @@ class Schedule {
   static constexpr uint32_t MAX_K = 2560;
   static constexpr uint32_t END_CACHE_SIZE = 32;
   static constexpr uint32_t MAX_COMBINED_ROUTES = 30;
+  static constexpr uint32_t MAX_PIPELINED_ROUTES = 30;
+  // Sparse c1 experts use one M tile. Stream two compact K-group buffers so
+  // the next GM->L1->L0B transfer can run under the current Cube operation.
+  static constexpr bool PIPELINE_ROUTED_EXPERT_WEIGHTS = PIPELINE_EXPERT_WEIGHTS && M == 16 && N == 320;
+  static constexpr uint32_t WEIGHT_PIPELINE_BUFFERS = 2;
+  static constexpr uint32_t WEIGHT_PIPELINE_EVENT = EVENT_ID2;
 
  public:
   template <typename TilingData>
@@ -164,6 +170,13 @@ class Schedule {
       // A single core owns each N-wide output tile. Keep the FP16 projection
       // boundary in UB, then reduce the original route slots in order.
       for (int64_t tile = GetBlockIdx(); tile < tiles; tile += GetBlockNum()) {
+        if constexpr (PIPELINE_ROUTED_EXPERT_WEIGHTS) {
+          if (CanPipelineExpertWeights(starts, 0, 1, groups)) {
+            ProcessPipelinedExpertWeights(expertIds, starts, 0, 1, groups, tile);
+            CombineRoutes(cachedIds, tile);
+            continue;
+          }
+        }
         for (uint32_t group = 0; group < groups; ++group) {
           const int64_t expert = expertIds[group];
           DataCopy(b1_.Get<int8_t>(), codes_[(expert * n_ + tile * N) * k_ / 2], N * k_ / 2);
@@ -195,6 +208,14 @@ class Schedule {
     routed_ = true;
     SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
     WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
+    if constexpr (PIPELINE_ROUTED_EXPERT_WEIGHTS) {
+      if (CanPipelineExpertWeights(starts, 0, 1, groups)) {
+        for (int64_t tile = GetBlockIdx(); tile < n_ / N; tile += GetBlockNum()) {
+          ProcessPipelinedExpertWeights(expertIds, starts, 0, 1, groups, tile);
+        }
+        return;
+      }
+    }
     for (uint32_t group = 0; group < groups; ++group) {
       const int64_t expert = expertIds[group];
       for (int64_t tile = GetBlockIdx(); tile < n_ / N; tile += GetBlockNum()) {
@@ -231,6 +252,12 @@ class Schedule {
     }
     SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
     WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
+    if constexpr (PIPELINE_ROUTED_EXPERT_WEIGHTS) {
+      if (CanPipelineExpertWeights(starts, partition, partitions, groups)) {
+        ProcessPipelinedExpertWeights(expertIds, starts, partition, partitions, groups, tile);
+        return;
+      }
+    }
     for (uint32_t group = partition; group < groups; group += partitions) {
       const int64_t expert = expertIds[group];
       DataCopy(b1_.Get<int8_t>(), codes_[(expert * n_ + tile * N) * k_ / 2], N * k_ / 2);
@@ -243,6 +270,69 @@ class Schedule {
       WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0);
     }
   }
+  __aicore__ inline bool CanPipelineExpertWeights(const uint32_t* starts, uint32_t firstGroup, uint32_t groupStride,
+                                                  uint32_t groups) {
+    // The streamed schedule is qualified only for the 30-route c1 shape.
+    // Higher-concurrency decode has many sparse local experts; fragmenting
+    // every expert tile into K-group DMAs regresses that distribution.
+    if (rows_ > MAX_PIPELINED_ROUTES || firstGroup >= groups) return false;
+    for (uint32_t group = firstGroup; group < groups; group += groupStride) {
+      if (starts[group + 1] - starts[group] > M) return false;
+    }
+    return true;
+  }
+
+  __aicore__ inline void StartWeightPipeline() {
+    for (uint32_t buffer = 0; buffer < WEIGHT_PIPELINE_BUFFERS; ++buffer) {
+      SetFlag<HardEvent::MTE1_MTE2>(WEIGHT_PIPELINE_EVENT + buffer);
+    }
+  }
+
+  __aicore__ inline void FinishWeightPipeline() {
+    for (uint32_t buffer = 0; buffer < WEIGHT_PIPELINE_BUFFERS; ++buffer) {
+      WaitFlag<HardEvent::MTE1_MTE2>(WEIGHT_PIPELINE_EVENT + buffer);
+    }
+  }
+
+  __aicore__ inline void PrefetchWeightGroup(int64_t expert, int64_t tile, int64_t group, uint32_t buffer) {
+    WaitFlag<HardEvent::MTE1_MTE2>(WEIGHT_PIPELINE_EVENT + buffer);
+    constexpr uint16_t BLOCK_LENGTH = BLOCK * GROUP / 64;
+    const uint16_t sourceStride = static_cast<uint16_t>(BLOCK * (k_ - GROUP) / 64);
+    DataCopyParams copy{N / BLOCK, BLOCK_LENGTH, sourceStride, 0};
+    const int64_t source = (expert * n_ + tile * N) * k_ / 2 + group * GROUP * BLOCK / 2;
+    DataCopy(b1_.Get<int8_t>()[buffer * B_BYTES], codes_[source], copy);
+    SetFlag<HardEvent::MTE2_MTE1>(WEIGHT_PIPELINE_EVENT + buffer);
+  }
+
+  __aicore__ inline void StageWeightGroup(uint32_t buffer) {
+    WaitFlag<HardEvent::MTE2_MTE1>(WEIGHT_PIPELINE_EVENT + buffer);
+    LoadData2DParams load;
+    load.repeatTimes = N / BLOCK;
+    load.srcStride = GROUP / K0;
+    load.ifTranspose = false;
+    for (uint32_t kb = 0; kb < GROUP / K0; ++kb) {
+      LoadData(b2_.Get<int8_t>()[buffer * B_BYTES + kb * N * K0 / 2].template ReinterpretCast<int4b_t>(),
+               b1_.Get<int8_t>()[buffer * B_BYTES + kb * BLOCK * K0 / 2].template ReinterpretCast<int4b_t>(), load);
+    }
+    SetFlag<HardEvent::MTE1_MTE2>(WEIGHT_PIPELINE_EVENT + buffer);
+  }
+
+  __aicore__ inline void ProcessPipelinedExpertWeights(const int32_t* expertIds, const uint32_t* starts,
+                                                       uint32_t firstGroup, uint32_t groupStride, uint32_t groups,
+                                                       int64_t tile) {
+    StartWeightPipeline();
+    uint32_t weightBuffer = 0;
+    PrefetchWeightGroup(expertIds[firstGroup], tile, 0, weightBuffer);
+    StageWeightGroup(weightBuffer);
+    for (uint32_t group = firstGroup; group < groups; group += groupStride) {
+      const uint32_t nextGroup = group + groupStride;
+      const int64_t nextExpert = nextGroup < groups ? expertIds[nextGroup] : -1;
+      Project(expertIds[group], tile, starts[group], starts[group + 1] - starts[group], true, weightBuffer, nextExpert);
+      weightBuffer = (weightBuffer + groups_) % WEIGHT_PIPELINE_BUFFERS;
+    }
+    FinishWeightPipeline();
+  }
+
   __aicore__ inline uint32_t Min(int64_t a, int64_t b) { return a < b ? a : b; }
   __aicore__ inline void StageRoutes(LocalTensor<half> out, int64_t row, uint32_t count) {
     auto staged = routeOutput_.Get<half>();
@@ -389,7 +479,8 @@ class Schedule {
 
   // Both INT4 activation limbs share the same packed weight tile. For
   // sparse rows, one M=2M Cube operation computes both integer products.
-  __aicore__ inline void ProductPair(uint32_t weightBuffer, int64_t prefetchGroup = -1) {
+  __aicore__ inline void ProductPair(uint32_t weightBuffer, int64_t prefetchGroup = -1, int64_t prefetchExpert = -1,
+                                     int64_t prefetchTile = 0, int64_t streamedGroup = 0, uint32_t streamedBuffer = 0) {
     SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
     WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
     MmadParams mm;
@@ -399,7 +490,16 @@ class Schedule {
     mm.cmatrixInitVal = true;
     Mmad(c_.Get<int32_t>(), a2_.Get<int8_t>().template ReinterpretCast<int4b_t>(),
          b2_.Get<int8_t>()[weightBuffer * B_BYTES].template ReinterpretCast<int4b_t>(), mm);
-    if (prefetchGroup >= 0) LoadWeight(prefetchGroup);
+    if constexpr (PIPELINE_ROUTED_EXPERT_WEIGHTS) {
+      if (prefetchExpert >= 0) {
+        PrefetchWeightGroup(prefetchExpert, prefetchTile, streamedGroup, streamedBuffer);
+        StageWeightGroup(streamedBuffer);
+      } else if (prefetchGroup >= 0) {
+        LoadWeight(prefetchGroup);
+      }
+    } else if (prefetchGroup >= 0) {
+      LoadWeight(prefetchGroup);
+    }
     SetFlag<HardEvent::M_V>(EVENT_ID0);
     WaitFlag<HardEvent::M_V>(EVENT_ID0);
     DataCopyParams copy{N / BLOCK, 2 * M / BLOCK, 0, 0};
@@ -453,7 +553,8 @@ class Schedule {
           {1, 1, 1, ACCUMULATOR_STRIDE, ACCUMULATOR_STRIDE, PRODUCT_STRIDE});
   }
 
-  __aicore__ inline void Project(int64_t expert, int64_t tile, int64_t row, uint32_t count) {
+  __aicore__ inline void Project(int64_t expert, int64_t tile, int64_t row, uint32_t count, bool streamWeights = false,
+                                 uint32_t firstWeightBuffer = 0, int64_t nextExpert = -1) {
     auto low = result_.Get<float>();
     auto high = low[ELEMENTS];
     auto accumulator = high[ELEMENTS];
@@ -464,7 +565,7 @@ class Schedule {
     auto xs = activation_.Get<float>();
     auto sums = xs[M * LANES];
     Duplicate(accumulator, 0.0f, ELEMENTS);
-    LoadWeight(0);
+    if (!streamWeights) LoadWeight(0);
     for (int64_t group = 0; group < groups_; ++group) {
       // One strided DMA per metadata bank spans every N=16 strip in this
       // output tile. The existing packed layout and arithmetic stay unchanged.
@@ -477,7 +578,19 @@ class Schedule {
       // Alternate L0B buffers let next-group weight loads overlap integer GEMM.
       if constexpr (M <= 32) {
         if (count <= N / BLOCK) {
-          ProductPair(group % 2, group + 1 < groups_ ? group + 1 : -1);
+          if constexpr (PIPELINE_ROUTED_EXPERT_WEIGHTS) {
+            if (streamWeights) {
+              const uint32_t weightBuffer = (firstWeightBuffer + group) % WEIGHT_PIPELINE_BUFFERS;
+              const uint32_t nextWeightBuffer = (weightBuffer + 1) % WEIGHT_PIPELINE_BUFFERS;
+              const int64_t prefetchExpert = group + 1 < groups_ ? expert : nextExpert;
+              const int64_t prefetchGroup = group + 1 < groups_ ? group + 1 : 0;
+              ProductPair(weightBuffer, -1, prefetchExpert, tile, prefetchGroup, nextWeightBuffer);
+            } else {
+              ProductPair(group % 2, group + 1 < groups_ ? group + 1 : -1);
+            }
+          } else {
+            ProductPair(group % 2, group + 1 < groups_ ? group + 1 : -1);
+          }
         } else {
           Product(0, group % 2, low, group + 1 < groups_ ? group + 1 : -1);
           Product(1, group % 2, high);

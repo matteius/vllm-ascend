@@ -215,9 +215,15 @@ __aicore__ inline void RunSchedule(GM_ADDR low, GM_ADDR high, GM_ADDR xs, GM_ADD
                                    GM_ADDR offset, GM_ADDR weight_sum, GM_ADDR ends, GM_ADDR y,
                                    __gm__ const QwenW4A8Int4KernelTilingData* td) {
   if (td->numRows <= DECODE_ROUTE_LIMIT) {
-    native_int4::Schedule<16, N> op;
-    op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, nullptr, y, td);
-    op.Process();
+    if (td->numRows <= MODEL_C1_ROUTE_LIMIT) {
+      native_int4::Schedule<16, N, false, N == MODEL_DECODE_COLUMNS> op;
+      op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, nullptr, y, td);
+      op.Process();
+    } else {
+      native_int4::Schedule<16, N> op;
+      op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, nullptr, y, td);
+      op.Process();
+    }
   } else if (td->numRows > td->numExperts * 64) {
     native_int4::Schedule<128> op;
     op.Init(low, high, xs, sums, codes, scale, offset, weight_sum, ends, nullptr, y, td);

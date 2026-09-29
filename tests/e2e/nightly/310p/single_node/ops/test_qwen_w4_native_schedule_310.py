@@ -262,6 +262,44 @@ def test_model_c1_gate_up_partitioned_schedule_graph_replay():
         torch.testing.assert_close(captured.cpu(), expected.cpu(), rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("width,outputs", [(640, 2560), (2560, 1280)])
+def test_model_c1_weight_pipeline_and_full_tile_fallback_graph_replay(width, outputs):
+    tokens, routes_per_token = 3, 10
+    x, banks = payload(tokens, width, outputs)
+    device_x = x.npu()
+    ids = (torch.arange(tokens * routes_per_token, dtype=torch.int32) % 3).npu()
+    op = torch.ops._C_ascend.npu_qwen_w4_a8_int4_matmul_310
+
+    def invoke():
+        return op(*pack_activation_device(device_x), *banks, ids)
+
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        for _ in range(3):
+            invoke()
+    torch.npu.current_stream().wait_stream(stream)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, stream=stream):
+        captured = invoke()
+
+    route_phases = (
+        (torch.arange(tokens * routes_per_token, dtype=torch.int32) * 7) % 5 - 1,
+        torch.tensor([0] * 17 + [1] * 6 + [2] * 4 + [-1] * 3, dtype=torch.int32),
+        torch.full((tokens * routes_per_token,), -1, dtype=torch.int32),
+        torch.arange(tokens * routes_per_token, dtype=torch.int32) % 3,
+    )
+    for phase, routes in enumerate(route_phases):
+        changed = x * (phase - 1) + 0.0125 * phase
+        device_x.copy_(changed)
+        ids.copy_(routes)
+        graph.replay()
+        eager = invoke()
+        torch.testing.assert_close(captured.cpu(), eager.cpu(), rtol=0, atol=0)
+        expanded = changed.repeat_interleave(routes_per_token, dim=0)
+        torch.testing.assert_close(captured.cpu(), routed_reference(expanded, banks, routes), rtol=0.005, atol=0.003)
+
+
 def test_native_routed_rejects_nonintegral_route_factor():
     x, banks = payload(3, 256, 128)
     with pytest.raises(RuntimeError, match="unsupported native INT4 dimensions"):
