@@ -6,12 +6,19 @@ import threading
 
 import pytest
 
-from tools.qwen4exp.benchmark_capacity import fit_prompt, parse_metrics, prompt_lengths, stream_request
+from tools.qwen4exp.benchmark_capacity import (
+    capacity_summary,
+    fit_prompt,
+    parse_metrics,
+    prompt_lengths,
+    stream_request,
+)
 
 
 def test_asymmetric_session_lengths():
     assert prompt_lengths(256, 2, None) == [256, 256]
     assert prompt_lengths(256, 2, [256, 8192]) == [256, 8192]
+    assert prompt_lengths(261632, 4, None) == [261632] * 4
 
 
 @pytest.mark.parametrize("lengths", [[], [256], [256, 0], [-1, 8192], [256, 8192, 4096]])
@@ -65,3 +72,30 @@ def test_stream_error_is_not_a_pass(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: io.BytesIO(data))
     with pytest.raises(RuntimeError, match="engine died"):
         stream_request("http://localhost", {"prompt": [1], "max_tokens": 3}, threading.Barrier(1), None)
+
+
+def test_four_sessions_need_simultaneous_decode_and_no_preemption():
+    results = [
+        {
+            "start": float(index),
+            "first": 10.0 + index,
+            "last": 100.0 - index,
+            "end": 101.0 + index,
+            "done": True,
+            "correct": True,
+            "usage": {"completion_tokens": 512},
+        }
+        for index in range(4)
+    ]
+    before = dict.fromkeys(
+        ("num_preemptions_total", "spec_decode_num_draft_tokens_total", "spec_decode_num_accepted_tokens_total"), 0.0
+    )
+    after = before.copy()
+    peaks = {"num_requests_running": 4.0, "num_requests_waiting": 0.0, "kv_cache_usage_perc": 0.9}
+    assert capacity_summary(results, peaks, before, after, 4)["passed"]
+    assert not capacity_summary(results, {**peaks, "num_requests_running": 3.0}, before, after, 4)["passed"]
+    assert not capacity_summary(results, peaks, before, {**after, "num_preemptions_total": 1}, 4)["passed"]
+    no_overlap = [
+        {**result, "first": 10.0 + index * 100, "last": 20.0 + index * 100} for index, result in enumerate(results)
+    ]
+    assert not capacity_summary(no_overlap, peaks, before, after, 4)["passed"]

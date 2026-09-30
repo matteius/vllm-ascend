@@ -29,6 +29,9 @@ KdaCoreOutputs KdaChunkForward(
     const aclTensor *initialStateOptional,
     const aclIntArray *cuSeqlensOptional,
     const aclIntArray *chunkIndicesOptional,
+    const aclTensor *stageDependencyOptional,
+    const aclTensor *gkFp16Optional,
+    const aclTensor *betaFp16Optional,
     double scale,
     int64_t chunkSize,
     bool safeGate,
@@ -48,15 +51,19 @@ KdaCoreOutputs KdaChunkForward(
     const aclTensor *hOut,
     const aclTensor *qgScaledOut,
     const aclTensor *uSeedOut,
+    const aclTensor *scoreScratchOut,
+    const aclTensor *scoreMatricesOut,
+    const aclTensor *stageTokenOut,
     int64_t stage,
     aclOpExecutor *executor)
 {
     L0_DFX(KdaChunkForward, q, k, v, g, beta, aLogOptional, dtBiasOptional,
            initialStateOptional, cuSeqlensOptional, chunkIndicesOptional,
+           stageDependencyOptional, gkFp16Optional, betaFp16Optional,
            scale, chunkSize, safeGate, inputSequenceMajor, useGateInKernel,
            lowerBound, attnOut, finalStateOut, gkOut, aqkOut, akkOut,
            wOut, uOut, qgOut, kgOut, vNewOut, hOut, qgScaledOut, uSeedOut,
-           stage);
+           scoreScratchOut, scoreMatricesOut, stageTokenOut, stage);
 
     const aclTensor *actualCuSeqlens = nullptr;
     if (cuSeqlensOptional != nullptr) {
@@ -81,9 +88,11 @@ KdaCoreOutputs KdaChunkForward(
     auto ret = ADD_TO_LAUNCHER_LIST_AICORE(
         ChunkKdaFwd,
         OP_INPUT(q, k, v, g, beta, aLogOptional, dtBiasOptional,
-                 initialStateOptional, actualCuSeqlens, actualChunkIndices),
+                 initialStateOptional, actualCuSeqlens, actualChunkIndices,
+                 stageDependencyOptional, gkFp16Optional, betaFp16Optional),
         OP_OUTPUT(attnOut, finalStateOut, gkOut, aqkOut, akkOut, wOut, uOut,
-                  qgOut, kgOut, vNewOut, hOut, qgScaledOut, uSeedOut),
+                  qgOut, kgOut, vNewOut, hOut, qgScaledOut, uSeedOut,
+                  scoreScratchOut, scoreMatricesOut, stageTokenOut),
         OP_ATTR(inputSequenceMajor ? "BSND" : "BNSD", scale, chunkSize,
                 safeGate, static_cast<float>(lowerBound), useGateInKernel,
                 false, stage));
@@ -93,7 +102,8 @@ KdaCoreOutputs KdaChunkForward(
         return {};
     }
     return {attnOut, finalStateOut, gkOut, aqkOut, akkOut, wOut, uOut,
-            qgOut, kgOut, vNewOut, hOut, qgScaledOut, uSeedOut};
+            qgOut, kgOut, vNewOut, hOut, qgScaledOut, uSeedOut,
+            scoreScratchOut, scoreMatricesOut, stageTokenOut};
 }
 
 } // namespace l0op

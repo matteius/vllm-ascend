@@ -157,7 +157,11 @@ __aicore__ inline T FloatToType(float value)
 template <typename T, typename GK_T = float, typename BETA_T = float>
 class ChunkKdaFwdFinalizeKernel {
 public:
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+    using OUT_T = T;
+#else
     using OUT_T = float;
+#endif
     using AKK_T = float;
     template <typename TilingData>
     __aicore__ inline void Init(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR gk, GM_ADDR beta, GM_ADDR initialState,
@@ -215,9 +219,20 @@ public:
         hasInitial_ = tiling.hasInitialState;
         isVarLen_ = tiling.isVarLen;
         usedCoreNum_ = tiling.outputUsedCoreNum;
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        isAivOnly_ = true;
+#endif
         const uint64_t outputElements = B_ * HV_ * T_ * V_;
         o_.SetGlobalBuffer((__gm__ OUT_T *)workspace);
         u_.SetGlobalBuffer((__gm__ OUT_T *)workspace + outputElements);
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        if (isAivOnly_) {
+            solveCoreIdx_ = usedCoreNum_ == 0 ? 0 :
+                KdaForward::GetPhysicalBlockIdx() % usedCoreNum_;
+        } else {
+            solveCoreIdx_ = KdaForward::GetPhysicalBlockIdx();
+        }
+#else
         if ASCEND_IS_AIV {
             uint64_t subBlockNum = static_cast<uint64_t>(GetSubBlockNum());
             solveCoreIdx_ = subBlockNum == 0 ? 0 :
@@ -225,6 +240,7 @@ public:
         } else {
             solveCoreIdx_ = KdaForward::GetPhysicalBlockIdx();
         }
+#endif
         if (pipe_ != nullptr && initVecBuffers) {
             pipe_->InitBuffer(exp2Buf_, EXP2_UB_BYTES);
             pipe_->InitBuffer(vecBuf_, KDA_VEC_ARENA_ELEMENTS * sizeof(float));
@@ -236,15 +252,17 @@ public:
             AllocVectorEvents();
         }
     }
+    template <bool SYNCHRONIZE_PIPELINES = true>
     __aicore__ inline void ProcessAiv()
     {
-        ProcessOutAiv();
+        ProcessOutAiv<SYNCHRONIZE_PIPELINES>();
         ReleaseVectorEvents();
     }
 
+    template <bool SYNCHRONIZE_PIPELINES = true>
     __aicore__ inline void ProcessAic()
     {
-        ProcessOutAic();
+        ProcessOutAic<SYNCHRONIZE_PIPELINES>();
     }
 
 private:
@@ -572,7 +590,9 @@ private:
                 auto blockQ = GetTile(tensorQ, tla::MakeCoord(0, 0), tla::MakeShape(shapeQH.m(), shapeQH.k()));
                 auto blockH = GetTile(tensorH, tla::MakeCoord(0, 0), tla::MakeShape(shapeQH.k(), shapeQH.n()));
                 auto blockO = GetTile(tensorO, tla::MakeCoord(0, 0), tla::MakeShape(shapeQH.m(), shapeQH.n()));
+                blockMmad.preSetFlags();
                 blockMmad(blockQ, blockH, blockO, shapeQH);
+                blockMmad.finalWaitFlags();
                 PipeBarrier<PIPE_ALL>();
             }
         }
@@ -593,7 +613,9 @@ private:
                 auto blockAqk = GetTile(tensorAqk, tla::MakeCoord(0, 0), tla::MakeShape(shapeAV.m(), shapeAV.k()));
                 auto blockVNew = GetTile(tensorVNew, tla::MakeCoord(0, 0), tla::MakeShape(shapeAV.k(), shapeAV.n()));
                 auto blockLocal = GetTile(tensorLocal, tla::MakeCoord(0, 0), tla::MakeShape(shapeAV.m(), shapeAV.n()));
+                blockMmad.preSetFlags();
                 blockMmad(blockAqk, blockVNew, blockLocal, shapeAV);
+                blockMmad.finalWaitFlags();
                 PipeBarrier<PIPE_ALL>();
             }
         }
@@ -627,6 +649,21 @@ private:
             }
             const uint64_t elems = tileRows * V_;
             const uint64_t ti = start + tileRow;
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+            LocalTensor<T> typedArena = vecBuf_.Get<T>();
+            LocalTensor<T> stateLocal = typedArena;
+            LocalTensor<T> localLocal = typedArena[elems];
+            LocalTensor<T> outTyped = gateWritebackBuf_.Get<T>();
+            CopyVectorIn(stateLocal, o_,
+                         KVOffset(b, hv, ti, 0, V_), elems);
+            CopyVectorIn(localLocal, u_,
+                         KVOffset(b, hv, ti, 0, V_), elems);
+            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            Add(outTyped, stateLocal, localLocal,
+                static_cast<uint32_t>(elems));
+            PipeBarrier<PIPE_V>();
+#else
             LocalTensor<float> arena = vecBuf_.Get<float>();
             LocalTensor<float> stateLocal = arena;
             LocalTensor<float> localLocal = arena[elems];
@@ -642,6 +679,7 @@ private:
             ClampFp32ToOutputType(outLocal, static_cast<uint32_t>(elems));
             Cast(outTyped, outLocal, RoundMode::CAST_RINT, static_cast<uint32_t>(elems));
             PipeBarrier<PIPE_V>();
+#endif
 
             SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
             WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
@@ -679,6 +717,7 @@ private:
         return start < end;
     }
 
+    template <bool SYNCHRONIZE_PIPELINES>
     __aicore__ inline void ProcessChunkOutAiv(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
                                               uint64_t end, uint64_t subBlockIdx, uint64_t subBlockNum)
     {
@@ -689,10 +728,13 @@ private:
         if constexpr (IsSameType<T, float>::value) {
             return;
         }
-        Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_MTE2>(syncDoneFlag_);
+        if constexpr (SYNCHRONIZE_PIPELINES) {
+            Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_MTE2>(syncDoneFlag_);
+        }
         FinalizeOutputRows(b, hv, start, curT, subBlockIdx, subBlockNum);
     }
 
+    template <bool SYNCHRONIZE_PIPELINES>
     __aicore__ inline void ProcessChunkOutAic(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
                                              uint64_t end)
     {
@@ -701,21 +743,26 @@ private:
             return;
         }
         ComputeOutputCube(b, hv, chunkIdx, start, curT);
-        Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(syncDoneFlag_);
+        if constexpr (SYNCHRONIZE_PIPELINES) {
+            Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(syncDoneFlag_);
+        }
     }
 
+    template <bool SYNCHRONIZE_PIPELINES>
     __aicore__ inline void ProcessOutAiv()
     {
         if constexpr (IsSameType<T, float>::value) {
             return;
         }
-        uint64_t subBlockNum = static_cast<uint64_t>(GetSubBlockNum());
+        uint64_t subBlockNum = isAivOnly_ ? 1 : static_cast<uint64_t>(GetSubBlockNum());
         if (subBlockNum == 0) {
             return;
         }
-        uint64_t subBlockIdx = static_cast<uint64_t>(GetSubBlockIdx());
+        uint64_t subBlockIdx = isAivOnly_ ? 0 : static_cast<uint64_t>(GetSubBlockIdx());
         uint64_t coreNum = usedCoreNum_ == 0 ? 1 : usedCoreNum_;
-        uint64_t coreIdx = KdaForward::GetPhysicalBlockIdx() / subBlockNum;
+        uint64_t coreIdx = isAivOnly_
+            ? KdaForward::GetPhysicalBlockIdx() % coreNum
+            : KdaForward::GetPhysicalBlockIdx() / subBlockNum;
         uint64_t taskNum = static_cast<uint64_t>((isVarLen_ ? NT_ : B_ * NT_) * HV_);
         for (uint64_t task = coreIdx; task < taskNum; task += coreNum) {
             uint64_t seq = 0;
@@ -729,11 +776,13 @@ private:
                 (void)seq;
                 (void)h;
                 (void)chunkIdx;
-                ProcessChunkOutAiv(b, hv, chunkIdx, start, end, subBlockIdx, subBlockNum);
+                ProcessChunkOutAiv<SYNCHRONIZE_PIPELINES>(
+                    b, hv, chunkIdx, start, end, subBlockIdx, subBlockNum);
             }
         }
     }
 
+    template <bool SYNCHRONIZE_PIPELINES>
     __aicore__ inline void ProcessOutAic()
     {
         if constexpr (IsSameType<T, float>::value) {
@@ -753,7 +802,7 @@ private:
             if (ResolveFlatChunk(task, seq, b, h, hv, chunkIdx, start, end)) {
                 (void)seq;
                 (void)h;
-                ProcessChunkOutAic(b, hv, chunkIdx, start, end);
+                ProcessChunkOutAic<SYNCHRONIZE_PIPELINES>(b, hv, chunkIdx, start, end);
             }
         }
     }
@@ -822,7 +871,9 @@ private:
 };
 } // namespace
 
-template <typename T, typename GK_T, typename BETA_T, typename TilingData>
+template <typename T, typename GK_T, typename BETA_T, typename TilingData,
+          bool RUN_CUBE = true, bool RUN_VECTOR = true,
+          bool SYNCHRONIZE_PIPELINES = true>
 __aicore__ inline void RunChunkKdaOutput(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR gk, GM_ADDR beta, GM_ADDR initialState,
     GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR qgScaled, GM_ADDR aqk,
@@ -837,30 +888,35 @@ __aicore__ inline void RunChunkKdaOutput(
     GM_ADDR stateScratch = outputScratch;
     GM_ADDR localScratch = outputScratch + outputElements * sizeof(float);
 #if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
-    // Both dav-m200 mixed objects report g_coreType == MIX. Select CANN's
-    // separately compiled cube object explicitly.
+    // dav-m200 exposes both pipelines in the unified mixed image.
     if constexpr (KdaForward::CompilesCubePipeline()) {
 #else
     if ASCEND_IS_AIC {
 #endif
-        ChunkKdaFwdFinalizeKernel<T, GK_T, BETA_T> op;
-        op.Init(q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices,
-                qgScaled, aqk, propagatedVNew, propagatedH, stateScratch, userWorkspace, aqk, userWorkspace,
-                userWorkspace, localScratch, userWorkspace, userWorkspace, o, propagatedH,
-                outputScratch, tiling, &pipe, false);
-        op.ProcessAic();
+        if constexpr (RUN_CUBE) {
+            ChunkKdaFwdFinalizeKernel<T, GK_T, BETA_T> op;
+            op.Init(q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices,
+                    qgScaled, aqk, propagatedVNew, propagatedH, stateScratch, userWorkspace, aqk, userWorkspace,
+                    userWorkspace, localScratch, userWorkspace, userWorkspace, o, propagatedH,
+                    outputScratch, tiling, &pipe, false);
+            op.template ProcessAic<SYNCHRONIZE_PIPELINES>();
+        }
     }
 #if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
-    if constexpr (KdaForward::CompilesVectorPipeline()) {
+    // The default-task 310P image is unified; run the requested vector stage
+    // directly even though the launched object is tagged DAV_CUBE.
+    {
 #else
     if ASCEND_IS_AIV {
 #endif
-        ChunkKdaFwdFinalizeKernel<T, GK_T, BETA_T> op;
-        op.Init(q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices,
-                qgScaled, aqk, propagatedVNew, propagatedH, stateScratch, userWorkspace, aqk, userWorkspace,
-                userWorkspace, localScratch, userWorkspace, userWorkspace, o, propagatedH,
-                outputScratch, tiling, &pipe);
-        op.ProcessAiv();
+        if constexpr (RUN_VECTOR) {
+            ChunkKdaFwdFinalizeKernel<T, GK_T, BETA_T> op;
+            op.Init(q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices,
+                    qgScaled, aqk, propagatedVNew, propagatedH, stateScratch, userWorkspace, aqk, userWorkspace,
+                    userWorkspace, localScratch, userWorkspace, userWorkspace, o, propagatedH,
+                    outputScratch, tiling, &pipe);
+            op.template ProcessAiv<SYNCHRONIZE_PIPELINES>();
+        }
     }
 }
 

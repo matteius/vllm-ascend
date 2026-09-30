@@ -126,8 +126,10 @@ from vllm_ascend._310p.quantization.methods.w2_dynamic import (  # noqa: E402
     W2_CUBE_INPUT_TILE,
     W2_CUBE_MAX_TOKENS,
     W2_CUBE_MIN_INPUT_DIM,
+    W2_GROUPED_MAX_ROUTES,
     AscendW2DynamicFusedMoEMethod310,
     _can_use_w2_cube,
+    _can_use_w2_grouped_cube,
     _device_kernel_available,
     _is_nvfp4,
     _nvfp4_dequant_fp32,
@@ -245,6 +247,50 @@ def test_cube_kernel_accepts_w4_but_rejects_nvfp4():
     assert not _can_use_w2_cube(object(), packed_w2, W2_CUBE_MIN_INPUT_DIM, 1, True)
     assert not _can_use_w2_cube(object(), partial_tile_w4, W2_CUBE_MIN_INPUT_DIM, 1, False)
 
+
+def test_grouped_cube_routes_without_host_tensor_lists(monkeypatch):
+    hidden = inter = W2_CUBE_MIN_INPUT_DIM
+    local_experts = 2
+
+    class _GroupedBank(list):
+        grouped_ready = True
+        local_expert_offset = 2
+        num_local_experts = local_experts
+
+    bank = _GroupedBank([types.SimpleNamespace(hidden=hidden, inter=inter) for _ in range(4)])
+    bank.gate_packed_bank = torch.zeros(local_experts, inter, hidden // 2, dtype=torch.uint8)
+    bank.up_packed_bank = torch.zeros_like(bank.gate_packed_bank)
+    bank.down_packed_bank = torch.zeros(local_experts, hidden, inter // 2, dtype=torch.uint8)
+    bank.gate_scale_bank = torch.ones(local_experts, inter // 32, hidden // 32)
+    bank.up_scale_bank = torch.ones_like(bank.gate_scale_bank)
+    bank.down_scale_bank = torch.ones(local_experts, hidden // 32, inter // 32)
+
+    observed_group_ends = []
+
+    def fake_grouped_op(inputs, codes, scales, group_ends):
+        del inputs, scales
+        observed_group_ends.append(group_ends.detach().cpu().clone())
+        output = torch.zeros(topk_ids.numel(), codes.shape[1], dtype=torch.float16)
+        start = 0
+        for expert, end in enumerate(group_ends.detach().cpu().numpy()):
+            output[start:end] = expert + 1
+            start = int(end)
+        return output
+
+    # EP remaps peer routes to its first resident id but masks their weights.
+    # The grouped path must recover the peer rows and avoid projecting them.
+    topk_ids = torch.tensor([[2, 2], [3, 2]], dtype=torch.int64)
+    topk_weights = torch.tensor([[0.25, 0.0], [0.4, 0.0]])
+    x = torch.randn(2, hidden)
+    monkeypatch.setattr(torch.Tensor, "tolist", lambda self: (_ for _ in ()).throw(AssertionError("host sync")))
+
+    assert topk_ids.numel() <= W2_GROUPED_MAX_ROUTES
+    assert _can_use_w2_grouped_cube(fake_grouped_op, bank, topk_ids.numel())
+    output = _method()._apply_device_grouped(fake_grouped_op, bank, x, topk_weights, topk_ids, None)
+
+    expected = torch.tensor([0.25, 0.8]).view(2, 1).expand_as(output)
+    torch.testing.assert_close(output, expected)
+    assert all(torch.equal(group_ends, torch.tensor([1, 2])) for group_ends in observed_group_ends)
 
 # --- param creation from a synthetic W2 index -------------------------------
 

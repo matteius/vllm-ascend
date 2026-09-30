@@ -133,6 +133,34 @@ def test_grouped_nz_packed_projection_matches_canonical(bits: int, n: int, k: in
 
 
 @pytest.mark.parametrize("bits", [2, 4])
+@pytest.mark.parametrize("rows", [8, 32])
+def test_grouped_sparse_expert_walk_matches_dense_scan(bits: int, rows: int):
+    """Cover 72 local experts, empty groups, and peer-owned trailing rows."""
+    torch.manual_seed(900 + bits + rows)
+    experts, n, k = 72, 256, 256
+    codes_per_byte = 8 // bits
+    canonical = torch.randint(0, 256, (experts, n, k // codes_per_byte), dtype=torch.uint8)
+    nz_codes = torch.stack([_pack_codes_nz(canonical[expert], k) for expert in range(experts)])
+    scales = (torch.rand(experts, n // 32, k // 32) * 0.02 + 0.005).npu()
+    inputs = torch.randn(rows, k).half().npu()
+    active_experts = (0, 17) if rows == 8 else (0, 8, 17, 26, 35, 44, 53, 71)
+    rows_per_expert = 2
+    local_rows = len(active_experts) * rows_per_expert
+    group_ends = torch.tensor(
+        [rows_per_expert * sum(active <= expert for active in active_experts) for expert in range(experts)],
+        dtype=torch.int64,
+        device="npu",
+    )
+    op = torch.ops._C_ascend.npu_w2_grouped_blocked_dequant_matmul_310
+
+    dense = op(inputs, canonical.npu(), scales, group_ends)
+    sparse = op(inputs, nz_codes.view(torch.int8).npu(), scales, group_ends)
+
+    torch.testing.assert_close(sparse.cpu(), dense.cpu(), rtol=0, atol=0)
+    assert torch.count_nonzero(sparse[local_rows:]) == 0
+
+
+@pytest.mark.parametrize("bits", [2, 4])
 @pytest.mark.parametrize("nz_packed", [False, True])
 def test_grouped_scale_applies_to_both_nz_fragments(bits: int, nz_packed: bool):
     """A distinct scale per 32 input columns must cover both 16-wide NZ fragments."""

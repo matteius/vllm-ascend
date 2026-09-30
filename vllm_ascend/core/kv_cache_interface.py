@@ -10,9 +10,9 @@ from typing_extensions import Self
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1 import kv_cache_interface as vllm_kv_cache_interface
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheSpec,
     MambaSpec,
@@ -51,15 +51,18 @@ def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
 
 
 def is_circular_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
-    """Resolve fixed-block addressing through uniform cache wrappers."""
+    """Resolve fixed-block addressing through uniform cache groups."""
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
         specs = tuple(kv_cache_spec.kv_cache_specs.values())
         return bool(specs) and all(is_circular_kv_cache_spec(spec) for spec in specs)
-    return isinstance(kv_cache_spec, CircularBufferSpec) or bool(getattr(kv_cache_spec, "is_circular", False))
+    circular_spec = getattr(vllm_kv_cache_interface, "CircularBufferSpec", None)
+    return bool(getattr(kv_cache_spec, "is_circular", False)) or (
+        circular_spec is not None and isinstance(kv_cache_spec, circular_spec)
+    )
 
 
 def is_prefix_cacheable(kv_cache_spec: KVCacheSpec) -> bool:
-    """Resolve prefix-cache participation through uniform cache wrappers."""
+    """Resolve prefix cacheability through uniform cache groups."""
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
         return all(is_prefix_cacheable(spec) for spec in kv_cache_spec.kv_cache_specs.values())
     return bool(getattr(kv_cache_spec, "prefix_cacheable", True)) and bool(
@@ -68,14 +71,21 @@ def is_prefix_cacheable(kv_cache_spec: KVCacheSpec) -> bool:
 
 
 def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
-    """Return whether a mixed state-cache pool uses explicit page strides."""
-    specs = list(kv_cache_specs)
-    state_specs = [spec for spec in specs if isinstance(spec, MambaSpec)]
-    if not state_specs:
-        return False
-    if not any(getattr(spec, "page_size_padded", None) is not None for spec in state_specs):
-        return False
-    return any(getattr(spec, "indexes_kv_by_block_stride", False) for spec in specs)
+    """Whether a pooled recurrent-state view must advance by a physical page.
+
+    GLM's indexer tail and, in historical mode, Mamba states can share
+    physical slots with block-stride-addressed attention caches. Padding a
+    Mamba spec alone is not enough: ordinary hybrid pools still pack states.
+    """
+    specs = tuple(kv_cache_specs)
+    has_padded_state = any(
+        isinstance(spec, (MambaSpec, AscendIndexerKPoolStateSpec))
+        and getattr(spec, "page_size_padded", None) is not None
+        for spec in specs
+    )
+    return has_padded_state and any(
+        getattr(spec, "indexes_kv_by_block_stride", False) for spec in specs
+    )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -345,9 +355,8 @@ class AscendIndexerKPoolStateSpec(AscendSlidingWindowMLASpec):
         return max_blocks * self.page_size_bytes
 
 
-# The merged upstream runner calls this cache role a tail.  Keep the local
-# state-spec implementation and fields as one interface unit with the retained
-# GLM KPool backend while satisfying the newer runner's type import.
+# Keep the runner's historical name for the GLM compressor-state spec while
+# the backend and model use the current StateSpec spelling.
 AscendIndexerKPoolTailSpec = AscendIndexerKPoolStateSpec
 
 

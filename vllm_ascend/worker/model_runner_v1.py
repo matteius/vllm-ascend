@@ -206,6 +206,7 @@ from vllm_ascend.utils import (
     model_uses_kpool_indexer,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
     weak_ref_tensor,
     weak_ref_tensors,
 )
@@ -268,6 +269,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
 
 v41_metadata_builder_type: type[AscendDSAV41MetadataBuilder] = AscendDSAV41MetadataBuilder
 v41_cache_layer_type: type[DeepseekV41CacheLayer] = DeepseekV41CacheLayer
@@ -4993,6 +4995,7 @@ class NPUModelRunner(GPUModelRunner):
             getattr(getattr(self.model_config, "hf_text_config", None), "model_type", None) == "glm5_next_text"
             or any(getattr(spec, "model_version", None) == "glm5_next" for spec in layer_kv_cache_spec.values())
         )
+        uses_padded_page_layout = is_glm5_next and requires_padded_page_layout(layer_kv_cache_spec.values())
         is_dsv4_main = not use_legacy_shared_by_layout and any(
             getattr(spec, "model_version", None) == "deepseek_v4"
             for spec in layer_kv_cache_spec.values()
@@ -5401,6 +5404,15 @@ class NPUModelRunner(GPUModelRunner):
         """
         kv_caches: dict[str, torch.Tensor] = {}
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
+        layer_tuple_strides = (
+            {
+                name: descriptor.block_stride
+                for descriptor in kv_cache_config.kv_cache_tensors
+                for name in get_kv_cache_tensor_layers(descriptor)
+            }
+            if is_deepseek_v41_cache(layer_kv_cache_spec)
+            else {}
+        )
         glm_host_hot_layers = {
             layer_name
             for descriptor in kv_cache_config.kv_cache_tensors
@@ -5464,20 +5476,6 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     kv_caches[layer_name] = tuple(views) if is_index else views[0]
                     continue
-                if is_glm5_next:
-                    views = view_glm5_next_cache(
-                        layer_name,
-                        current_kv_cache_spec,
-                        kv_cache_raw_tensors[layer_name],
-                        attn_backend=attn_backend,
-                        kernel_block_size=kernel_block_size,
-                        num_blocks=kv_cache_config.num_blocks,
-                        get_kv_cache_dims=self._get_attention_kv_cache_dims,
-                    )
-                    if views is not None:
-                        kv_caches[layer_name] = views
-                        continue
-
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if self._uses_page_strided_kv_layout(current_kv_cache_spec):

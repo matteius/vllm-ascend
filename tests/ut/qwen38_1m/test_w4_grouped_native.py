@@ -11,7 +11,13 @@ import torch.nn.functional as F
 
 from tests.ut.qwen38_1m.test_w4_moe import config
 from vllm_ascend.models.qwen4_exp.dtype_policy import Qwen4ExpDtypePolicy
-from vllm_ascend.models.qwen4_exp.w4_moe import W4SparseMoE, require_eager_w4, unpack_signed_int4
+from vllm_ascend.models.qwen4_exp.w4_moe import (
+    MAX_CUBE_ROUTES,
+    MAX_W4A16_ROUTES,
+    W4SparseMoE,
+    require_eager_w4,
+    unpack_signed_int4,
+)
 from vllm_ascend.models.qwen4_exp.w4a8_int4 import (
     NATIVE_INT4_BACKEND,
     pack_float_nibbles,
@@ -72,7 +78,7 @@ def test_grouped_routes_match_slot_reference_without_host_readback(tokens, peers
 
 
 @pytest.mark.parametrize("backend", ["cube_310_grouped", NATIVE_INT4_BACKEND])
-@pytest.mark.parametrize("tokens", [1, 8, 9, 128])
+@pytest.mark.parametrize("tokens", [1, 8, 26, 27, 40, 42, 43, 128])
 def test_backend_dispatch_never_falls_back_to_python(backend, tokens):
     layer = make_layer(backend)
     expected = torch.zeros(tokens, 256).float()
@@ -83,8 +89,9 @@ def test_backend_dispatch_never_falls_back_to_python(backend, tokens):
         patch.object(layer, "_forward_routed", return_value=expected) as routed,
     ):
         layer(torch.zeros(tokens, 256).half())
-    assert grouped.call_count == int(tokens * 3 > 80)
-    assert routed.call_count == int(tokens * 3 <= 80)
+    routed_limit = MAX_CUBE_ROUTES if backend == NATIVE_INT4_BACKEND else MAX_W4A16_ROUTES
+    assert grouped.call_count == int(tokens * 3 > routed_limit)
+    assert routed.call_count == int(tokens * 3 <= routed_limit)
 
 
 def test_native_routed_packs_unique_tokens_before_topk_expansion():

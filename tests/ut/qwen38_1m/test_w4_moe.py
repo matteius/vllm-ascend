@@ -19,7 +19,7 @@ from vllm_ascend.models.qwen4_exp.moe import route_topk
 from vllm_ascend.models.qwen4_exp.w4_moe import (
     FORMAT,
     KINDS,
-    MAX_CUBE_ROUTES,
+    MAX_W4A16_ROUTES,
     MAX_SHARED_EXPERT_OVERLAP_TOKENS,
     PackedExpertBank,
     W4SparseMoE,
@@ -477,12 +477,12 @@ def test_oversized_graph_fails_before_host_route_readback():
     cfg.hidden_size = cfg.moe_intermediate_size = 256
     cfg.ascend_expert_quantization.update(group_size=128, backend="cube_310_routed")
     layer = W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy())
-    oversized_tokens = MAX_CUBE_ROUTES // layer.top_k + 1
+    oversized_tokens = MAX_W4A16_ROUTES // layer.top_k + 1
     with (
         patch.object(torch, "npu", SimpleNamespace(is_current_stream_capturing=lambda: True), create=True),
         patch.object(layer, "_forward_host_routed") as host,
     ):
-        with pytest.raises(RuntimeError, match=f"exceeds {MAX_CUBE_ROUTES} routes"):
+        with pytest.raises(RuntimeError, match=f"exceeds {MAX_W4A16_ROUTES} routes"):
             layer(torch.zeros(oversized_tokens, 256).half())
         host.assert_not_called()
 

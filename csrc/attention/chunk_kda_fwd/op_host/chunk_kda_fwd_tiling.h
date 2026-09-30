@@ -42,6 +42,7 @@ TILING_DATA_FIELD_DEF(int64_t, stage);
 TILING_DATA_FIELD_DEF(int64_t, gateDataType);
 TILING_DATA_FIELD_DEF(int64_t, gateUsedCoreNum);
 TILING_DATA_FIELD_DEF(int64_t, prepareUsedCoreNum);
+TILING_DATA_FIELD_DEF(int64_t, prepareScoreSlotsPerCore);
 TILING_DATA_FIELD_DEF(int64_t, postWuUsedCoreNum);
 TILING_DATA_FIELD_DEF(int64_t, outputUsedCoreNum);
 

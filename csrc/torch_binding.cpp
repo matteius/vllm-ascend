@@ -70,6 +70,7 @@
 #include "attention/qsa_index_cache_update_v310/qsa_index_cache_update_310_torch_adpt.h"
 #include "attention/mla_cache_write_v310/mla_cache_write_310_torch_adpt.h"
 #include "attention/mhc_sinkhorn_v310/mhc_sinkhorn_310_torch_adpt.h"
+#include "attention/qwen4exp_ple_decode_v310/qwen4exp_ple_decode_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/msa_index_score/msa_index_score_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
@@ -2899,6 +2900,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "float epsilon=1e-6) -> Tensor");
     ops.impl("mhc_sinkhorn_310", torch::kPrivateUse1,
              &vllm_ascend::mhc_sinkhorn_310);
+
+    ops.def(
+        "qwen4exp_ple_decode_310(Tensor key, Tensor value, Tensor hidden, "
+        "Tensor norm_key_weight, Tensor norm_query_weight, Tensor norm_conv_weight, "
+        "Tensor current_conv_weight, Tensor(a!) output, float norm_eps=1e-6) -> ()");
+    ops.impl("qwen4exp_ple_decode_310", torch::kPrivateUse1,
+             &vllm_ascend::qwen4exp_ple_decode_310);
 
     ops.def(
         "chunk_gated_delta_rule_fwd_h(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"

@@ -189,10 +189,11 @@ public:
     {
         uint64_t taskCount = hasCuSeqlens_ ? seqNum_ * hv_ : batch_ * hv_ * maxChunks_;
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 200
-        // GetBlockIdx() includes the mixed-kernel data-task base on dav-m200.
-        // The raw index is local to the physical vector core and remains valid
-        // for both standalone AIV and fused MIX_AICORE launches.
-        uint64_t coreIdx = static_cast<uint64_t>(block_idx);
+        // A fused MIX_AICORE launch may offset the vector-task block index by
+        // the physical core count. Standalone AIV launches already start at
+        // zero, so modulo normalizes both forms.
+        uint64_t coreIdx = usedCoreNum_ == 0 ? 0 :
+            static_cast<uint64_t>(block_idx) % usedCoreNum_;
 #else
         uint64_t coreIdx = static_cast<uint64_t>(GetBlockIdx());
 #endif
@@ -325,6 +326,11 @@ private:
 
     __aicore__ inline float ReadFloat(GlobalTensor<float> &tensor, uint64_t offset)
     {
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        // A four-byte DataCopyPad is unreliable on 310P. Read the scalar
+        // directly, matching the int64 path below.
+        return tensor.GetValue(offset);
+#else
         LocalTensor<float> scalar = scalarBuf_.Get<float>();
         DataCopyParams params{1, static_cast<uint16_t>(sizeof(float)), 0, 0};
         DataCopyPadParams padParams{false, 0, 0, 0};
@@ -337,6 +343,7 @@ private:
         WaitFlag<HardEvent::V_S>(scalarVToSEvent_);
         __ubuf__ float *ptr = (__ubuf__ float *)scalar.GetPhyAddr();
         return ptr[0];
+#endif
     }
 
     __aicore__ inline int64_t ReadInt64(GlobalTensor<int64_t> &tensor, uint64_t offset)

@@ -7,7 +7,7 @@
 
 namespace KdaForward {
 
-// In a dav-m200 MIX_AICORE kernel AscendC::GetBlockIdx() adds
+// In a dav-m200 mixed kernel AscendC::GetBlockIdx() adds
 // get_data_main_base() on the vector task. KDA partitions vector and cube work
 // over the same physical cores, so both tasks need the zero-based hardware
 // block index instead.
@@ -23,7 +23,8 @@ __aicore__ inline uint64_t GetPhysicalBlockIdx()
 #if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
 __aicore__ inline constexpr bool CompilesVectorPipeline()
 {
-#if defined(__ENABLE_VECTOR_CORE__)
+#if defined(KDA_310P_DEFAULT_TASK) || defined(__DAV_VEC__) || \
+    defined(__DAV_M200_VEC__)
     return true;
 #else
     return false;
@@ -32,7 +33,11 @@ __aicore__ inline constexpr bool CompilesVectorPipeline()
 
 __aicore__ inline constexpr bool CompilesCubePipeline()
 {
-    return !CompilesVectorPipeline();
+#if defined(__DAV_CUBE__)
+    return true;
+#else
+    return false;
+#endif
 }
 #endif
 
@@ -53,6 +58,8 @@ __aicore__ inline constexpr bool CompilesCubePipeline()
 #include "../../../gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h/op_kernel/chunk_gated_delta_rule_fwd_h_struct.h"
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 #include "../../../gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h/op_kernel/arch35/gemm/kernel/gdn_fwd_h_kernel.hpp"
+#elif defined(__CCE_AICORE__) && __CCE_AICORE__ == 200
+#include "../../../gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h/op_kernel/arch20/gemm/kernel/gdn_fwd_h_kernel.hpp"
 #else
 #include "../../../gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h/op_kernel/gemm/kernel/gdn_fwd_h_kernel.hpp"
 #endif
@@ -60,6 +67,8 @@ __aicore__ inline constexpr bool CompilesCubePipeline()
 #include "../../chunk_gated_delta_rule_fwd_h/op_kernel/chunk_gated_delta_rule_fwd_h_struct.h"
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 #include "../../chunk_gated_delta_rule_fwd_h/op_kernel/arch35/gemm/kernel/gdn_fwd_h_kernel.hpp"
+#elif defined(__CCE_AICORE__) && __CCE_AICORE__ == 200
+#include "../../chunk_gated_delta_rule_fwd_h/op_kernel/arch20/gemm/kernel/gdn_fwd_h_kernel.hpp"
 #else
 #include "../../chunk_gated_delta_rule_fwd_h/op_kernel/gemm/kernel/gdn_fwd_h_kernel.hpp"
 #endif
@@ -206,14 +215,20 @@ __aicore__ inline void RunGateCumsum(
         return;
     }
 #if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
-    // dav-m200 reports both mixed objects as AscendC::MIX. Use CANN's
-    // per-object marker to emit this work only into the vector object.
-    if constexpr (KdaForward::CompilesVectorPipeline()) {
+    // The 310P runtime launches the unified default-task image. Execute the
+    // vector stage directly in that image instead of testing DAV_VEC macros.
+    {
 #else
     if ASCEND_IS_AIV {
 #endif
         GateRuntimeTiling gateTiling = MakeGateTiling(tiling);
         TPipe gatePipe;
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        // The 310P registration accepts FP32 gates only. Avoid instantiating
+        // unsupported dav-m200 BF16 conversion intrinsics in this image.
+        KdaGateCumsum::DispatchKdaGateCumsum<float>(
+            g, aLog, dtBias, cuSeqlens, gk, gateTiling, &gatePipe);
+#else
         if (gateTiling.dataType == 2) {
             KdaGateCumsum::DispatchKdaGateCumsum<float>(
                 g, aLog, dtBias, cuSeqlens, gk, gateTiling, &gatePipe);
@@ -224,6 +239,7 @@ __aicore__ inline void RunGateCumsum(
             KdaGateCumsum::DispatchKdaGateCumsum<half>(
                 g, aLog, dtBias, cuSeqlens, gk, gateTiling, &gatePipe);
         }
+#endif
     }
 }
 
@@ -271,8 +287,13 @@ __aicore__ inline void RunFwdH(
     const ChunkKdaFwdAddresses &addresses, GM_ADDR userWorkspace,
     const TilingData &tiling)
 {
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 200
+    using FwdHKernel = Catlass::Gemm::Kernel::GDNFwdHKernel<
+        T, float, float, float>;
+#else
     using FwdHKernel = Catlass::Gemm::Kernel::GDNFwdHKernel<
         T, float, float, float, TileShapes, true, false, true>;
+#endif
     const auto fwdHTiling = MakeFwdHTiling(tiling);
     FwdHKernel stateOp;
     stateOp.InitFromData(
@@ -289,6 +310,10 @@ __aicore__ inline void RunSelectedFwdH(
     const ChunkKdaFwdAddresses &addresses, GM_ADDR userWorkspace,
     const TilingData &tiling)
 {
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 200
+    RunFwdH<T, void>(initialState, cuSeqlens, chunkIndices, addresses,
+                     userWorkspace, tiling);
+#else
     if (tiling.vHeadDim > 128) {
         RunFwdH<T, Catlass::Gemm::Kernel::GDNFwdHTileShapes256>(
             initialState, cuSeqlens, chunkIndices, addresses,
@@ -298,6 +323,7 @@ __aicore__ inline void RunSelectedFwdH(
             initialState, cuSeqlens, chunkIndices, addresses,
             userWorkspace, tiling);
     }
+#endif
 }
 
 template <typename T, typename BETA_T, typename TilingData>

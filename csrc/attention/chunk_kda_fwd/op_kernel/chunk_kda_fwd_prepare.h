@@ -43,6 +43,9 @@ constexpr float KDA_SCORE_EXP2_MIN_CLAMP = 126.0f;
 constexpr float KDA_SCORE_EXP_INPUT_MAX = KDA_SCORE_EXP2_CLAMP * LN2;
 constexpr float KDA_SCORE_EXP_INPUT_MIN = -KDA_SCORE_EXP2_MIN_CLAMP * LN2;
 constexpr float KDA_FP16_MAX = 65504.0f;
+constexpr float KDA_FP16_EXP_INPUT_MAX = 11.089866f;
+constexpr float KDA_FP16_EXP_INPUT_MIN = -17.0f;
+constexpr uint64_t KDA_FP16_VALUES_PER_BLOCK = 16;
 constexpr uint32_t EXP2_UB_ELEMENTS = 256;
 constexpr uint32_t EXP2_UB_BYTES = EXP2_UB_ELEMENTS * (sizeof(float) + sizeof(uint16_t));
 constexpr uint32_t EXP2_EVENT_ID = 0;
@@ -88,6 +91,7 @@ constexpr uint32_t KDA_SCORE_SCRATCH_KG = 2;
 constexpr uint64_t KDA_WORKSPACE_ALIGN = 512;
 constexpr uint32_t KDA_GATE_TILE_ROWS = 16;
 constexpr uint32_t KDA_GATE_PIPELINE_DEPTH = 3;
+constexpr uint32_t KDA_FINALIZE_TILE_ROWS = 32;
 constexpr uint32_t KDA_AIV_UB_BUDGET_BYTES = 192 * 1024;
 #if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
 // dav-m200 Cube MMAD accepts fp16 inputs only. Keep the fp32 triangular
@@ -194,7 +198,7 @@ public:
                                 GM_ADDR propagatedVNew, GM_ADDR propagatedH, GM_ADDR o, GM_ADDR finalState, GM_ADDR aqk,
                                 GM_ADDR akk, GM_ADDR w, GM_ADDR u, GM_ADDR qg, GM_ADDR kg, GM_ADDR vNew, GM_ADDR h,
                                 GM_ADDR workspace, const TilingData &tiling, TPipe *pipe,
-                                bool initVecBuffers = true)
+                                bool initVecBuffers = true, GM_ADDR externalScoreWorkspace = nullptr)
     {
         pipe_ = pipe;
         q_.SetGlobalBuffer((__gm__ T *)q);
@@ -245,12 +249,27 @@ public:
         isVarLen_ = tiling.isVarLen;
         inputSequenceMajor_ = tiling.inputSequenceMajor;
         usedCoreNum_ = tiling.prepareUsedCoreNum;
+        scoreScratchSlotsPerCore_ = tiling.prepareScoreSlotsPerCore;
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        isAivOnly_ = true;
+#endif
         constexpr uint64_t solvePipelineDepth = SAFE_GATE ? KDA_SOLVE_PIPELINE_DEPTH : 1;
         const uint64_t solveBytes =
             usedCoreNum_ * solvePipelineDepth * KDA_SOLVE_SCRATCH_SLOTS * BT_ * BT_ * sizeof(float);
         const uint64_t alignedSolveBytes =
             (solveBytes + KDA_WORKSPACE_ALIGN - 1) / KDA_WORKSPACE_ALIGN * KDA_WORKSPACE_ALIGN;
-        scoreWorkspace_.SetGlobalBuffer((__gm__ SCORE_T *)(workspace + alignedSolveBytes));
+        GM_ADDR scoreWorkspace = externalScoreWorkspace == nullptr
+            ? workspace + alignedSolveBytes
+            : externalScoreWorkspace;
+        scoreWorkspace_.SetGlobalBuffer((__gm__ SCORE_T *)scoreWorkspace);
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        if (isAivOnly_) {
+            solveCoreIdx_ = usedCoreNum_ == 0 ? 0 :
+                KdaForward::GetPhysicalBlockIdx() % usedCoreNum_;
+        } else {
+            solveCoreIdx_ = KdaForward::GetPhysicalBlockIdx();
+        }
+#else
         if ASCEND_IS_AIV {
             uint64_t subBlockNum = static_cast<uint64_t>(GetSubBlockNum());
             solveCoreIdx_ = subBlockNum == 0 ? 0 :
@@ -258,14 +277,19 @@ public:
         } else {
             solveCoreIdx_ = KdaForward::GetPhysicalBlockIdx();
         }
+#endif
         if (pipe_ != nullptr && initVecBuffers) {
             pipe_->InitBuffer(exp2Buf_, EXP2_UB_BYTES);
             pipe_->InitBuffer(vecBuf_, KDA_VEC_ARENA_ELEMENTS * sizeof(float));
-            const uint64_t gateStageElems = GatePipelineRows() * K_;
-            const uint64_t gateInputSlotBytes = gateStageElems * (2 * sizeof(T) + sizeof(GK_T));
-            const uint64_t gatePipelineBytes =
-                KDA_GATE_PIPELINE_DEPTH * (gateInputSlotBytes + gateStageElems * sizeof(T));
-            pipe_->InitBuffer(gateWritebackBuf_, static_cast<uint32_t>(gatePipelineBytes));
+            uint64_t writebackBytes = GateWritebackBytes();
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+            const uint64_t finalizeWritebackBytes =
+                KDA_FINALIZE_TILE_ROWS * (2 * BT_ + K_) * sizeof(T);
+            if (finalizeWritebackBytes > writebackBytes) {
+                writebackBytes = finalizeWritebackBytes;
+            }
+#endif
+            pipe_->InitBuffer(gateWritebackBuf_, static_cast<uint32_t>(writebackBytes));
             AllocVectorEvents();
         }
     }
@@ -286,6 +310,31 @@ public:
     {
         ProcessPreAic();
     }
+
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+    __aicore__ inline void ProcessAivScorePrepare()
+    {
+        ProcessPreAivScorePrepare310P();
+        ReleaseVectorEvents();
+    }
+
+    __aicore__ inline void ProcessAicScores()
+    {
+        ProcessPreAicScores310P();
+    }
+
+    __aicore__ inline void ProcessAivScoreFinalize()
+    {
+        ProcessPreAivScoreFinalize310P();
+        ReleaseVectorEvents();
+    }
+
+    __aicore__ inline void ProcessAivWuScale()
+    {
+        ProcessPreAivWuScale310P();
+        ReleaseVectorEvents();
+    }
+#endif
 
 private:
     __aicore__ inline void AllocVectorEvents()
@@ -373,9 +422,13 @@ private:
     __aicore__ inline uint64_t ScoreScratchOffset(uint64_t slot, uint64_t plane, uint64_t t = 0,
                                                   uint64_t d = 0) const
     {
-        return (((solveCoreIdx_ * KDA_SCORE_SCRATCH_SLOTS + slot) * KDA_SCORE_SCRATCH_PLANES + plane) * BT_ + t) *
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        return ((slot * KDA_SCORE_SCRATCH_PLANES + plane) * BT_ + t) * K_ + d;
+#else
+        return (((solveCoreIdx_ * scoreScratchSlotsPerCore_ + slot) * KDA_SCORE_SCRATCH_PLANES + plane) * BT_ + t) *
                    K_ +
                d;
+#endif
     }
 
     __aicore__ inline uint64_t ScoreScratchSlot(uint64_t queueSlot, uint64_t lane, bool pairHeads) const
@@ -547,6 +600,12 @@ private:
         return GateStageElems() * (2 * sizeof(T) + sizeof(GK_T));
     }
 
+    __aicore__ inline uint64_t GateWritebackBytes() const
+    {
+        return KDA_GATE_PIPELINE_DEPTH *
+               (GateInputSlotBytes() + GateStageElems() * sizeof(T));
+    }
+
     __aicore__ inline LocalTensor<T> GateQTyped(uint64_t slot)
     {
         uint64_t byteOffset = slot * GateInputSlotBytes();
@@ -706,6 +765,117 @@ private:
         return exp2Local;
     }
 
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+    __aicore__ inline void ClampFp16ExpInput(LocalTensor<T> &tensor,
+                                              uint32_t count)
+    {
+        // exp(ln(65504)) is the largest finite FP16 exponential result.
+        Mins(tensor, tensor, static_cast<T>(KDA_FP16_EXP_INPUT_MAX), count);
+        PipeBarrier<PIPE_V>();
+        Maxs(tensor, tensor, static_cast<T>(KDA_FP16_EXP_INPUT_MIN), count);
+        PipeBarrier<PIPE_V>();
+    }
+
+    __aicore__ inline LocalTensor<T> GateReferenceTyped()
+    {
+        constexpr uint32_t typedOffset =
+            EXP2_UB_ELEMENTS * sizeof(float) / sizeof(T);
+        return exp2Buf_.Get<T>()[typedOffset];
+    }
+
+    __aicore__ inline void PrepareScoreFactorsBulk310P(
+        uint64_t b, uint64_t h, uint64_t hv, uint64_t start,
+        uint64_t subBlockIdx, uint64_t subBlockNum, uint64_t refToken,
+        uint64_t scoreRowBegin, uint64_t scoreRowCount,
+        uint64_t validColEnd, uint64_t scoreSlot)
+    {
+        LocalTensor<T> refTyped = GateReferenceTyped();
+        CopyVectorIn(refTyped, gk_, KVOffset(b, hv, refToken, 0, K_), K_);
+        SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+        WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+
+        uint64_t qwBegin = scoreRowBegin +
+            (scoreRowCount * subBlockIdx) / subBlockNum;
+        uint64_t qwEnd = scoreRowBegin +
+            (scoreRowCount * (subBlockIdx + 1)) / subBlockNum;
+        uint64_t maxRows = GatePipelineRows();
+        for (uint64_t tileRow = qwBegin; tileRow < qwEnd && maxRows > 0;
+             tileRow += maxRows) {
+            uint64_t tileRows = qwEnd - tileRow;
+            if (tileRows > maxRows) {
+                tileRows = maxRows;
+            }
+            uint64_t elems = tileRows * K_;
+            LocalTensor<T> qTyped = GateQTyped(0);
+            LocalTensor<T> kTyped = GateKTyped(0);
+            LocalTensor<T> gateTyped = GateGTyped(0);
+            PrefetchQKGate(0, b, h, hv, start + tileRow, elems);
+            WaitGateInputReady();
+            for (uint64_t row = 0; row < tileRows; ++row) {
+                Sub(gateTyped[row * K_], gateTyped[row * K_], refTyped,
+                    static_cast<uint32_t>(K_));
+            }
+            PipeBarrier<PIPE_V>();
+            Muls(gateTyped, gateTyped, static_cast<T>(LN2),
+                 static_cast<uint32_t>(elems));
+            PipeBarrier<PIPE_V>();
+            ClampFp16ExpInput(gateTyped, static_cast<uint32_t>(elems));
+            Exp(gateTyped, gateTyped, static_cast<uint32_t>(elems));
+            PipeBarrier<PIPE_V>();
+            Mul(qTyped, qTyped, gateTyped, static_cast<uint32_t>(elems));
+            Mul(kTyped, kTyped, gateTyped, static_cast<uint32_t>(elems));
+            PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
+            WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
+            CopyVectorOut(scoreWorkspace_,
+                          ScoreScratchOffset(scoreSlot,
+                              KDA_SCORE_SCRATCH_QG, tileRow),
+                          qTyped, elems);
+            CopyVectorOut(scoreWorkspace_,
+                          ScoreScratchOffset(scoreSlot,
+                              KDA_SCORE_SCRATCH_W, tileRow),
+                          kTyped, elems);
+            SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+            WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+        }
+
+        uint64_t kgBegin = (validColEnd * subBlockIdx) / subBlockNum;
+        uint64_t kgEnd = (validColEnd * (subBlockIdx + 1)) / subBlockNum;
+        for (uint64_t tileRow = kgBegin; tileRow < kgEnd && maxRows > 0;
+             tileRow += maxRows) {
+            uint64_t tileRows = kgEnd - tileRow;
+            if (tileRows > maxRows) {
+                tileRows = maxRows;
+            }
+            uint64_t elems = tileRows * K_;
+            LocalTensor<T> kTyped = GateQTyped(0);
+            LocalTensor<T> gateTyped = GateGTyped(0);
+            PrefetchKGate(0, b, h, hv, start + tileRow, elems);
+            WaitGateInputReady();
+            for (uint64_t row = 0; row < tileRows; ++row) {
+                Sub(gateTyped[row * K_], refTyped, gateTyped[row * K_],
+                    static_cast<uint32_t>(K_));
+            }
+            PipeBarrier<PIPE_V>();
+            Muls(gateTyped, gateTyped, static_cast<T>(LN2),
+                 static_cast<uint32_t>(elems));
+            PipeBarrier<PIPE_V>();
+            ClampFp16ExpInput(gateTyped, static_cast<uint32_t>(elems));
+            Exp(gateTyped, gateTyped, static_cast<uint32_t>(elems));
+            PipeBarrier<PIPE_V>();
+            Mul(kTyped, kTyped, gateTyped, static_cast<uint32_t>(elems));
+            PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
+            WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
+            CopyVectorOut(scoreWorkspace_,
+                          ScoreScratchOffset(scoreSlot,
+                              KDA_SCORE_SCRATCH_KG, tileRow),
+                          kTyped, elems);
+            SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+            WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+        }
+    }
+#endif
 
     __aicore__ inline void PrepareScoreFactorsBulk(uint64_t b, uint64_t h, uint64_t hv, uint64_t start,
                                                     uint64_t subBlockIdx, uint64_t subBlockNum,
@@ -713,6 +883,12 @@ private:
                                                     uint64_t scoreRowCount, uint64_t validColEnd,
                                                     uint64_t scoreSlot)
     {
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        PrepareScoreFactorsBulk310P(
+            b, h, hv, start, subBlockIdx, subBlockNum, refToken,
+            scoreRowBegin, scoreRowCount, validColEnd, scoreSlot);
+        return;
+#endif
         LocalTensor<float> refFp32 = exp2Buf_.Get<float>();
         LoadAsFloatRow(gk_, KVOffset(b, hv, refToken, 0, K_), refFp32, K_);
 
@@ -883,6 +1059,88 @@ private:
         }
     }
 
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+    __aicore__ inline void PrepareGateProductsBulk310P(
+        uint64_t b, uint64_t h, uint64_t hv, uint64_t start,
+        uint64_t curT, uint64_t subBlockIdx, uint64_t subBlockNum,
+        bool useRef, uint64_t refToken)
+    {
+        uint64_t rowBegin = (curT * subBlockIdx) / subBlockNum;
+        uint64_t rowEnd = (curT * (subBlockIdx + 1)) / subBlockNum;
+        if (rowBegin >= rowEnd) {
+            return;
+        }
+        LocalTensor<T> refTyped = GateReferenceTyped();
+        if (useRef) {
+            CopyVectorIn(refTyped, gk_,
+                         KVOffset(b, hv, refToken, 0, K_), K_);
+            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+        }
+
+        // dav-m200 can drop or corrupt adjacent strided input transfers in
+        // this mixed kernel. Keep the 310P path row-local and place an event
+        // between each global-memory transfer. K is 128 for the supported
+        // model path, so every row remains a naturally aligned transaction.
+        for (uint64_t row = rowBegin; row < rowEnd; ++row) {
+            uint64_t token = start + row;
+            LocalTensor<T> qTyped = GateQTyped(0);
+            LocalTensor<T> kTyped = GateKTyped(0);
+            LocalTensor<T> qgScaledTyped = GateKgTyped(0);
+            LocalTensor<T> gateTyped = GateGTyped(0);
+
+            CopyVectorIn(qTyped, q_, QOffset(b, h, token, 0), K_);
+            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            CopyVectorIn(kTyped, k_, QOffset(b, h, token, 0), K_);
+            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            CopyVectorIn(gateTyped, gk_,
+                         KVOffset(b, hv, token, 0, K_), K_);
+            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            if (useRef) {
+                Sub(gateTyped, gateTyped, refTyped,
+                    static_cast<uint32_t>(K_));
+            }
+            PipeBarrier<PIPE_V>();
+            Muls(gateTyped, gateTyped, static_cast<T>(LN2),
+                 static_cast<uint32_t>(K_));
+            PipeBarrier<PIPE_V>();
+            ClampFp16ExpInput(gateTyped, static_cast<uint32_t>(K_));
+            Exp(gateTyped, gateTyped, static_cast<uint32_t>(K_));
+            PipeBarrier<PIPE_V>();
+            Mul(qTyped, qTyped, gateTyped, static_cast<uint32_t>(K_));
+            Mul(kTyped, kTyped, gateTyped, static_cast<uint32_t>(K_));
+            PipeBarrier<PIPE_V>();
+            Muls(qgScaledTyped, qTyped, static_cast<T>(scale_),
+                 static_cast<uint32_t>(K_));
+            PipeBarrier<PIPE_V>();
+
+            SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
+            WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
+            CopyVectorOut(qg_, KVOffset(b, hv, token, 0, K_),
+                          qTyped, K_);
+            SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+            WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+            SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
+            WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
+            CopyVectorOut(w_, KVOffset(b, hv, token, 0, K_),
+                          kTyped, K_);
+            SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+            WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+            SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
+            WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
+            CopyVectorOut(kg_, KVOffset(b, hv, token, 0, K_),
+                          qgScaledTyped, K_);
+            SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+            WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+            SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+            WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+        }
+    }
+#endif
+
     __aicore__ inline void PrepareGateProductsBulk(uint64_t b, uint64_t h, uint64_t hv, uint64_t start,
                                                    uint64_t curT, uint64_t subBlockIdx, uint64_t subBlockNum,
                                                    bool useRef, uint64_t refToken, uint64_t validColEnd,
@@ -894,6 +1152,12 @@ private:
         if (subBlockNum == 0 || subBlockIdx >= subBlockNum || K_ == 0) {
             return;
         }
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        PrepareGateProductsBulk310P(
+            b, h, hv, start, curT, subBlockIdx, subBlockNum,
+            useRef, refToken);
+        return;
+#endif
         uint64_t rowBegin = (curT * subBlockIdx) / subBlockNum;
         uint64_t rowEnd = (curT * (subBlockIdx + 1)) / subBlockNum;
         if (rowBegin >= rowEnd) {
@@ -984,6 +1248,17 @@ private:
             } else {
                 ClampFp32ToOutputType(outFp32, static_cast<uint32_t>(elems));
                 Cast(qTyped, outFp32, RoundMode::CAST_RINT, static_cast<uint32_t>(elems));
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+                // The 310P staged ABI maps kg_ to the qg_scaled tensor in
+                // this launch. Produce it beside qg_ while the FP32 gate
+                // product is live; a later mixed-type export from the score
+                // finalize image is not reliable on dav-m200.
+                Muls(outFp32, outFp32, scale_, static_cast<uint32_t>(elems));
+                PipeBarrier<PIPE_V>();
+                ClampFp32ToOutputType(outFp32, static_cast<uint32_t>(elems));
+                Cast(kgTyped, outFp32, RoundMode::CAST_RINT,
+                     static_cast<uint32_t>(elems));
+#endif
             }
             PipeBarrier<PIPE_V>();
 
@@ -998,6 +1273,7 @@ private:
             }
             PipeBarrier<PIPE_V>();
 
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ != 200)
             if (useRef) {
                 for (uint64_t row = 0; row < tileRows; ++row) {
                     Sub(expFp32[row * K_], refFp32, gFp32[row * K_], static_cast<uint32_t>(K_));
@@ -1030,16 +1306,17 @@ private:
             } else {
                 ClampFp32ToOutputType(outFp32, static_cast<uint32_t>(elems));
             }
-            if (outputPending) {
-                WaitGateOutputForVector();
-            }
             if (writeScoreScratch) {
                 Cast(kgScore, outFp32, RoundMode::CAST_RINT, static_cast<uint32_t>(elems));
             } else {
                 Cast(kgTyped, outFp32, RoundMode::CAST_RINT, static_cast<uint32_t>(elems));
             }
             PipeBarrier<PIPE_V>();
+#endif
 
+            if (outputPending) {
+                WaitGateOutputForVector();
+            }
             SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
             WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
             if (writeScoreScratch) {
@@ -1108,7 +1385,6 @@ private:
                                                               ElementA, ElementB, ElementC, void, TileCopy>;
 
         Catlass::Arch::Resource<KdaArchTag> resource;
-        BlockMmad blockMmad(resource);
         auto layoutA = tla::MakeLayout<ElementA, LayoutTagA>(BT_, K_);
         auto layoutB = tla::MakeLayout<ElementB, LayoutTagB>(K_, BT_);
         auto layoutC = tla::MakeLayout<ElementC, LayoutTagC>(BT_, BT_);
@@ -1139,11 +1415,176 @@ private:
         auto blockAqk = GetTile(tensorAqk, tla::MakeCoord(rowBegin, 0), tla::MakeShape(shape.m(), shape.n()));
         auto blockAkk = GetTile(tensorAkk, tla::MakeCoord(rowBegin, 0), tla::MakeShape(shape.m(), shape.n()));
 
+        BlockMmad blockMmad(resource);
         blockMmad.preSetFlags();
         blockMmad(blockQPos, blockKNeg, blockAqk, shape);
         blockMmad(blockKPos, blockKNeg, blockAkk, shape);
         blockMmad.finalWaitFlags();
     }
+
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+    __aicore__ inline void ReduceDotProduct310P(
+        LocalTensor<float> &dst, uint64_t dstOffset,
+        LocalTensor<float> &product, LocalTensor<float> &partials)
+    {
+        constexpr uint64_t reduceWidth = 64;
+        constexpr uint64_t resultStride = 8;
+        uint64_t partialCount = 0;
+        for (uint64_t offset = 0; offset < K_; offset += reduceWidth) {
+            uint64_t width = K_ - offset;
+            if (width > reduceWidth) {
+                width = reduceWidth;
+            }
+            WholeReduceSum(
+                partials[partialCount * resultStride], product[offset],
+                static_cast<uint32_t>(width), 1, 1, 1, resultStride);
+            ++partialCount;
+        }
+        PipeBarrier<PIPE_V>();
+        SetFlag<HardEvent::V_S>(EXP2_EVENT_ID);
+        WaitFlag<HardEvent::V_S>(EXP2_EVENT_ID);
+        float sum = 0.0f;
+        for (uint64_t partial = 0; partial < partialCount; ++partial) {
+            sum += partials.GetValue(partial * resultStride);
+        }
+        dst.SetValue(dstOffset, sum);
+        SetFlag<HardEvent::S_V>(EXP2_EVENT_ID);
+        WaitFlag<HardEvent::S_V>(EXP2_EVENT_ID);
+    }
+
+    __aicore__ inline void ComputeRawAqkAkkVector310P(
+        uint64_t b, uint64_t h, uint64_t hv, uint64_t start,
+        uint64_t curT)
+    {
+        // dav-m200 Cube does not commit partial M/N score tiles. Safe-gate
+        // chunks also use this path because their long cumulative decay range
+        // cannot be factorized through FP16 Cube operands without overflow.
+        constexpr uint64_t fp32ArenaOffset = 1024;
+        constexpr uint64_t partialStride = 8;
+        constexpr uint64_t maxPartials = 4;
+        LocalTensor<T> typedArena = vecBuf_.Get<T>();
+        LocalTensor<T> rowVector = typedArena;
+        LocalTensor<T> gRow = typedArena[K_];
+        LocalTensor<T> kCol = typedArena[2 * K_];
+        LocalTensor<T> gCol = typedArena[3 * K_];
+        LocalTensor<T> gate = typedArena[4 * K_];
+        LocalTensor<T> kGated = typedArena[5 * K_];
+        LocalTensor<T> product = typedArena[6 * K_];
+
+        LocalTensor<float> fp32Arena = vecBuf_.Get<float>()[fp32ArenaOffset];
+        LocalTensor<float> productFp32 = fp32Arena;
+        LocalTensor<float> partials = fp32Arena[K_];
+        LocalTensor<float> scoreRow = partials[maxPartials * partialStride];
+
+        // Run K*K and Q*K in separate passes. A single dav-m200 vector pass
+        // can otherwise leave the second adjacent dot product unwritten,
+        // even when its product and reduction buffers do not alias.
+        for (uint64_t row = 0; row < curT; ++row) {
+            Duplicate(scoreRow, 0.0f, static_cast<uint32_t>(BT_));
+            PipeBarrier<PIPE_V>();
+
+            CopyVectorIn(
+                rowVector, k_, QOffset(b, h, start + row, 0), K_);
+            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            CopyVectorIn(
+                gRow, gk_, KVOffset(b, hv, start + row, 0, K_), K_);
+            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+
+            for (uint64_t col = 0; col <= row; ++col) {
+                CopyVectorIn(
+                    kCol, k_, QOffset(b, h, start + col, 0), K_);
+                SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+                WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+                CopyVectorIn(
+                    gCol, gk_, KVOffset(b, hv, start + col, 0, K_), K_);
+                SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+                WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+
+                Sub(gate, gRow, gCol, static_cast<uint32_t>(K_));
+                PipeBarrier<PIPE_V>();
+                Muls(gate, gate, static_cast<T>(LN2),
+                     static_cast<uint32_t>(K_));
+                PipeBarrier<PIPE_V>();
+                ClampFp16ExpInput(gate, static_cast<uint32_t>(K_));
+                Exp(gate, gate, static_cast<uint32_t>(K_));
+                PipeBarrier<PIPE_V>();
+                Mul(kGated, kCol, gate, static_cast<uint32_t>(K_));
+                PipeBarrier<PIPE_V>();
+                Mul(product, rowVector, kGated, static_cast<uint32_t>(K_));
+                PipeBarrier<PIPE_V>();
+                Cast(productFp32, product, RoundMode::CAST_NONE,
+                     static_cast<uint32_t>(K_));
+                PipeBarrier<PIPE_V>();
+                ReduceDotProduct310P(
+                    scoreRow, col, productFp32, partials);
+            }
+
+            SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
+            WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
+            DataCopy(akk_[AOffset(b, hv, start + row, 0)], scoreRow,
+                     static_cast<uint32_t>(BT_));
+            SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+            WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+            SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+            WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+        }
+
+        for (uint64_t row = 0; row < curT; ++row) {
+            Duplicate(scoreRow, 0.0f, static_cast<uint32_t>(BT_));
+            PipeBarrier<PIPE_V>();
+
+            CopyVectorIn(
+                rowVector, q_, QOffset(b, h, start + row, 0), K_);
+            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            CopyVectorIn(
+                gRow, gk_, KVOffset(b, hv, start + row, 0, K_), K_);
+            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+
+            for (uint64_t col = 0; col <= row; ++col) {
+                CopyVectorIn(
+                    kCol, k_, QOffset(b, h, start + col, 0), K_);
+                SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+                WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+                CopyVectorIn(
+                    gCol, gk_, KVOffset(b, hv, start + col, 0, K_), K_);
+                SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+                WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+
+                Sub(gate, gRow, gCol, static_cast<uint32_t>(K_));
+                PipeBarrier<PIPE_V>();
+                Muls(gate, gate, static_cast<T>(LN2),
+                     static_cast<uint32_t>(K_));
+                PipeBarrier<PIPE_V>();
+                ClampFp16ExpInput(gate, static_cast<uint32_t>(K_));
+                Exp(gate, gate, static_cast<uint32_t>(K_));
+                PipeBarrier<PIPE_V>();
+                Mul(kGated, kCol, gate, static_cast<uint32_t>(K_));
+                PipeBarrier<PIPE_V>();
+                Mul(product, rowVector, kGated,
+                    static_cast<uint32_t>(K_));
+                PipeBarrier<PIPE_V>();
+                Cast(productFp32, product, RoundMode::CAST_NONE,
+                     static_cast<uint32_t>(K_));
+                PipeBarrier<PIPE_V>();
+                ReduceDotProduct310P(
+                    scoreRow, col, productFp32, partials);
+            }
+
+            SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
+            WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
+            DataCopy(aqk_[AOffset(b, hv, start + row, 0)], scoreRow,
+                     static_cast<uint32_t>(BT_));
+            SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+            WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+            SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+            WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+        }
+    }
+#endif
 
     __aicore__ inline bool UseAkkCubeSolve(uint64_t curT) const
     {
@@ -1223,6 +1664,62 @@ private:
             } else {
                 diag.SetValue(diagOffset, 1.0f);
             }
+        }
+        SetFlag<HardEvent::S_V>(EXP2_EVENT_ID);
+        WaitFlag<HardEvent::S_V>(EXP2_EVENT_ID);
+    }
+
+    __aicore__ inline void SolveUnitLower64OnVector(LocalTensor<float> matrix,
+                                                     LocalTensor<float> arena,
+                                                     uint64_t scratchBase,
+                                                     uint64_t valid)
+    {
+        constexpr uint32_t matrixSize = KDA_SOLVE_BT;
+        constexpr uint32_t matrixElements = matrixSize * matrixSize;
+        constexpr uint32_t brcbStride = 8;
+        constexpr uint32_t brcbElements = matrixSize * brcbStride;
+        constexpr uint8_t rowBlk = matrixSize * sizeof(float) / 32;
+
+        LocalTensor<float> row = arena[scratchBase];
+        LocalTensor<float> prod = row[matrixSize];
+        LocalTensor<float> rowBrcb = prod[matrixElements];
+        LocalTensor<float> reduced = rowBrcb[brcbElements];
+
+        // matrix starts as -L, where L is strictly lower triangular. Build
+        // the strict-lower part of (I + L)^-1 one row at a time, then add I.
+        for (uint64_t i = 2; i < valid; ++i) {
+            uint32_t rowOffset = static_cast<uint32_t>(i * matrixSize);
+            DataCopy(row, matrix[rowOffset], matrixSize);
+            PipeBarrier<PIPE_V>();
+
+            Brcb(rowBrcb, row, matrixSize / brcbStride, {1, 8});
+            PipeBarrier<PIPE_V>();
+            for (uint32_t col = 0; col < matrixSize; col += brcbStride) {
+                Mul(prod[col], matrix[col], rowBrcb, brcbStride,
+                    static_cast<uint8_t>(matrixSize),
+                    {1, 1, 0, rowBlk, rowBlk, 1});
+            }
+            PipeBarrier<PIPE_V>();
+
+            uint32_t remain = matrixSize;
+            while (remain > 1) {
+                uint32_t calcCount = (remain / 2) * matrixSize;
+                remain = (remain + 1) / 2;
+                Add(prod, prod, prod[remain * matrixSize], calcCount);
+                PipeBarrier<PIPE_V>();
+            }
+            DataCopy(reduced, prod, matrixSize);
+            PipeBarrier<PIPE_V>();
+            Add(row, row, reduced, matrixSize);
+            PipeBarrier<PIPE_V>();
+            DataCopy(matrix[rowOffset], row, matrixSize);
+            PipeBarrier<PIPE_V>();
+        }
+
+        SetFlag<HardEvent::V_S>(EXP2_EVENT_ID);
+        WaitFlag<HardEvent::V_S>(EXP2_EVENT_ID);
+        for (uint32_t i = 0; i < matrixSize; ++i) {
+            matrix.SetValue(i * matrixSize + i, 1.0f);
         }
         SetFlag<HardEvent::S_V>(EXP2_EVENT_ID);
         WaitFlag<HardEvent::S_V>(EXP2_EVENT_ID);
@@ -1464,7 +1961,8 @@ private:
 
     __aicore__ inline void PrepareAqkAkkSolveInputRows(uint64_t b, uint64_t hv, uint64_t chunkIdx,
                                                        uint64_t start, uint64_t curT, uint64_t rowBegin,
-                                                       uint64_t rowEnd, bool storeLToAkk, bool storeLToScratch)
+                                                       uint64_t rowEnd, bool storeLToAkk, bool storeLToScratch,
+                                                       bool solveFullOnVector = false)
     {
         uint64_t rowCount = rowEnd - rowBegin;
         if (rowCount == 0) {
@@ -1486,6 +1984,7 @@ private:
         LocalTensor<float> oneHotLocal = arena[3 * elemCount + BT_ + 512 + BT_];
 
         uint64_t token = start + rowBegin;
+        const bool vectorTail = solveFullOnVector && curT < BT_;
 
         if (validRowCount < rowCount) {
             FillLocalFloat(aqkMat, 0.0f, elemCount);
@@ -1495,27 +1994,58 @@ private:
         SetFlag<HardEvent::V_MTE2>(vToMte2Event_);
         WaitFlag<HardEvent::V_MTE2>(vToMte2Event_);
         if (validRowCount > 0) {
-            LoadAsFloatRow(beta_, BetaOffset(b, hv, token), betaLocal, validRowCount);
+            if (!vectorTail) {
+                LoadAsFloatRow(beta_, BetaOffset(b, hv, token), betaLocal, validRowCount);
+            }
             DataCopy(aqkMat, aqk_[AOffset(b, hv, token, 0)], static_cast<uint32_t>(validElemCount));
+            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
             DataCopy(akkMat, akk_[AOffset(b, hv, token, 0)], static_cast<uint32_t>(validElemCount));
             SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
             WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
         }
-        Brcb(betaBrcb, betaLocal, static_cast<uint8_t>((rowCount + 7) / 8), {1, 8});
-        PipeBarrier<PIPE_V>();
-        uint8_t rowStride = static_cast<uint8_t>(BT_ * sizeof(float) / 32);
-        for (uint64_t col = 0; col < BT_; col += 8) {
-            Mul(akkMat[col], akkMat[col], betaBrcb, 8, static_cast<uint8_t>(rowCount),
-                {1, 1, 0, rowStride, rowStride, 1});
-        }
-        PipeBarrier<PIPE_V>();
-        if (validRowCount > 0) {
-            SelectCausalRows(aqkMat, akkMat, rowBegin, validRowCount);
+        if (vectorTail) {
+            // The vector fallback already emits causal Aqk and lower-triangular
+            // Akk rows. Scale the valid Akk rows directly and clear their
+            // diagonal, avoiding the 310P dynamic-repeat select/broadcast path
+            // that can erase short tail matrices.
+            SetFlag<HardEvent::V_S>(EXP2_EVENT_ID);
+            WaitFlag<HardEvent::V_S>(EXP2_EVENT_ID);
+            for (uint64_t localRow = 0; localRow < validRowCount; ++localRow) {
+                const float betaScale = static_cast<float>(
+                    beta_.GetValue(BetaOffset(b, hv, token + localRow)));
+                Muls(akkMat[localRow * BT_], akkMat[localRow * BT_], betaScale,
+                     static_cast<uint32_t>(BT_));
+            }
+            PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::V_S>(EXP2_EVENT_ID);
+            WaitFlag<HardEvent::V_S>(EXP2_EVENT_ID);
+            for (uint64_t localRow = 0; localRow < validRowCount; ++localRow) {
+                const uint64_t row = rowBegin + localRow;
+                akkMat.SetValue(localRow * BT_ + row, 0.0f);
+            }
+            SetFlag<HardEvent::S_V>(EXP2_EVENT_ID);
+            WaitFlag<HardEvent::S_V>(EXP2_EVENT_ID);
+        } else {
+            Brcb(betaBrcb, betaLocal, static_cast<uint8_t>((rowCount + 7) / 8), {1, 8});
+            PipeBarrier<PIPE_V>();
+            uint8_t rowStride = static_cast<uint8_t>(BT_ * sizeof(float) / 32);
+            for (uint64_t col = 0; col < BT_; col += 8) {
+                Mul(akkMat[col], akkMat[col], betaBrcb, 8, static_cast<uint8_t>(rowCount),
+                    {1, 1, 0, rowStride, rowStride, 1});
+            }
+            PipeBarrier<PIPE_V>();
+            if (validRowCount > 0) {
+                SelectCausalRows(aqkMat, akkMat, rowBegin, validRowCount);
+            }
         }
 
         Muls(xMat, akkMat, -1.0f, static_cast<uint32_t>(elemCount));
         PipeBarrier<PIPE_V>();
-        if constexpr (SAFE_GATE) {
+        if (solveFullOnVector) {
+            uint64_t scratchBase = 3 * elemCount + BT_ + 512 + 2 * BT_;
+            SolveUnitLower64OnVector(xMat, arena, scratchBase, curT);
+        } else if constexpr (SAFE_GATE) {
             uint64_t scratchBase = 3 * elemCount + BT_ + 512 + 2 * BT_;
             SolveDiagonalBlocksInRows(akkMat, xMat, arena, scratchBase, curT, rowBegin, rowCount);
         } else {
@@ -1532,6 +2062,14 @@ private:
 
         uint64_t xBase = SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_X) + rowBegin * BT_;
         uint64_t lBase = SolveScratchOffset(b, hv, chunkIdx, KDA_SOLVE_SCRATCH_Y0) + rowBegin * BT_;
+        if (validRowCount > 0 && solveFullOnVector) {
+            // The explicit 310P score plane is consumed by the host-side
+            // FP32-to-FP16 cast. Apply the attention scale before the plane
+            // crosses that launch boundary.
+            Muls(aqkMat, aqkMat, scale_,
+                 static_cast<uint32_t>(validElemCount));
+            PipeBarrier<PIPE_V>();
+        }
         SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
         WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
         if (validRowCount > 0) {
@@ -1867,6 +2405,75 @@ private:
 
 
 
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+    __aicore__ inline void ScaleTailRowsByBeta310P(
+        GlobalTensor<T> &src, GlobalTensor<T> &dst, uint64_t b,
+        uint64_t hv, uint64_t start, uint64_t rowBegin,
+        uint64_t rowCount, uint64_t dim, LocalTensor<T> &rowLocal,
+        bool sourceSequenceMajor = false)
+    {
+        (void)rowLocal;
+        for (uint64_t localRow = 0; localRow < rowCount; ++localRow) {
+            uint64_t token = start + rowBegin + localRow;
+            uint64_t dstOffset = KVOffset(b, hv, token, 0, dim);
+            uint64_t srcOffset = sourceSequenceMajor
+                ? VInputOffset(b, hv, token, 0)
+                : dstOffset;
+            // Keep this path scalar on dav-m200: mixing scalar GM reads with
+            // the vector row copy corrupts fixed UB lanes on short chunks.
+            const float betaScale = static_cast<float>(beta_.GetValue(
+                BetaOffset(b, hv, token)));
+            for (uint64_t col = 0; col < dim; ++col) {
+                const float value =
+                    static_cast<float>(src.GetValue(srcOffset + col));
+                dst.SetValue(dstOffset + col,
+                             FloatToType<T>(value * betaScale));
+            }
+        }
+    }
+
+    __aicore__ inline void ScaleRowsByBeta310P(
+        GlobalTensor<T> &src, GlobalTensor<T> &dst, uint64_t b,
+        uint64_t hv, uint64_t start, uint64_t rowBegin,
+        uint64_t rowCount, uint64_t dim, LocalTensor<T> &betaBrcb,
+        LocalTensor<T> &matrixLocal, bool sourceSequenceMajor = false)
+    {
+        constexpr uint64_t vecElemsPerRepeat = 128;
+        uint64_t elemCount = rowCount * dim;
+        uint64_t baseOffset = KVOffset(
+            b, hv, start + rowBegin, 0, dim);
+        uint64_t sourceOffset = sourceSequenceMajor
+            ? VInputOffset(b, hv, start + rowBegin, 0)
+            : baseOffset;
+        uint64_t sourceStride = sourceSequenceMajor ? HV_ * dim : dim;
+        CopyRowsIn(matrixLocal, src, sourceOffset, rowCount, dim,
+                   sourceStride);
+        SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+        WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+
+        uint8_t repeatStride =
+            static_cast<uint8_t>(dim * sizeof(T) / 32);
+        for (uint64_t col = 0; col < dim; col += vecElemsPerRepeat) {
+            uint64_t mask = dim - col;
+            if (mask > vecElemsPerRepeat) {
+                mask = vecElemsPerRepeat;
+            }
+            Mul(matrixLocal[col], matrixLocal[col], betaBrcb, mask,
+                static_cast<uint8_t>(rowCount),
+                {1, 1, 0, repeatStride, repeatStride, 1});
+        }
+        PipeBarrier<PIPE_V>();
+        SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
+        WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
+        DataCopy(dst[baseOffset], matrixLocal,
+                 static_cast<uint32_t>(elemCount));
+        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+        WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Events_[0]);
+        SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+        WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+    }
+#endif
+
     __aicore__ inline void ScaleRowsByBeta(GlobalTensor<T> &src, GlobalTensor<T> &dst, uint64_t b, uint64_t hv,
                                            uint64_t start, uint64_t rowBegin, uint64_t rowCount, uint64_t dim,
                                            LocalTensor<float> &betaLocal, LocalTensor<float> &betaBrcb,
@@ -1936,6 +2543,49 @@ private:
         if (rowCount > rowsPerSubBlock) {
             rowCount = rowsPerSubBlock;
         }
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        LocalTensor<T> typedArena = vecBuf_.Get<T>();
+        if constexpr (!IsSameType<BETA_T, T>::value) {
+            // The public 310P contract keeps beta in FP32. Read one scalar
+            // for each naturally aligned K/V row instead of routing it
+            // through the short, unaligned FP16 beta temporary.
+            ScaleTailRowsByBeta310P(
+                w_, w_, b, hv, start, rowBegin, rowCount, K_, typedArena);
+            ScaleTailRowsByBeta310P(
+                v_, vNew_, b, hv, start, rowBegin, rowCount, V_, typedArena,
+                inputSequenceMajor_);
+            return;
+        } else {
+            if (curT < BT_) {
+                ScaleTailRowsByBeta310P(
+                    w_, w_, b, hv, start, rowBegin, rowCount, K_, typedArena);
+                ScaleTailRowsByBeta310P(
+                    v_, vNew_, b, hv, start, rowBegin, rowCount, V_, typedArena,
+                    inputSequenceMajor_);
+                return;
+            }
+            LocalTensor<T> betaLocal = typedArena;
+            constexpr uint64_t betaLocalElements = KDA_SOLVE_BT;
+            LocalTensor<T> betaBrcb = typedArena[betaLocalElements];
+            constexpr uint64_t betaBroadcastElements =
+                KDA_SOLVE_BT * KDA_FP16_VALUES_PER_BLOCK;
+            LocalTensor<T> matrixLocal =
+                typedArena[betaLocalElements + betaBroadcastElements];
+            CopyVectorIn(betaLocal, beta_,
+                         BetaOffset(b, hv, start + rowBegin), rowCount);
+            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            Brcb(betaBrcb, betaLocal,
+                 static_cast<uint8_t>((rowCount + 7) / 8), {1, 8});
+            PipeBarrier<PIPE_V>();
+            ScaleRowsByBeta310P(
+                w_, w_, b, hv, start, rowBegin, rowCount, K_, betaBrcb,
+                matrixLocal);
+            ScaleRowsByBeta310P(
+                v_, vNew_, b, hv, start, rowBegin, rowCount, V_, betaBrcb,
+                matrixLocal, inputSequenceMajor_);
+        }
+#else
         LocalTensor<float> arena = vecBuf_.Get<float>();
         LocalTensor<float> betaLocal = arena;
         LocalTensor<float> betaBrcb = arena[KDA_SOLVE_BT];
@@ -1946,13 +2596,13 @@ private:
         ScaleRowsByBeta(w_, w_, b, hv, start, rowBegin, rowCount, K_, betaLocal, betaBrcb, matrixLocal);
         ScaleRowsByBeta(v_, vNew_, b, hv, start, rowBegin, rowCount, V_, betaLocal, betaBrcb,
                         matrixLocal, inputSequenceMajor_);
+#endif
     }
 
     __aicore__ inline void FinalizePrepareIntermediates(uint64_t b, uint64_t hv, uint64_t start,
                                                         uint64_t curT, uint64_t subBlockIdx,
                                                         uint64_t subBlockNum)
     {
-        constexpr uint64_t tileRows = 32;
         // Keep tail rows on the same AIV that owns their padded solve rows. Splitting by curT would
         // move short-tail export to AIV1 while AIV0 is still writing the solved matrix.
         const uint64_t rowBegin = (BT_ * subBlockIdx) / subBlockNum;
@@ -1963,6 +2613,33 @@ private:
         if (rowBegin >= rowEnd) {
             return;
         }
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        // dav-m200 can miscompile the three adjacent mixed-type writeback
+        // views below as raw FP32 copies. Export one row at a time through
+        // the small conversion buffer so each MTE2 -> vector -> MTE3 chain is
+        // complete before that buffer is reused.
+        LocalTensor<float> rowLocal = exp2Buf_.Get<float>();
+        for (uint64_t row = rowBegin; row < rowEnd; ++row) {
+            const uint64_t matrixOffset = AOffset(b, hv, start + row, 0);
+            LoadAsFloatRow(aqk_, matrixOffset, rowLocal, BT_);
+            Muls(rowLocal, rowLocal, scale_, static_cast<uint32_t>(BT_));
+            PipeBarrier<PIPE_V>();
+            ClampFp32ToOutputType(rowLocal, static_cast<uint32_t>(BT_));
+            StoreFloatRow(o_, matrixOffset, rowLocal, BT_);
+
+            LoadAsFloatRow(akk_, matrixOffset, rowLocal, BT_);
+            ClampFp32ToOutputType(rowLocal, static_cast<uint32_t>(BT_));
+            StoreFloatRow(u_, matrixOffset, rowLocal, BT_);
+
+            const uint64_t qgOffset = KVOffset(b, hv, start + row, 0, K_);
+            LoadAsFloatRow(qg_, qgOffset, rowLocal, K_);
+            Muls(rowLocal, rowLocal, scale_, static_cast<uint32_t>(K_));
+            PipeBarrier<PIPE_V>();
+            ClampFp32ToOutputType(rowLocal, static_cast<uint32_t>(K_));
+            StoreFloatRow(kg_, qgOffset, rowLocal, K_);
+        }
+#else
+        constexpr uint64_t tileRows = KDA_FINALIZE_TILE_ROWS;
         for (uint64_t tileRow = rowBegin; tileRow < rowEnd; tileRow += tileRows) {
             const uint64_t rows = (rowEnd - tileRow) > tileRows ? tileRows : (rowEnd - tileRow);
             const uint64_t matrixElems = rows * BT_;
@@ -2007,6 +2684,7 @@ private:
             SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
             WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
         }
+#endif
     }
 
     __aicore__ inline bool ResolveFlatChunk(uint64_t task, uint64_t &seq, uint64_t &b, uint64_t &h, uint64_t &hv,
@@ -2416,6 +3094,178 @@ private:
         }
     }
 
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+    __aicore__ inline uint64_t ScoreBlocksPerTask() const
+    {
+        return (BT_ + ScoreRefBlockSize() - 1) / ScoreRefBlockSize();
+    }
+
+    __aicore__ inline void PrepareScoreInputs310P(
+        uint64_t b, uint64_t h, uint64_t hv, uint64_t start,
+        uint64_t end, uint64_t scoreSlotBase)
+    {
+        uint64_t curT = end - start;
+        if (curT == 0 || K_ < 16) {
+            return;
+        }
+        if constexpr (!SAFE_GATE) {
+            uint64_t scoreBlockSize = ScoreRefBlockSize();
+            uint64_t scoreBlockCount =
+                (curT + scoreBlockSize - 1) / scoreBlockSize;
+            for (uint64_t block = 0; block < scoreBlockCount; ++block) {
+                uint64_t rowBegin = block * scoreBlockSize;
+                uint64_t rowCount = ScoreRowBlockCount(curT, rowBegin);
+                uint64_t refToken =
+                    ScoreRefToken(start, curT, rowBegin, rowCount);
+                PrepareGateProducts(
+                    b, h, hv, start, curT, 0, 1, true, refToken,
+                    rowBegin + rowCount, true, scoreSlotBase + block,
+                    rowBegin, rowCount);
+            }
+        }
+        PrepareGateProducts(b, h, hv, start, curT, 0, 1);
+    }
+
+    __aicore__ inline void ComputeScores310P(
+        uint64_t b, uint64_t hv, uint64_t start, uint64_t end,
+        uint64_t scoreSlotBase)
+    {
+        uint64_t curT = end - start;
+        if (curT == 0 || curT < BT_ || K_ < 16 || SAFE_GATE) {
+            return;
+        }
+        uint64_t scoreBlockSize = ScoreRefBlockSize();
+        uint64_t scoreBlockCount =
+            (curT + scoreBlockSize - 1) / scoreBlockSize;
+        for (uint64_t block = 0; block < scoreBlockCount; ++block) {
+            uint64_t rowBegin = block * scoreBlockSize;
+            uint64_t rowCount = ScoreRowBlockCount(curT, rowBegin);
+            ComputeRawAqkAkkCubeBlock(
+                b, hv, start, curT, rowBegin, rowCount, true,
+                scoreSlotBase + block, rowBegin + rowCount);
+        }
+    }
+
+    __aicore__ inline void FinalizeScores310P(
+        uint64_t b, uint64_t h, uint64_t hv, uint64_t chunkIdx,
+        uint64_t start, uint64_t end)
+    {
+        uint64_t curT = end - start;
+        if (curT == 0 || K_ < 16) {
+            return;
+        }
+        if (curT < BT_ || SAFE_GATE) {
+            ComputeRawAqkAkkVector310P(
+                b, h, hv, start, curT);
+        }
+        // dav-m200 cannot run the FP32 merge on Cube. Mask the scores and
+        // solve (I + beta * Akk)^-1 on the vector pipeline before exporting
+        // the FP16 intermediates consumed by PostWU.
+        PrepareAqkAkkSolveInputRows(
+            b, hv, chunkIdx, start, curT, 0, BT_, false, false, true);
+        StoreSolveXRowsToAkk(b, hv, chunkIdx, start, curT, 0, BT_);
+    }
+
+    __aicore__ inline void ProcessPreAivScorePrepare310P()
+    {
+        uint64_t coreNum = usedCoreNum_ == 0 ? 1 : usedCoreNum_;
+        uint64_t coreIdx = KdaForward::GetPhysicalBlockIdx() % coreNum;
+        uint64_t taskNum =
+            static_cast<uint64_t>((isVarLen_ ? NT_ : B_ * NT_) * HV_);
+        uint64_t slotsPerTask = ScoreBlocksPerTask();
+        for (uint64_t task = coreIdx; task < taskNum;
+             task += coreNum) {
+            uint64_t seq = 0;
+            uint64_t b = 0;
+            uint64_t h = 0;
+            uint64_t hv = 0;
+            uint64_t chunkIdx = 0;
+            uint64_t start = 0;
+            uint64_t end = 0;
+            if (ResolveFlatChunk(
+                    task, seq, b, h, hv, chunkIdx, start, end)) {
+                (void)seq;
+                (void)chunkIdx;
+                PrepareScoreInputs310P(
+                    b, h, hv, start, end, task * slotsPerTask);
+            }
+        }
+    }
+
+    __aicore__ inline void ProcessPreAicScores310P()
+    {
+        uint64_t coreNum = usedCoreNum_ == 0 ? 1 : usedCoreNum_;
+        uint64_t taskNum =
+            static_cast<uint64_t>((isVarLen_ ? NT_ : B_ * NT_) * HV_);
+        uint64_t slotsPerTask = ScoreBlocksPerTask();
+        for (uint64_t task = KdaForward::GetPhysicalBlockIdx();
+             task < taskNum; task += coreNum) {
+            uint64_t seq = 0;
+            uint64_t b = 0;
+            uint64_t h = 0;
+            uint64_t hv = 0;
+            uint64_t chunkIdx = 0;
+            uint64_t start = 0;
+            uint64_t end = 0;
+            if (ResolveFlatChunk(
+                    task, seq, b, h, hv, chunkIdx, start, end)) {
+                (void)seq;
+                (void)h;
+                (void)chunkIdx;
+                ComputeScores310P(
+                    b, hv, start, end, task * slotsPerTask);
+            }
+        }
+    }
+
+    __aicore__ inline void ProcessPreAivScoreFinalize310P()
+    {
+        uint64_t coreNum = usedCoreNum_ == 0 ? 1 : usedCoreNum_;
+        uint64_t coreIdx = KdaForward::GetPhysicalBlockIdx() % coreNum;
+        uint64_t taskNum =
+            static_cast<uint64_t>((isVarLen_ ? NT_ : B_ * NT_) * HV_);
+        for (uint64_t task = coreIdx; task < taskNum; task += coreNum) {
+            uint64_t seq = 0;
+            uint64_t b = 0;
+            uint64_t h = 0;
+            uint64_t hv = 0;
+            uint64_t chunkIdx = 0;
+            uint64_t start = 0;
+            uint64_t end = 0;
+            if (ResolveFlatChunk(
+                    task, seq, b, h, hv, chunkIdx, start, end)) {
+                (void)seq;
+                FinalizeScores310P(
+                    b, h, hv, chunkIdx, start, end);
+            }
+        }
+    }
+
+    __aicore__ inline void ProcessPreAivWuScale310P()
+    {
+        uint64_t coreNum = usedCoreNum_ == 0 ? 1 : usedCoreNum_;
+        uint64_t coreIdx = KdaForward::GetPhysicalBlockIdx() % coreNum;
+        uint64_t taskNum =
+            static_cast<uint64_t>((isVarLen_ ? NT_ : B_ * NT_) * HV_);
+        for (uint64_t task = coreIdx; task < taskNum; task += coreNum) {
+            uint64_t seq = 0;
+            uint64_t b = 0;
+            uint64_t h = 0;
+            uint64_t hv = 0;
+            uint64_t chunkIdx = 0;
+            uint64_t start = 0;
+            uint64_t end = 0;
+            if (ResolveFlatChunk(
+                    task, seq, b, h, hv, chunkIdx, start, end)) {
+                (void)seq;
+                (void)h;
+                (void)chunkIdx;
+                PrepareWuCubeInputs(b, hv, start, end - start, 0, 1);
+            }
+        }
+    }
+#endif
+
     __aicore__ inline void ProcessPreAiv()
     {
         if constexpr (IsSameType<T, float>::value) {
@@ -2426,8 +3276,10 @@ private:
             return;
         }
         uint64_t subBlockIdx = isAivOnly_ ? 0 : static_cast<uint64_t>(GetSubBlockIdx());
-        uint64_t coreNum = isAivOnly_ ? static_cast<uint64_t>(GetBlockNum()) : usedCoreNum_;
-        uint64_t coreIdx = KdaForward::GetPhysicalBlockIdx() / subBlockNum;
+        uint64_t coreNum = usedCoreNum_ == 0 ? 1 : usedCoreNum_;
+        uint64_t coreIdx = isAivOnly_
+            ? KdaForward::GetPhysicalBlockIdx() % coreNum
+            : KdaForward::GetPhysicalBlockIdx() / subBlockNum;
         uint64_t taskNum = static_cast<uint64_t>((isVarLen_ ? NT_ : B_ * NT_) * HV_);
         if constexpr (SAFE_GATE && !IsSameType<T, float>::value) {
             bool pendingValid = false;
@@ -2591,6 +3443,7 @@ private:
     bool inputSequenceMajor_ = false;
     bool isAivOnly_ = false;
     uint64_t usedCoreNum_ = 1;
+    uint64_t scoreScratchSlotsPerCore_ = KDA_SCORE_SCRATCH_SLOTS;
     uint64_t solveCoreIdx_ = 0;
     uint64_t activeSolveSlot_ = 0;
     __gm__ int64_t *chunkIndicesAddr_ = nullptr;
@@ -2610,8 +3463,7 @@ __aicore__ inline void RunChunkKdaPrepare(
     GM_ADDR prepareScratch = userWorkspace + tiling.prepareScratchOffset;
 
 #if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
-    // CANN compiles MIX_AICORE into separate cube/vector objects, while both
-    // report g_coreType == MIX. Select the object with CANN's marker.
+    // dav-m200 exposes both pipelines in the unified mixed image.
     if constexpr (KdaForward::CompilesCubePipeline()) {
 #else
     if ASCEND_IS_AIC {
@@ -2634,6 +3486,104 @@ __aicore__ inline void RunChunkKdaPrepare(
         op.ProcessAiv();
     }
 }
+
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+template <bool SAFE_GATE, typename T, typename GK_T, typename BETA_T,
+          typename TilingData>
+__aicore__ inline void RunChunkKdaPrepareScoreInputs310P(
+    GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR gk, GM_ADDR beta,
+    GM_ADDR initialState, GM_ADDR cuSeqlens, GM_ADDR chunkIndices,
+    GM_ADDR aqk, GM_ADDR akk, GM_ADDR qg, GM_ADDR qgScaled,
+    GM_ADDR wSeed, GM_ADDR uSeed, GM_ADDR scoreScratch,
+    GM_ADDR scoreMatrices, GM_ADDR userWorkspace,
+    const TilingData &tiling, TPipe &pipe)
+{
+    const uint64_t matrixBytes = static_cast<uint64_t>(tiling.batch) *
+        tiling.vHeadNum * tiling.seqlen * tiling.chunkSize * sizeof(float);
+    GM_ADDR aqkFp32 = scoreMatrices;
+    GM_ADDR akkFp32 = scoreMatrices + matrixBytes;
+    GM_ADDR prepareScratch = userWorkspace + tiling.prepareScratchOffset;
+    ChunkKdaFwdPrepareKernel<SAFE_GATE, T, GK_T, BETA_T> op;
+    op.Init(q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices,
+            nullptr, nullptr, nullptr, nullptr, aqk, userWorkspace,
+            aqkFp32, akkFp32, wSeed, akk, qg, qgScaled, uSeed,
+            userWorkspace, prepareScratch, tiling, &pipe, true,
+            scoreScratch);
+    op.ProcessAivScorePrepare();
+}
+
+template <bool SAFE_GATE, typename T, typename GK_T, typename BETA_T,
+          typename TilingData>
+__aicore__ inline void RunChunkKdaPrepareScores310P(
+    GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR gk, GM_ADDR beta,
+    GM_ADDR initialState, GM_ADDR cuSeqlens, GM_ADDR chunkIndices,
+    GM_ADDR aqk, GM_ADDR akk, GM_ADDR qg, GM_ADDR qgScaled,
+    GM_ADDR wSeed, GM_ADDR uSeed, GM_ADDR scoreScratch,
+    GM_ADDR scoreMatrices, GM_ADDR userWorkspace,
+    const TilingData &tiling, TPipe &pipe)
+{
+    const uint64_t matrixBytes = static_cast<uint64_t>(tiling.batch) *
+        tiling.vHeadNum * tiling.seqlen * tiling.chunkSize * sizeof(float);
+    GM_ADDR aqkFp32 = scoreMatrices;
+    GM_ADDR akkFp32 = scoreMatrices + matrixBytes;
+    GM_ADDR prepareScratch = userWorkspace + tiling.prepareScratchOffset;
+    ChunkKdaFwdPrepareKernel<SAFE_GATE, T, GK_T, BETA_T> op;
+    op.Init(q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices,
+            nullptr, nullptr, nullptr, nullptr, aqk, userWorkspace,
+            aqkFp32, akkFp32, wSeed, akk, qg, qgScaled, uSeed,
+            userWorkspace, prepareScratch, tiling, &pipe, false,
+            scoreScratch);
+    op.ProcessAicScores();
+}
+
+template <bool SAFE_GATE, typename T, typename GK_T, typename BETA_T,
+          typename TilingData>
+__aicore__ inline void RunChunkKdaPrepareScoreFinalize310P(
+    GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR gk, GM_ADDR beta,
+    GM_ADDR initialState, GM_ADDR cuSeqlens, GM_ADDR chunkIndices,
+    GM_ADDR aqk, GM_ADDR akk, GM_ADDR qg, GM_ADDR qgScaled,
+    GM_ADDR wSeed, GM_ADDR uSeed, GM_ADDR scoreScratch,
+    GM_ADDR scoreMatrices, GM_ADDR userWorkspace,
+    const TilingData &tiling, TPipe &pipe)
+{
+    const uint64_t matrixBytes = static_cast<uint64_t>(tiling.batch) *
+        tiling.vHeadNum * tiling.seqlen * tiling.chunkSize * sizeof(float);
+    GM_ADDR aqkFp32 = scoreMatrices;
+    GM_ADDR akkFp32 = scoreMatrices + matrixBytes;
+    GM_ADDR prepareScratch = userWorkspace + tiling.prepareScratchOffset;
+    ChunkKdaFwdPrepareKernel<SAFE_GATE, T, GK_T, BETA_T> op;
+    op.Init(q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices,
+            nullptr, nullptr, nullptr, nullptr, aqk, userWorkspace,
+            aqkFp32, akkFp32, wSeed, akk, qg, qgScaled, uSeed,
+            userWorkspace, prepareScratch, tiling, &pipe, true,
+            scoreScratch);
+    op.ProcessAivScoreFinalize();
+}
+
+template <bool SAFE_GATE, typename T, typename GK_T, typename BETA_T,
+          typename TilingData>
+__aicore__ inline void RunChunkKdaPrepareWuScale310P(
+    GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR gk, GM_ADDR beta,
+    GM_ADDR initialState, GM_ADDR cuSeqlens, GM_ADDR chunkIndices,
+    GM_ADDR aqk, GM_ADDR akk, GM_ADDR qg, GM_ADDR qgScaled,
+    GM_ADDR wSeed, GM_ADDR uSeed, GM_ADDR scoreScratch,
+    GM_ADDR scoreMatrices, GM_ADDR userWorkspace,
+    const TilingData &tiling, TPipe &pipe)
+{
+    const uint64_t matrixBytes = static_cast<uint64_t>(tiling.batch) *
+        tiling.vHeadNum * tiling.seqlen * tiling.chunkSize * sizeof(float);
+    GM_ADDR aqkFp32 = scoreMatrices;
+    GM_ADDR akkFp32 = scoreMatrices + matrixBytes;
+    GM_ADDR prepareScratch = userWorkspace + tiling.prepareScratchOffset;
+    ChunkKdaFwdPrepareKernel<SAFE_GATE, T, GK_T, BETA_T> op;
+    op.Init(q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices,
+            nullptr, nullptr, nullptr, nullptr, aqk, userWorkspace,
+            aqkFp32, akkFp32, wSeed, akk, qg, qgScaled, uSeed,
+            userWorkspace, prepareScratch, tiling, &pipe, true,
+            scoreScratch);
+    op.ProcessAivWuScale();
+}
+#endif
 
 template <bool SAFE_GATE, typename T, typename GK_T, typename BETA_T,
           typename TilingData, uint32_t COMPILE_BT, uint32_t COMPILE_K,

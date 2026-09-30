@@ -71,7 +71,7 @@ public:
     using VecScheduler = typename Catlass::Gemm::Block::BlockSchedulerGdnFwdHVec;
 
     using DispatchPolicyTla = Gemm::MmadPingpongTlaMulti<ArchTag, true, false>;
-    using L1TileShapeTla = Shape<_128, _128, _128>;
+    using L1TileShapeTla = tla::Shape<_128, _128, _128>;
     using L0TileShapeTla = L1TileShapeTla;
 
     using WType = Gemm::GemmType<INPUT_TYPE, layout::RowMajor>;
@@ -137,6 +137,7 @@ public:
     uint32_t hWorkspaceOffset;
     uint32_t numSeqWorkspaceOffset;
     uint32_t numChunksWorkspaceOffset;
+    bool useKdaGatedPath{false};
     
     AscendC::GlobalTensor<ElementK> gmK;
     AscendC::GlobalTensor<ElementW> gmW;
@@ -164,6 +165,7 @@ public:
 
     __aicore__ inline void Init(GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR inital_state, GM_ADDR cu_seqlens, GM_ADDR chunk_indices, 
         GM_ADDR h, GM_ADDR v_new, GM_ADDR final_state, GM_ADDR tiling, GM_ADDR user) {
+        useKdaGatedPath = false;
         
         __gm__ ChunkGatedDeltaRuleFwdHTilingData *__restrict gdnFwdHTilingData = reinterpret_cast<__gm__ ChunkGatedDeltaRuleFwdHTilingData *__restrict>(tiling);
 
@@ -204,6 +206,53 @@ public:
         gmNumChunks.SetGlobalBuffer((__gm__ int64_t *)(user + numChunksWorkspaceOffset));
 
         cubeBlockScheduler.Init(cu_seqlens, chunk_indices, tiling, user);
+    }
+
+    template <typename TilingData>
+    __aicore__ inline void InitFromData(
+        GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk,
+        GM_ADDR inital_state, GM_ADDR cu_seqlens, GM_ADDR chunk_indices,
+        GM_ADDR h, GM_ADDR v_new, GM_ADDR final_state,
+        const TilingData &tilingData, GM_ADDR user) {
+        (void)gk;
+        useKdaGatedPath = true;
+        batch = tilingData.batch;
+        seqlen = tilingData.seqlen;
+        kNumHead = tilingData.kNumHead;
+        vNumHead = tilingData.vNumHead;
+        kHeadDim = tilingData.kHeadDim;
+        vHeadDim = tilingData.vHeadDim;
+        chunkSize = tilingData.chunkSize;
+        initalStateStride0 = tilingData.vHeadDim;
+        useInitialState = tilingData.useInitialState;
+        storeFinalState = tilingData.storeFinalState;
+        isVariedLen = tilingData.isVariedLen;
+        shapeBatch = tilingData.shapeBatch;
+        tokenBatch = tilingData.tokenBatch;
+        vWorkspaceOffset = tilingData.vWorkspaceOffset;
+        vUpdateWorkspaceOffset = tilingData.vUpdateWorkspaceOffset;
+        hWorkspaceOffset = tilingData.hWorkspaceOffset;
+        numSeqWorkspaceOffset = tilingData.numSeqWorkspaceOffset;
+        numChunksWorkspaceOffset = tilingData.numChunksWorkspaceOffset;
+
+        gmK.SetGlobalBuffer((__gm__ ElementK *)k);
+        gmW.SetGlobalBuffer((__gm__ ElementW *)w);
+        gmU.SetGlobalBuffer((__gm__ ElementU *)u);
+        gmG.SetGlobalBuffer((__gm__ ElementG *)g);
+        gmInitialState.SetGlobalBuffer((__gm__ ElementInitialState *)inital_state);
+        gmH.SetGlobalBuffer((__gm__ ElementH *)h);
+        gmV.SetGlobalBuffer((__gm__ ElementV *)v_new);
+        gmFinalState.SetGlobalBuffer((__gm__ ElementFinalState *)final_state);
+        gmVWorkspace.SetGlobalBuffer((__gm__ ElementVWork *)(user + vWorkspaceOffset));
+        gmVUpdateWorkspace.SetGlobalBuffer((__gm__ ElementV *)(user + vUpdateWorkspaceOffset));
+        gmHWorkspace.SetGlobalBuffer((__gm__ ElementHWork *)(user + hWorkspaceOffset));
+        gmSeqlen.SetGlobalBuffer((__gm__ int64_t *)cu_seqlens);
+        gmNumSeq.SetGlobalBuffer((__gm__ int64_t *)(user + numSeqWorkspaceOffset));
+        gmNumChunks.SetGlobalBuffer((__gm__ int64_t *)(user + numChunksWorkspaceOffset));
+
+        cubeBlockScheduler.InitFromData(
+            cu_seqlens, chunk_indices, tilingData, user,
+            static_cast<uint32_t>(block_idx), AscendC::GetBlockNum());
     }
     
     __aicore__ inline void Process() {
@@ -291,7 +340,8 @@ public:
                 epilogueGDNFwdHVnew(
                     gmV[stage1Offsets.uvOffset], gmVUpdateWorkspace[stage1Offsets.vWorkOffset],
                     gmG[stage1Offsets.gOffset], gmU[stage1Offsets.uvOffset], gmVWorkspace[stage1Offsets.vWorkOffset],
-                    stage1Offsets.blockTokens, kHeadDim, vHeadDim, cubeBlockScheduler.cube1Done
+                    stage1Offsets.blockTokens, kHeadDim, vHeadDim,
+                    cubeBlockScheduler.cube1Done, useKdaGatedPath
                 );
             }
 
@@ -325,10 +375,14 @@ public:
                     EpilogueGDNFwdHUpdate epilogueGDNFwdHUpdate(resource);
                     epilogueGDNFwdHUpdate(
                         gmH[stage2Offsets.hDstOffset], gmFinalState[stage2Offsets.finalStateOffset],
-                        gmG[stage2Offsets.gOffset], gmH[stage2Offsets.hSrcOffset],
+                        gmG[useKdaGatedPath
+                                ? stage2Offsets.gOffset * kHeadDim
+                                : stage2Offsets.gOffset],
+                        gmH[stage2Offsets.hSrcOffset],
                         gmHWorkspace[stage2Offsets.hWorkOffset],
                         stage2Offsets.blockTokens, kHeadDim, vHeadDim, cubeBlockScheduler.cube2Done,
-                        (stage2Offsets.isFinalState && storeFinalState)
+                        (stage2Offsets.isFinalState && storeFinalState),
+                        useKdaGatedPath
                     );
                 }
             }
@@ -477,7 +531,8 @@ public:
                     epilogueGDNFwdHVnew(
                         gmV[vec1Offsets.uvOffset], gmVUpdateWorkspace[vec1Offsets.vWorkOffset],
                         gmG[vec1Offsets.gOffset], gmU[vec1Offsets.uvOffset], gmVWorkspace[vec1Offsets.vWorkOffset],
-                        vec1Offsets.blockTokens, kHeadDim, vHeadDim, vecBlockScheduler.cube1Done
+                        vec1Offsets.blockTokens, kHeadDim, vHeadDim,
+                        vecBlockScheduler.cube1Done, useKdaGatedPath
                     );
                 } else {
                     Arch::CrossCoreWaitFlag(vecBlockScheduler.cube1Done);
@@ -491,11 +546,14 @@ public:
                         EpilogueGDNFwdHUpdate epilogueGDNFwdHUpdate(resource);
                         epilogueGDNFwdHUpdate(
                             gmH[vec2Offsets.hDstOffset], gmFinalState[vec2Offsets.finalStateOffset],
-                            gmG[vec2Offsets.gOffset],
+                            gmG[useKdaGatedPath
+                                    ? vec2Offsets.gOffset * kHeadDim
+                                    : vec2Offsets.gOffset],
                             gmH[vec2Offsets.hSrcOffset],
                             gmHWorkspace[vec2Offsets.hWorkOffset],
                             vec2Offsets.blockTokens, kHeadDim, vHeadDim, vecBlockScheduler.cube2Done,
-                            (vec2Offsets.isFinalState && storeFinalState)
+                            (vec2Offsets.isFinalState && storeFinalState),
+                            useKdaGatedPath
                         );
                     } else {
                         Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done);

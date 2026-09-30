@@ -36,12 +36,17 @@ constexpr size_t ATTR_USE_GATE_IDX = 5;
 constexpr size_t ATTR_STAGE_IDX = 7;
 constexpr int64_t KDA_STAGE_FULL = -1;
 constexpr int64_t KDA_STAGE_FINALIZE = 3;
+constexpr int64_t KDA_STAGE_POST_WU_FINALIZE = 4;
+constexpr int64_t KDA_STAGE_FINALIZE_WRITEBACK = 5;
+constexpr int64_t KDA_STAGE_PREPARE_VECTOR_FINALIZE = 7;
+constexpr int64_t KDA_STAGE_PREPARE_WU_SCALE = 8;
 
 constexpr uint64_t KDA_ALIGN = 512;
 constexpr uint64_t KDA_SOLVE_SCRATCH_SLOTS = 5;
 constexpr uint64_t KDA_SOLVE_PIPELINE_DEPTH = 4;
 constexpr uint64_t KDA_SCORE_QUEUE_SLOTS = 4;
 constexpr uint64_t KDA_SCORE_SCRATCH_PLANES = 3;
+constexpr uint64_t KDA_SCORE_REF_BLOCK_SIZE = 32;
 constexpr uint64_t KDA_GDN_PIPELINE_DEPTH = 2;
 constexpr uint32_t KDA_BATCH_MODE = 1;
 
@@ -176,7 +181,7 @@ ge::graphStatus Tiling4ChunkKdaFwd(gert::TilingContext *context)
     const bool useGateInKernel = *attrs->GetAttrPointer<bool>(ATTR_USE_GATE_IDX);
     const int64_t stage = *attrs->GetAttrPointer<int64_t>(ATTR_STAGE_IDX);
     if (chunkSize <= 0 || stage < KDA_STAGE_FULL ||
-        stage > KDA_STAGE_FINALIZE) {
+        stage > KDA_STAGE_PREPARE_WU_SCALE) {
         return ge::GRAPH_FAILED;
     }
 
@@ -208,6 +213,9 @@ ge::graphStatus Tiling4ChunkKdaFwd(gert::TilingContext *context)
     const uint32_t blockDim = std::max<uint32_t>(platform.GetCoreNumAic(), 1);
     const bool isAscend310P =
         platform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND310P;
+    if (isAscend310P && chunkSize != 64) {
+        return ge::GRAPH_FAILED;
+    }
     const bool isAscend950 =
         platform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950;
     const bool useChunk64K128V128Template =
@@ -257,15 +265,33 @@ ge::graphStatus Tiling4ChunkKdaFwd(gert::TilingContext *context)
     const uint64_t qgScaledOffset = AllocateWorkspace(cursor, kTensorBytes);
 
     const uint64_t matrixBytes = tokenHeads * chunkSize * sizeof(float);
-    const uint64_t prepareAqkFp32Offset = AllocateWorkspace(cursor, matrixBytes);
-    const uint64_t prepareAkkFp32Offset = AllocateWorkspace(cursor, matrixBytes);
+    // The 310P stage pipeline carries these matrices and score tiles through
+    // explicit internal outputs. Keep the legacy workspace copies only for
+    // architectures that still execute the monolithic prepare launch.
+    const uint64_t prepareAqkFp32Offset = isAscend310P
+        ? cursor
+        : AllocateWorkspace(cursor, matrixBytes);
+    const uint64_t prepareAkkFp32Offset = isAscend310P
+        ? cursor
+        : AllocateWorkspace(cursor, matrixBytes);
     const uint64_t prepareScratchOffset = AlignWorkspace(cursor);
     const uint64_t solveDepth = safeGate ? KDA_SOLVE_PIPELINE_DEPTH : 1;
     const uint64_t solveBytes = static_cast<uint64_t>(blockDim) * solveDepth *
         KDA_SOLVE_SCRATCH_SLOTS * chunkSize * chunkSize * sizeof(float);
-    const uint64_t scoreBytes = static_cast<uint64_t>(blockDim) *
-        KDA_SCORE_QUEUE_SLOTS * KDA_SCORE_SCRATCH_PLANES * chunkSize *
-        shape.kDim * dataBytes;
+    const uint64_t prepareTaskCount = static_cast<uint64_t>(shape.vHeads) *
+        (isVarLen ? totalChunks : static_cast<uint64_t>(shape.batch) * totalChunks);
+    const uint64_t prepareTasksPerCore =
+        (prepareTaskCount + blockDim - 1) / blockDim;
+    const uint64_t scoreBlocksPerTask =
+        (static_cast<uint64_t>(chunkSize) + KDA_SCORE_REF_BLOCK_SIZE - 1) /
+        KDA_SCORE_REF_BLOCK_SIZE;
+    const uint64_t prepareScoreSlotsPerCore = isAscend310P
+        ? prepareTasksPerCore * scoreBlocksPerTask
+        : KDA_SCORE_QUEUE_SLOTS;
+    const uint64_t scoreBytes = isAscend310P
+        ? 0
+        : static_cast<uint64_t>(blockDim) * prepareScoreSlotsPerCore *
+              KDA_SCORE_SCRATCH_PLANES * chunkSize * shape.kDim * dataBytes;
     cursor = prepareScratchOffset + AlignWorkspace(solveBytes) + scoreBytes;
 
     const uint64_t postWuScratchOffset = AlignWorkspace(cursor);
@@ -347,6 +373,7 @@ ge::graphStatus Tiling4ChunkKdaFwd(gert::TilingContext *context)
     tiling.set_gateUsedCoreNum(
         static_cast<int64_t>(blockDim) * (isAscend310P ? 1 : 2));
     tiling.set_prepareUsedCoreNum(blockDim);
+    tiling.set_prepareScoreSlotsPerCore(prepareScoreSlotsPerCore);
     tiling.set_postWuUsedCoreNum(blockDim);
     tiling.set_outputUsedCoreNum(blockDim);
     tiling.set_gkStorageOffset(gkStorageOffset);

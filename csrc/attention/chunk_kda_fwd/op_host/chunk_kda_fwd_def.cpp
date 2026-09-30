@@ -54,6 +54,21 @@ public:
             .DataType({ge::DT_INT64, ge::DT_INT64, ge::DT_INT64, ge::DT_INT64,
                        ge::DT_INT64, ge::DT_INT64, ge::DT_INT64, ge::DT_INT64})
             .Format(formats).UnknownShapeFormat(formats);
+        this->Input("stage_dependency")
+            .ParamType(OPTIONAL)
+            .DataType(stateTypes)
+            .Format(formats)
+            .UnknownShapeFormat(formats);
+        this->Input("gk_fp16")
+            .ParamType(OPTIONAL)
+            .DataType(dataTypes)
+            .Format(formats)
+            .UnknownShapeFormat(formats);
+        this->Input("beta_fp16")
+            .ParamType(OPTIONAL)
+            .DataType(dataTypes)
+            .Format(formats)
+            .UnknownShapeFormat(formats);
 
         this->Output("attn_out").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
         this->Output("final_state").ParamType(OPTIONAL).DataType(stateTypes).Format(formats).UnknownShapeFormat(formats);
@@ -68,6 +83,13 @@ public:
         this->Output("h").ParamType(OPTIONAL).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
         this->Output("qg_scaled").ParamType(OPTIONAL).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
         this->Output("u_seed").ParamType(OPTIONAL).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Output("score_scratch").ParamType(OPTIONAL).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Output("score_matrices").ParamType(OPTIONAL).DataType(stateTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Output("stage_token")
+            .ParamType(OPTIONAL)
+            .DataType(stateTypes)
+            .Format(formats)
+            .UnknownShapeFormat(formats);
 
         this->Attr("layout").AttrType(OPTIONAL).String("BSND");
         this->Attr("scale").AttrType(REQUIRED).Float(1.0);

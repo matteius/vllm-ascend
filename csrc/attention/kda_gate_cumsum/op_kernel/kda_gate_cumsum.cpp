@@ -57,7 +57,15 @@ public:
     __aicore__ inline void Process()
     {
         uint64_t taskCount = hasCuSeqlens_ ? seqNum_ * hv_ : batch_ * hv_ * maxChunks_;
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        // A standalone AIV launch on 310P may offset the block index by the
+        // physical data-core count. Normalize it to the launched vector-core
+        // range so every sequence/head task is covered.
+        uint64_t coreIdx = usedCoreNum_ == 0 ? 0 :
+            static_cast<uint64_t>(block_idx) % usedCoreNum_;
+#else
         uint64_t coreIdx = static_cast<uint64_t>(GetBlockIdx());
+#endif
         for (uint64_t task = coreIdx; task < taskCount; task += usedCoreNum_) {
             ProcessTask(task);
         }
@@ -136,6 +144,11 @@ private:
 
     __aicore__ inline float ReadFloat(GlobalTensor<float> &tensor, uint64_t offset)
     {
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        // A four-byte DataCopyPad is unreliable on 310P. Read the scalar
+        // directly, matching the int64 path below.
+        return tensor.GetValue(offset);
+#else
         LocalTensor<float> scalar = scalarBuf_.Get<float>();
         DataCopyParams params{1, static_cast<uint16_t>(sizeof(float)), 0, 0};
         DataCopyPadParams padParams{false, 0, 0, 0};
@@ -148,6 +161,7 @@ private:
         WaitFlag<HardEvent::V_S>(GATE_SCALAR_V_S_EVENT_ID);
         __ubuf__ float *ptr = (__ubuf__ float *)scalar.GetPhyAddr();
         return ptr[0];
+#endif
     }
 
     __aicore__ inline int64_t ReadInt64(GlobalTensor<int64_t> &tensor, uint64_t offset)

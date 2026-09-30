@@ -239,6 +239,9 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 cache_dtype_str=cache_dtype_str,
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
                 use_nz_cache=bool(getattr(attn_module.impl, "uses_nz_cache", False)),
+                model_version=model_version,
+                indexes_kv_by_block_stride=indexes_kv_by_block_stride,
+                **ratio_kwargs,
             )
         if isinstance(attn_module, DeepseekV32IndexerCache):
             if not getattr(
@@ -1301,7 +1304,10 @@ def _reshape_kv_cache_v2(
                     kv_caches[layer_name] = typed_cache.view(kv_cache_shape)
                 continue
 
-            if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
+            # The current KPool state uses a flat [block, pool, K+gate]
+            # backend shape. Only the historical tail role has a separate
+            # [block, K/gate, pool, width] view.
+            if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec) and kv_cache_spec.cache_role == "indexer_tail":
                 if not isinstance(raw_cache, torch.Tensor):
                     raise ValueError(f"KPool tail cache for {layer_name} must use one raw tensor.")
                 typed_slot = raw_cache.view(kv_cache_spec.dtype)

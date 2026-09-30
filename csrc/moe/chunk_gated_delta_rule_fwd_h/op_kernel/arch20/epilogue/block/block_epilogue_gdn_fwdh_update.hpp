@@ -44,6 +44,9 @@ public:
     using HUpdateElementInput = typename HUpdateInputType_::Element;
     using FinalStateElement = typename FinalStateType_::Element;
 
+    static constexpr uint32_t FP32_VALUES_PER_BLOCK = 8;
+    static constexpr uint32_t FP32_VALUES_PER_REPEAT = 64;
+
     CATLASS_DEVICE
     BlockEpilogue(Arch::Resource<ArchTag> &resource)
     {
@@ -56,8 +59,6 @@ public:
         constexpr uint32_t PING_BUF_1_OFFSET = 96 * 1024;
         constexpr uint32_t PING_BUF_2_OFFSET = 112 * 1024;
         constexpr uint32_t PING_G_BUF_OFFSET = 160 * 1024;
-
-
         calcUbTensor = resource.ubBuf.template GetBufferByByte<float>(CALC_BUF_OFFSET);
 
         hUpdateUbTensor = resource.ubBuf.template GetBufferByByte<float>(PING_BUF_1_OFFSET);
@@ -67,6 +68,7 @@ public:
         finalOutputUbTensor = resource.ubBuf.template GetBufferByByte<FinalStateElement>(PING_BUF_1_OFFSET);
 
         glastUbTensor = resource.ubBuf.template GetBufferByByte<float>(PING_G_BUF_OFFSET);
+        gkBroadcastUbTensor = resource.ubBuf.template GetBufferByByte<float>(PING_BUF_2_OFFSET);
 
     }
 
@@ -84,7 +86,8 @@ public:
         uint32_t kHeadDim,
         uint32_t vHeadDim,
         Arch::CrossCoreFlag cube2Done,
-        bool isFinalState
+        bool isFinalState,
+        bool useKdaGatedPath
     )
     {
         uint32_t mActual = kHeadDim;
@@ -113,26 +116,88 @@ public:
         AscendC::Cast(calcUbTensor, hUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nActual);
         AscendC::PipeBarrier<PIPE_V>();
         
-        GElementInput gLastVal = gInputThisSubBlock.GetValue(chunkSize-1);
-        float gLastFloat = 0.0f;
-        if constexpr(std::is_same<GElementInput, float>::value) {
-            gLastFloat = gLastVal;
-        } else if constexpr(std::is_same<GElementInput, half>::value) {
-            gLastFloat = (float)gLastVal;
-        } else if constexpr(std::is_same<GElementInput, bfloat16_t>::value) {
-            gLastFloat = AscendC::ToFloat(gLastVal);
-        }
-        glastUbTensor.SetValue(0, gLastFloat);
+        if (useKdaGatedPath) {
+            AscendC::GlobalTensor<GElementInput> gkLastInput =
+                gInputThisSubBlock[(chunkSize - 1) * kHeadDim + mOffset];
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+            if constexpr(std::is_same<GElementInput, float>::value) {
+                AscendC::DataCopy(
+                    glastUbTensor, gkLastInput, mActualThisSubBlock);
+            } else {
+                AscendC::DataCopy(
+                    hOutputUbTensor, gkLastInput, mActualThisSubBlock);
+            }
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+            if constexpr(!std::is_same<GElementInput, float>::value) {
+                AscendC::Cast(glastUbTensor, hOutputUbTensor,
+                              AscendC::RoundMode::CAST_NONE,
+                              mActualThisSubBlock);
+                AscendC::PipeBarrier<PIPE_V>();
+            }
+            constexpr float LN2 = 0.6931471805599453f;
+            AscendC::Muls(glastUbTensor, glastUbTensor, LN2,
+                          mActualThisSubBlock);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::Exp(glastUbTensor, glastUbTensor,
+                         mActualThisSubBlock);
+            AscendC::PipeBarrier<PIPE_V>();
+            uint32_t gateRows =
+                ((mActualThisSubBlock + FP32_VALUES_PER_BLOCK - 1) /
+                 FP32_VALUES_PER_BLOCK) * FP32_VALUES_PER_BLOCK;
+            AscendC::Brcb(
+                gkBroadcastUbTensor, glastUbTensor,
+                static_cast<uint8_t>(gateRows / FP32_VALUES_PER_BLOCK),
+                {1, FP32_VALUES_PER_BLOCK});
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::BinaryRepeatParams gateMulParams{
+                1, 1, 0, FP32_VALUES_PER_BLOCK,
+                FP32_VALUES_PER_BLOCK, 0};
+            uint32_t fullRepeats = nActual / FP32_VALUES_PER_REPEAT;
+            uint32_t tailElements = nActual % FP32_VALUES_PER_REPEAT;
+            for (uint32_t row = 0; row < mActualThisSubBlock; ++row) {
+                uint32_t rowOffset = row * nActual;
+                if (fullRepeats > 0) {
+                    AscendC::Mul(
+                        calcUbTensor[rowOffset], calcUbTensor[rowOffset],
+                        gkBroadcastUbTensor[row * FP32_VALUES_PER_BLOCK],
+                        FP32_VALUES_PER_REPEAT, fullRepeats, gateMulParams);
+                }
+                if (tailElements > 0) {
+                    uint32_t tailOffset = rowOffset +
+                        fullRepeats * FP32_VALUES_PER_REPEAT;
+                    AscendC::Mul(
+                        calcUbTensor[tailOffset], calcUbTensor[tailOffset],
+                        gkBroadcastUbTensor[row * FP32_VALUES_PER_BLOCK],
+                        tailElements, 1, gateMulParams);
+                }
+            }
+            AscendC::PipeBarrier<PIPE_V>();
+        } else {
+            GElementInput gLastVal =
+                gInputThisSubBlock.GetValue(chunkSize-1);
+            float gLastFloat = 0.0f;
+            if constexpr(std::is_same<GElementInput, float>::value) {
+                gLastFloat = gLastVal;
+            } else if constexpr(std::is_same<GElementInput, half>::value) {
+                gLastFloat = (float)gLastVal;
+            } else if constexpr(std::is_same<GElementInput, bfloat16_t>::value) {
+                gLastFloat = AscendC::ToFloat(gLastVal);
+            }
+            glastUbTensor.SetValue(0, gLastFloat);
 
-        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
-        AscendC::Exp(glastUbTensor, glastUbTensor, 1);
-        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
-        float muls = glastUbTensor.GetValue(0);
-        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
-        AscendC::Muls(calcUbTensor, calcUbTensor, muls, mActualThisSubBlock * nActual);
+            AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+            AscendC::Exp(glastUbTensor, glastUbTensor, 1);
+            AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+            float muls = glastUbTensor.GetValue(0);
+            AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+            AscendC::Muls(calcUbTensor, calcUbTensor, muls,
+                          mActualThisSubBlock * nActual);
+        }
 
 
         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
@@ -172,6 +237,7 @@ private:
     AscendC::LocalTensor<FinalStateElement> finalOutputUbTensor;
 
     AscendC::LocalTensor<float> glastUbTensor;
+    AscendC::LocalTensor<float> gkBroadcastUbTensor;
 
 };
 }

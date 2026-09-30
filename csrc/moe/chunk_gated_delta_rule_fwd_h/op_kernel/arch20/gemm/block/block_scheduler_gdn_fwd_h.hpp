@@ -182,6 +182,74 @@ struct BlockSchedulerGdnFwdH {
 
     }
 
+    template <typename TilingData>
+    CATLASS_DEVICE
+    void InitFromData(GM_ADDR cu_seqlens, GM_ADDR chunk_indices,
+                      const TilingData &tilingData, GM_ADDR user,
+                      uint32_t coreIdx, uint32_t coreNum) {
+        batch = tilingData.batch;
+        seqlen = tilingData.seqlen;
+        kNumHead = tilingData.kNumHead;
+        vNumHead = tilingData.vNumHead;
+        kHeadDim = tilingData.kHeadDim;
+        vHeadDim = tilingData.vHeadDim;
+        chunkSize = tilingData.chunkSize;
+        initalStateStride0 = tilingData.vHeadDim;
+        isVariedLen = tilingData.isVariedLen;
+        shapeBatch = tilingData.shapeBatch;
+        tokenBatch = tilingData.tokenBatch;
+        useInitialState = tilingData.useInitialState;
+        storeFinalState = tilingData.storeFinalState;
+        numSeqWorkspaceOffset = tilingData.numSeqWorkspaceOffset;
+        numChunksWorkspaceOffset = tilingData.numChunksWorkspaceOffset;
+
+        gmSeqlen.SetGlobalBuffer((__gm__ int64_t *)cu_seqlens);
+        gmNumSeq.SetGlobalBuffer((__gm__ int64_t *)(user + numSeqWorkspaceOffset));
+        gmNumChunks.SetGlobalBuffer((__gm__ int64_t *)(user + numChunksWorkspaceOffset));
+
+        if (isVariedLen) {
+            gmNumChunks.SetValue(0, 0);
+            gmNumSeq.SetValue(0, 0);
+            uint32_t actualBatch = 0;
+            int64_t prevSeq = 0;
+            int64_t currSeq = 0;
+            for (uint32_t b = 1; b <= tokenBatch; b++) {
+                currSeq = gmSeqlen.GetValue(b);
+                int64_t batchSeqLen = currSeq - prevSeq;
+                if (batchSeqLen > 0) {
+                    actualBatch++;
+                    gmNumSeq.SetValue(actualBatch, currSeq);
+                    int64_t batchChunk = (batchSeqLen + chunkSize - 1) / chunkSize;
+                    gmNumChunks.SetValue(
+                        actualBatch,
+                        gmNumChunks.GetValue(actualBatch - 1) + batchChunk);
+                }
+                prevSeq = currSeq;
+            }
+            tokenBatch = actualBatch;
+            batch = actualBatch;
+            totalChunks = gmNumChunks.GetValue(tokenBatch);
+            totalTokens = gmNumSeq.GetValue(tokenBatch);
+        } else {
+            totalChunks = (seqlen + chunkSize - 1) / chunkSize;
+            totalTokens = seqlen;
+        }
+
+        cubeCoreIdx = coreIdx;
+        cubeCoreNum = coreNum;
+        vLoops = vHeadDim / vBlockSize;
+        taskNum = vLoops * batch * vNumHead;
+        headGroups = vNumHead / kNumHead;
+        hasDummyHead =
+            (taskNum % (PING_PONG_STAGES * cubeCoreNum) <= cubeCoreNum) &&
+            (taskNum % (PING_PONG_STAGES * cubeCoreNum) > 0);
+        taskLoops = (taskNum + cubeCoreNum * PING_PONG_STAGES - 1) /
+                    (cubeCoreNum * PING_PONG_STAGES);
+        headInnerLoop = taskNum > cubeCoreNum ? PING_PONG_STAGES : 1;
+        taskIdx = cubeCoreIdx * headInnerLoop;
+        isRunning = taskIdx < taskNum;
+    }
+
     CATLASS_DEVICE
     void InitTask() {
         iterId++;

@@ -23,6 +23,7 @@ import torch
 import torch_npu
 
 from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import is_310p as is_310p_hw
 
 torch_npu.npu.config.allow_internal_format = True
 enable_custom_op()
@@ -287,6 +288,231 @@ def test_chunk_kda_fwd_matches_reference_bsnd():
     _cleanup_npu()
 
 
+@pytest.mark.skipif(not is_310p_hw(), reason="310P row-wise final-state gate regression test")
+@torch.inference_mode()
+def test_chunk_kda_fwd_310p_applies_final_state_gate_per_row():
+    torch.manual_seed(20260929)
+
+    bsz, total_t, heads, kdim, vdim = 1, 64, 1, 128, 128
+    shape = (bsz, total_t, heads, kdim)
+    q = torch.zeros(shape, dtype=torch.float16).npu()
+    k = (torch.randn(shape, dtype=torch.float16) * 0.05).npu()
+    v = torch.zeros((bsz, total_t, heads, vdim), dtype=torch.float16).npu()
+    raw_gate = (-torch.rand(shape, dtype=torch.float32) * 0.05).npu()
+    beta = torch.zeros((bsz, total_t, heads), dtype=torch.float32).npu()
+    initial_state = (torch.randn((bsz, heads, kdim, vdim), dtype=torch.float32) * 0.01).npu()
+
+    gk = torch.ops._C_ascend.kda_gate_cumsum(raw_gate, 64, layout="BSND")
+    got = torch.ops._C_ascend.chunk_kda_fwd(
+        q,
+        k,
+        v,
+        raw_gate,
+        beta,
+        kdim**-0.5,
+        64,
+        layout="BSND",
+        initial_state=initial_state,
+        output_final_state=True,
+        disable_recompute=True,
+    )
+    expected = torch.exp2(gk.cpu().float()[:, -1]).unsqueeze(-1) * initial_state.cpu().float()
+
+    _assert_close("final_state_gate", got[1], expected, rtol=5e-3, atol=1e-4)
+    _cleanup_npu()
+
+
+@pytest.mark.parametrize("total_t", [17, 64])
+@pytest.mark.skipif(not is_310p_hw(), reason="310P vector triangular-solve regression test")
+@torch.inference_mode()
+def test_chunk_kda_fwd_310p_exports_causal_scores_and_inverse(total_t):
+    torch.manual_seed(20260930 + total_t)
+
+    chunk_size = 64
+    kdim = 128
+    shape = (1, total_t, 1, kdim)
+    q = (torch.randn(shape, dtype=torch.float16) * 0.05).npu()
+    k = (torch.randn(shape, dtype=torch.float16) * 0.05).npu()
+    v = (torch.randn(shape, dtype=torch.float16) * 0.05).npu()
+    g = (-torch.rand(shape, dtype=torch.float32) * 0.05).npu()
+    beta = torch.sigmoid(torch.randn((1, total_t, 1), dtype=torch.float32)).npu()
+    gk = torch.ops._C_ascend.kda_gate_cumsum(g, chunk_size, layout="BSND")
+
+    outputs = torch.ops._C_ascend.chunk_kda_fwd(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        kdim**-0.5,
+        chunk_size,
+        layout="BSND",
+        output_final_state=True,
+        disable_recompute=True,
+        return_intermediate_states=True,
+    )
+    torch.npu.synchronize()
+
+    q_cpu = q.cpu().float()[0, :, 0]
+    k_cpu = k.cpu().float()[0, :, 0]
+    gk_cpu = gk.cpu().float()[0, :, 0]
+    beta_cpu = beta.cpu().float()[0, :, 0]
+    causal = torch.ones((total_t, total_t), dtype=torch.bool).tril()
+    strict = torch.ones((total_t, total_t), dtype=torch.bool).tril(diagonal=-1)
+    relative_gate = torch.exp2(gk_cpu[:, None, :] - gk_cpu[None, :, :])
+    expected_aqk = torch.where(
+        causal,
+        torch.einsum("ik,jk,ijk->ij", q_cpu, k_cpu, relative_gate) * (kdim**-0.5),
+        0.0,
+    )
+    lower_akk = torch.where(
+        strict,
+        torch.einsum("ik,jk,ijk->ij", k_cpu, k_cpu, relative_gate) * beta_cpu[:, None],
+        0.0,
+    )
+    expected_akk = _lower_inverse(lower_akk)
+    padded_aqk = torch.zeros((total_t, chunk_size), dtype=torch.float32)
+    padded_akk = torch.zeros_like(padded_aqk)
+    padded_aqk[:, :total_t] = expected_aqk
+    padded_akk[:, :total_t] = expected_akk
+
+    actual_aqk = outputs[3].detach().cpu().float()[0, 0]
+    actual_akk = outputs[4].detach().cpu().float()[0, 0]
+    torch.testing.assert_close(actual_aqk, padded_aqk, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(actual_akk, padded_akk, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(
+        actual_akk.diagonal()[:total_t],
+        torch.ones(total_t),
+        rtol=0,
+        atol=0,
+    )
+    _cleanup_npu()
+
+
+@pytest.mark.skipif(not is_310p_hw(), reason="310P staged-workspace replay regression test")
+@torch.inference_mode()
+def test_chunk_kda_fwd_310p_changing_inputs_do_not_reuse_staged_scores():
+    total_t = 17
+    chunk_size = 64
+    kdim = 128
+    shape = (1, total_t, 1, kdim)
+
+    def make_inputs(seed):
+        torch.manual_seed(seed)
+        return (
+            (torch.randn(shape, dtype=torch.float16) * 0.05).npu(),
+            (torch.randn(shape, dtype=torch.float16) * 0.05).npu(),
+            (torch.randn(shape, dtype=torch.float16) * 0.05).npu(),
+            (-torch.rand(shape, dtype=torch.float32) * 0.05).npu(),
+            torch.sigmoid(torch.randn((1, total_t, 1), dtype=torch.float32)).npu(),
+        )
+
+    def run(inputs):
+        q, k, v, g, beta = inputs
+        outputs = torch.ops._C_ascend.chunk_kda_fwd(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            kdim**-0.5,
+            chunk_size,
+            layout="BSND",
+            output_final_state=True,
+            disable_recompute=True,
+            return_intermediate_states=True,
+        )
+        torch.npu.synchronize()
+        return outputs
+
+    first_inputs = make_inputs(20261001)
+    first_outputs = run(first_inputs)
+    second_inputs = make_inputs(20261002)
+    second_outputs = run(second_inputs)
+
+    q, k, _, g, beta = second_inputs
+    gk = torch.ops._C_ascend.kda_gate_cumsum(g, chunk_size, layout="BSND")
+    q_cpu = q.cpu().float()[0, :, 0]
+    k_cpu = k.cpu().float()[0, :, 0]
+    gk_cpu = gk.cpu().float()[0, :, 0]
+    beta_cpu = beta.cpu().float()[0, :, 0]
+    causal = torch.ones((total_t, total_t), dtype=torch.bool).tril()
+    strict = torch.ones((total_t, total_t), dtype=torch.bool).tril(diagonal=-1)
+    relative_gate = torch.exp2(gk_cpu[:, None, :] - gk_cpu[None, :, :])
+    expected_aqk = torch.where(
+        causal,
+        torch.einsum("ik,jk,ijk->ij", q_cpu, k_cpu, relative_gate) * (kdim**-0.5),
+        0.0,
+    )
+    lower_akk = torch.where(
+        strict,
+        torch.einsum("ik,jk,ijk->ij", k_cpu, k_cpu, relative_gate) * beta_cpu[:, None],
+        0.0,
+    )
+    expected_akk = _lower_inverse(lower_akk)
+    padded_aqk = torch.zeros((total_t, chunk_size), dtype=torch.float32)
+    padded_akk = torch.zeros_like(padded_aqk)
+    padded_aqk[:, :total_t] = expected_aqk
+    padded_akk[:, :total_t] = expected_akk
+
+    first_aqk = first_outputs[3].detach().cpu().float()[0, 0]
+    second_aqk = second_outputs[3].detach().cpu().float()[0, 0]
+    second_akk = second_outputs[4].detach().cpu().float()[0, 0]
+    assert not torch.equal(first_aqk, second_aqk)
+    torch.testing.assert_close(second_aqk, padded_aqk, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(second_akk, padded_akk, rtol=2e-2, atol=2e-2)
+    _cleanup_npu()
+
+
+@pytest.mark.skipif(not is_310p_hw(), reason="310P PostWU regression test")
+@torch.inference_mode()
+def test_chunk_kda_fwd_310p_model_shape_full_chunk_and_tail():
+    """Exercise the GLM prefill shape that previously stalled in PostWU."""
+    torch.manual_seed(20260929)
+
+    total_t = 67
+    heads = 16
+    shape = (1, total_t, heads, 128)
+    q = (torch.randn(shape, dtype=torch.float16) * 0.01).npu()
+    k = (torch.randn(shape, dtype=torch.float16) * 0.01).npu()
+    v = (torch.randn(shape, dtype=torch.float16) * 0.01).npu()
+    raw_gate = (torch.randn(shape, dtype=torch.float32) * 0.01).npu()
+    beta = torch.sigmoid(torch.randn((1, total_t, heads), dtype=torch.float32)).npu()
+    initial_state = torch.zeros((1, heads, 128, 128), dtype=torch.float32, device="npu")
+    a_log = torch.zeros(heads, dtype=torch.float32, device="npu")
+    dt_bias = torch.zeros(heads * 128, dtype=torch.float32, device="npu")
+
+    outputs = torch.ops._C_ascend.chunk_kda_fwd(
+        q,
+        k,
+        v,
+        raw_gate,
+        beta,
+        128**-0.5,
+        64,
+        layout="BSND",
+        initial_state=initial_state,
+        output_final_state=True,
+        cu_seqlens=[0, total_t],
+        chunk_indices=[0, 0, 0, 1],
+        safe_gate=True,
+        lower_bound=-5.0,
+        use_gate_in_kernel=True,
+        A_log=a_log,
+        dt_bias=dt_bias,
+        disable_recompute=False,
+        return_intermediate_states=False,
+        state_v_first=True,
+    )
+    torch.npu.synchronize()
+
+    assert outputs[0].shape == shape
+    assert outputs[1].shape == (1, heads, 128, 128)
+    assert torch.isfinite(outputs[0]).all().item()
+    assert torch.isfinite(outputs[1]).all().item()
+    _cleanup_npu()
+
+
 @pytest.mark.parametrize(
     ("shape", "dtype", "with_dependency"),
     [
@@ -393,9 +619,10 @@ def test_chunk_kda_fwd_tail_is_bitwise_deterministic(total_t, disable_recompute)
     torch.manual_seed(20260820 + total_t + int(disable_recompute))
 
     shape = (1, total_t, 6, 128)
-    q = (torch.randn(shape) * 0.04).to(torch.bfloat16).npu()
-    k = (torch.randn(shape) * 0.04).to(torch.bfloat16).npu()
-    v = (torch.randn(shape) * 0.04).to(torch.bfloat16).npu()
+    input_dtype = torch.float16 if is_310p_hw() else torch.bfloat16
+    q = (torch.randn(shape) * 0.04).to(input_dtype).npu()
+    k = (torch.randn(shape) * 0.04).to(input_dtype).npu()
+    v = (torch.randn(shape) * 0.04).to(input_dtype).npu()
     raw_gate = (-7.0 + torch.randn(shape) * 0.03).to(torch.float32).npu()
     beta = (torch.rand((1, total_t, 6)) * 0.2 + 0.05).to(torch.float32).npu()
     initial_state = (torch.randn((1, 6, 128, 128)) * 0.01).to(torch.float32).npu()
@@ -429,6 +656,24 @@ def test_chunk_kda_fwd_tail_is_bitwise_deterministic(total_t, disable_recompute)
 
     run_chunk_kda_fwd()
     reference_outputs = _snapshot_outputs(run_chunk_kda_fwd())
+    if disable_recompute:
+        expected_gk = torch.ops._C_ascend.kda_gate_cumsum(
+            raw_gate,
+            64,
+            A_log=a_log,
+            dt_bias=dt_bias,
+            cu_seqlens=[0, total_t],
+            use_gate_in_kernel=True,
+            safe_gate=True,
+            lower_bound=-5.0,
+            layout="BSND",
+        ).transpose(1, 2)
+        torch.testing.assert_close(
+            reference_outputs[2],
+            expected_gk.cpu().contiguous(),
+            rtol=0,
+            atol=0,
+        )
     for repeat in range(1, DETERMINISM_REPEATS):
         current_outputs = _snapshot_outputs(run_chunk_kda_fwd())
         _assert_outputs_bitwise_equal(reference_outputs, current_outputs, repeat)

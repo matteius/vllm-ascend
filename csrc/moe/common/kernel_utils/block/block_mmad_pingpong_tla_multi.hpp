@@ -701,6 +701,10 @@ public:
             uint32_t mFracs = mAligned / 16;
             uint32_t nFracs = nAligned / 16;
             if constexpr (std::is_same_v<ElementC, ElementAccumulator>) {
+                // FP32 skips the vector cast used by the FP16 path. Explicitly
+                // finish L0C-to-UB before MTE3 consumes the shared UB buffer.
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID7);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID7);
                 for (uint32_t nf = 0; nf < nFracs; nf++) {
                     for (uint32_t mf = 0; mf < mFracs; mf++) {
                         uint32_t ubOff = (nf * mFracs + mf) * 256;

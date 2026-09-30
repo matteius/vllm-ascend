@@ -40,6 +40,8 @@ constexpr float KDA_EXP2_CLAMP = 80.0f;
 constexpr float KDA_EXP_INPUT_MAX = KDA_EXP2_CLAMP * LN2;
 constexpr float KDA_EXP_INPUT_MIN = -KDA_EXP2_CLAMP * LN2;
 constexpr float KDA_FP16_MAX = 65504.0f;
+constexpr float KDA_FP16_EXP_INPUT_MAX = 11.089866f;
+constexpr float KDA_FP16_EXP_INPUT_MIN = -17.0f;
 constexpr uint32_t EXP2_UB_ELEMENTS = 256;
 constexpr uint32_t EXP2_UB_BYTES = EXP2_UB_ELEMENTS * (sizeof(float) + sizeof(uint16_t));
 constexpr uint32_t EXP2_EVENT_ID = 0;
@@ -220,6 +222,15 @@ public:
         isVarLen_ = tiling.isVarLen;
         inputSequenceMajor_ = tiling.inputSequenceMajor;
         usedCoreNum_ = tiling.postWuUsedCoreNum;
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        isAivOnly_ = true;
+        if (isAivOnly_) {
+            solveCoreIdx_ = usedCoreNum_ == 0 ? 0 :
+                KdaForward::GetPhysicalBlockIdx() % usedCoreNum_;
+        } else {
+            solveCoreIdx_ = KdaForward::GetPhysicalBlockIdx();
+        }
+#else
         if ASCEND_IS_AIV {
             uint64_t subBlockNum = static_cast<uint64_t>(GetSubBlockNum());
             solveCoreIdx_ = subBlockNum == 0 ? 0 :
@@ -227,6 +238,7 @@ public:
         } else {
             solveCoreIdx_ = KdaForward::GetPhysicalBlockIdx();
         }
+#endif
         if (pipe_ != nullptr && initVecBuffers) {
             pipe_->InitBuffer(exp2Buf_, EXP2_UB_BYTES);
             pipe_->InitBuffer(vecBuf_, KDA_VEC_ARENA_ELEMENTS * sizeof(float));
@@ -238,15 +250,17 @@ public:
             AllocVectorEvents();
         }
     }
+    template <bool SYNCHRONIZE_PIPELINES = true>
     __aicore__ inline void ProcessAiv()
     {
-        ProcessPostAiv();
+        ProcessPostAiv<SYNCHRONIZE_PIPELINES>();
         ReleaseVectorEvents();
     }
 
+    template <bool SYNCHRONIZE_PIPELINES = true>
     __aicore__ inline void ProcessAic()
     {
-        ProcessPostAic();
+        ProcessPostAic<SYNCHRONIZE_PIPELINES>();
     }
 
 private:
@@ -554,8 +568,13 @@ private:
         using LayoutTagA = Catlass::layout::RowMajor;
         using LayoutTagB = Catlass::layout::RowMajor;
         using LayoutTagC = Catlass::layout::RowMajor;
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        using W_OUT_T = T;
+#else
+        using W_OUT_T = float;
+#endif
         using WTileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<KdaArchTag, ElementA, LayoutTagA, ElementB,
-                                                                 LayoutTagB, float, LayoutTagC>;
+                                                                 LayoutTagB, W_OUT_T, LayoutTagC>;
         using UTileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<KdaArchTag, ElementA, LayoutTagA, ElementB,
                                                                  LayoutTagB, OUT_T, LayoutTagC>;
         using PostL1TileShape128 = tla::Shape<KdaInt128, KdaInt128, tla::_256>;
@@ -564,7 +583,7 @@ private:
         using PostL0TileShape256 = tla::Shape<KdaInt128, tla::_256, KdaInt64>;
         using WBlockMmad = Catlass::Gemm::Block::BlockMmadTla<KdaDispatchPolicy, PostL1TileShape128,
                                                                PostL0TileShape128,
-                                                               ElementA, ElementB, float, void, WTileCopy>;
+                                                               ElementA, ElementB, W_OUT_T, void, WTileCopy>;
         using UBlockMmad128 = Catlass::Gemm::Block::BlockMmadTla<KdaDispatchPolicy, PostL1TileShape128,
                                                                   PostL0TileShape128,
                                                                   ElementA, ElementB, OUT_T, void, UTileCopy>;
@@ -578,21 +597,30 @@ private:
 
         {
             LayoutTagB tagB = LayoutTagB::template MakeLayout<ElementB>(BT_, K_);
-            LayoutTagC tagC = LayoutTagC::template MakeLayout<float>(BT_, K_);
+            LayoutTagC tagC = LayoutTagC::template MakeLayout<W_OUT_T>(BT_, K_);
             auto layoutB = tla::MakeLayoutFromTag(tagB);
             auto layoutC = tla::MakeLayoutFromTag(tagC);
             Catlass::GemmCoord shape{static_cast<uint32_t>(curT), static_cast<uint32_t>(K_),
                                      static_cast<uint32_t>(curT)};
             auto tensorB = tla::MakeTensor(preparedQG_[KVOffset(b, hv, start, 0, K_)], layoutB,
                                            Catlass::Arch::PositionGM{});
-            auto tensorC = tla::MakeTensor(h_[WScratchOffset(b, hv, chunkIdx, 0, 0)], layoutC,
-                                            Catlass::Arch::PositionGM{});
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+            auto tensorC = tla::MakeTensor(
+                w_[KVOffset(b, hv, start, 0, K_)], layoutC,
+                Catlass::Arch::PositionGM{});
+#else
+            auto tensorC = tla::MakeTensor(
+                h_[WScratchOffset(b, hv, chunkIdx, 0, 0)], layoutC,
+                Catlass::Arch::PositionGM{});
+#endif
             auto blockA = GetTile(tensorA, tla::MakeCoord(0, 0), tla::MakeShape(shape.m(), shape.k()));
             auto blockB = GetTile(tensorB, tla::MakeCoord(0, 0), tla::MakeShape(shape.k(), shape.n()));
             auto blockC = GetTile(tensorC, tla::MakeCoord(0, 0), tla::MakeShape(shape.m(), shape.n()));
             Catlass::Arch::Resource<KdaArchTag> wResource;
             WBlockMmad wBlockMmad(wResource);
+            wBlockMmad.preSetFlags();
             wBlockMmad(blockA, blockB, blockC, shape);
+            wBlockMmad.finalWaitFlags();
             PipeBarrier<PIPE_ALL>();
         }
 
@@ -613,20 +641,89 @@ private:
             Catlass::Arch::Resource<KdaArchTag> uResource;
             if (V_ <= 128) {
                 UBlockMmad128 uBlockMmad(uResource);
+                uBlockMmad.preSetFlags();
                 uBlockMmad(blockA, blockB, blockC, shape);
+                uBlockMmad.finalWaitFlags();
             } else {
                 UBlockMmad256 uBlockMmad(uResource);
+                uBlockMmad.preSetFlags();
                 uBlockMmad(blockA, blockB, blockC, shape);
+                uBlockMmad.finalWaitFlags();
             }
             PipeBarrier<PIPE_ALL>();
         }
 
     }
 
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+    __aicore__ inline void FinalizeKg310P(
+        uint64_t b, uint64_t h, uint64_t hv, uint64_t start,
+        uint64_t curT, uint64_t subBlockIdx, uint64_t subBlockNum)
+    {
+        uint64_t rowBegin = (curT * subBlockIdx) / subBlockNum;
+        uint64_t rowEnd = (curT * (subBlockIdx + 1)) / subBlockNum;
+        if (rowBegin >= rowEnd) {
+            return;
+        }
+        LocalTensor<T> typedArena = vecBuf_.Get<T>();
+        LocalTensor<T> gateLast = exp2Buf_.Get<T>();
+        CopyVectorIn(gateLast, gk_,
+                     KVOffset(b, hv, start + curT - 1, 0, K_), K_);
+        SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+        WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+        // dav-m200 can corrupt adjacent K/gate transfers in one mixed image.
+        // Complete each aligned row transfer before issuing the next one.
+        for (uint64_t row = rowBegin; row < rowEnd; ++row) {
+            uint64_t token = start + row;
+            LocalTensor<T> kLocal = typedArena;
+            LocalTensor<T> gateLocal = typedArena[K_];
+            CopyVectorIn(kLocal, k_, QOffset(b, h, token, 0), K_);
+            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            CopyVectorIn(gateLocal, gk_,
+                         KVOffset(b, hv, token, 0, K_), K_);
+            SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
+            Sub(gateLocal, gateLast, gateLocal,
+                static_cast<uint32_t>(K_));
+            PipeBarrier<PIPE_V>();
+            Muls(gateLocal, gateLocal, static_cast<T>(LN2),
+                 static_cast<uint32_t>(K_));
+            PipeBarrier<PIPE_V>();
+            Mins(gateLocal, gateLocal,
+                 static_cast<T>(KDA_FP16_EXP_INPUT_MAX),
+                 static_cast<uint32_t>(K_));
+            Maxs(gateLocal, gateLocal,
+                 static_cast<T>(KDA_FP16_EXP_INPUT_MIN),
+                 static_cast<uint32_t>(K_));
+            PipeBarrier<PIPE_V>();
+            Exp(gateLocal, gateLocal, static_cast<uint32_t>(K_));
+            PipeBarrier<PIPE_V>();
+            Mul(kLocal, kLocal, gateLocal, static_cast<uint32_t>(K_));
+            PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
+            WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
+            CopyVectorOut(kg_, KVOffset(b, hv, token, 0, K_),
+                          kLocal, K_);
+            SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+            WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2Event_);
+            SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+            WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+        }
+    }
+#endif
+
     __aicore__ inline void CopyScratchWAndFinalizeKg(uint64_t b, uint64_t h, uint64_t hv, uint64_t chunkIdx,
                                                      uint64_t start, uint64_t curT, uint64_t subBlockIdx,
                                                      uint64_t subBlockNum, bool copyScratchW)
     {
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        (void)chunkIdx;
+        (void)copyScratchW;
+        FinalizeKg310P(
+            b, h, hv, start, curT, subBlockIdx, subBlockNum);
+        return;
+#endif
         constexpr uint64_t typedOffsetFloats = 20480;
         constexpr uint64_t typedOffset = typedOffsetFloats * sizeof(float) / sizeof(T);
         constexpr uint64_t kgFp32Planes = 4;
@@ -721,6 +818,27 @@ private:
                                             uint64_t akkBase, uint64_t srcBase, uint64_t dstBase, uint64_t curT,
                                             uint64_t dim, uint64_t rowStride)
     {
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+        // Scalar reads on dav-m200 reuse fixed UB lanes and corrupt the
+        // persistent vector accumulator. Tails are short, so compute their
+        // dot products directly in scalar registers; full chunks stay on
+        // the Cube path above.
+        for (uint64_t col = 0; col < dim; ++col) {
+            float acc = 0.0f;
+            for (uint64_t j = 0; j < curT; ++j) {
+                const float coefficient = static_cast<float>(
+                    preparedAqk_.GetValue(akkBase + j));
+                const float value = static_cast<float>(
+                    src.GetValue(srcBase + j * rowStride + col));
+                acc += coefficient * value;
+            }
+            if constexpr (IsSameType<DstTensor, half>::value) {
+                acc = acc > KDA_FP16_MAX ? KDA_FP16_MAX : acc;
+                acc = acc < -KDA_FP16_MAX ? -KDA_FP16_MAX : acc;
+            }
+            dst.SetValue(dstBase + col, FloatToType<DstTensor>(acc));
+        }
+#else
         LocalTensor<float> acc = vecBuf_.Get<float>();
         LocalTensor<float> value = vecBuf_.Get<float>()[512];
         LocalTensor<SrcTensor> typed = vecBuf_.Get<SrcTensor>()[4096];
@@ -734,8 +852,10 @@ private:
         SetFlag<HardEvent::V_S>(EXP2_EVENT_ID);
         WaitFlag<HardEvent::V_S>(EXP2_EVENT_ID);
         for (uint64_t j = 0; j < curT; ++j) {
-            LoadAsFloatVector(src, srcBase + j * rowStride, value, typed, dim);
             float coefficient = coefficients.GetValue(j);
+            SetFlag<HardEvent::S_MTE2>(EXP2_EVENT_ID);
+            WaitFlag<HardEvent::S_MTE2>(EXP2_EVENT_ID);
+            LoadAsFloatVector(src, srcBase + j * rowStride, value, typed, dim);
             SetFlag<HardEvent::S_V>(EXP2_EVENT_ID);
             WaitFlag<HardEvent::S_V>(EXP2_EVENT_ID);
             Muls(value, value, coefficient, static_cast<uint32_t>(dim));
@@ -753,6 +873,7 @@ private:
         WaitFlag<HardEvent::S_MTE2>(EXP2_EVENT_ID);
         ClampFp32ToOutputType(acc, static_cast<uint32_t>(dim));
         StoreFloatRow(dst, dstBase, acc, dim);
+#endif
     }
 
     __aicore__ inline void ComputeTailWuVector(uint64_t b, uint64_t hv, uint64_t start, uint64_t curT,
@@ -806,9 +927,11 @@ private:
         return start < end;
     }
 
-    __aicore__ inline void ProcessChunkPostAiv(uint64_t b, uint64_t h, uint64_t hv, uint64_t chunkIdx,
-                                               uint64_t start, uint64_t end, uint64_t subBlockIdx,
-                                               uint64_t subBlockNum)
+    template <bool SYNCHRONIZE_PIPELINES>
+    __aicore__ inline void ProcessChunkPostAiv(
+        uint64_t b, uint64_t h, uint64_t hv, uint64_t chunkIdx,
+        uint64_t start, uint64_t end, uint64_t subBlockIdx,
+        uint64_t subBlockNum)
     {
         uint64_t curT = end - start;
         if (curT == 0 || !UsePostWuCube(curT)) {
@@ -820,21 +943,28 @@ private:
                 b, h, hv, chunkIdx, start, curT, subBlockIdx, subBlockNum, false);
             return;
         }
-        Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_MTE2>(syncDoneFlag_);
+        if constexpr (SYNCHRONIZE_PIPELINES) {
+            Catlass::Arch::CrossCoreWaitFlagWithReverse<0x2, PIPE_MTE2>(syncDoneFlag_);
+        }
         CopyScratchWAndFinalizeKg(
             b, h, hv, chunkIdx, start, curT, subBlockIdx, subBlockNum, true);
     }
 
-    __aicore__ inline void ProcessChunkPostAic(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
-                                               uint64_t end)
+    template <bool SYNCHRONIZE_PIPELINES>
+    __aicore__ inline void ProcessChunkPostAic(
+        uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
+        uint64_t end)
     {
         if constexpr (IsSameType<AKK_T, T>::value) {
-            ProcessChunkPostAicTyped(b, hv, chunkIdx, start, end);
+            ProcessChunkPostAicTyped<SYNCHRONIZE_PIPELINES>(
+                b, hv, chunkIdx, start, end);
         }
     }
 
-    __aicore__ inline void ProcessChunkPostAicTyped(uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
-                                                    uint64_t end)
+    template <bool SYNCHRONIZE_PIPELINES>
+    __aicore__ inline void ProcessChunkPostAicTyped(
+        uint64_t b, uint64_t hv, uint64_t chunkIdx, uint64_t start,
+        uint64_t end)
     {
         uint64_t curT = end - start;
         if (curT == 0 || !UsePostWuCube(curT)) {
@@ -844,21 +974,26 @@ private:
             return;
         }
         ComputePostWuCube(b, hv, chunkIdx, start, curT);
-        Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(syncDoneFlag_);
+        if constexpr (SYNCHRONIZE_PIPELINES) {
+            Catlass::Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(syncDoneFlag_);
+        }
     }
 
+    template <bool SYNCHRONIZE_PIPELINES>
     __aicore__ inline void ProcessPostAiv()
     {
         if constexpr (IsSameType<T, float>::value) {
             return;
         }
-        uint64_t subBlockNum = static_cast<uint64_t>(GetSubBlockNum());
+        uint64_t subBlockNum = isAivOnly_ ? 1 : static_cast<uint64_t>(GetSubBlockNum());
         if (subBlockNum == 0) {
             return;
         }
-        uint64_t subBlockIdx = static_cast<uint64_t>(GetSubBlockIdx());
+        uint64_t subBlockIdx = isAivOnly_ ? 0 : static_cast<uint64_t>(GetSubBlockIdx());
         uint64_t coreNum = usedCoreNum_ == 0 ? 1 : usedCoreNum_;
-        uint64_t coreIdx = KdaForward::GetPhysicalBlockIdx() / subBlockNum;
+        uint64_t coreIdx = isAivOnly_
+            ? KdaForward::GetPhysicalBlockIdx() % coreNum
+            : KdaForward::GetPhysicalBlockIdx() / subBlockNum;
         uint64_t taskNum = static_cast<uint64_t>((isVarLen_ ? NT_ : B_ * NT_) * HV_);
         for (uint64_t task = coreIdx; task < taskNum; task += coreNum) {
             uint64_t seq = 0;
@@ -870,11 +1005,13 @@ private:
             uint64_t end = 0;
             if (ResolveFlatChunk(task, seq, b, h, hv, chunkIdx, start, end)) {
                 (void)seq;
-                ProcessChunkPostAiv(b, h, hv, chunkIdx, start, end, subBlockIdx, subBlockNum);
+                ProcessChunkPostAiv<SYNCHRONIZE_PIPELINES>(
+                    b, h, hv, chunkIdx, start, end, subBlockIdx, subBlockNum);
             }
         }
     }
 
+    template <bool SYNCHRONIZE_PIPELINES>
     __aicore__ inline void ProcessPostAic()
     {
         if constexpr (IsSameType<T, float>::value) {
@@ -894,7 +1031,8 @@ private:
             if (ResolveFlatChunk(task, seq, b, h, hv, chunkIdx, start, end)) {
                 (void)seq;
                 (void)h;
-                ProcessChunkPostAic(b, hv, chunkIdx, start, end);
+                ProcessChunkPostAic<SYNCHRONIZE_PIPELINES>(
+                    b, hv, chunkIdx, start, end);
             }
         }
     }
@@ -965,7 +1103,9 @@ private:
 };
 } // namespace
 
-template <typename T, typename GK_T, typename BETA_T, typename TilingData>
+template <typename T, typename GK_T, typename BETA_T, typename TilingData,
+          bool RUN_CUBE = true, bool RUN_VECTOR = true,
+          bool SYNCHRONIZE_PIPELINES = true>
 __aicore__ inline void RunChunkKdaPostWu(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR gk, GM_ADDR beta, GM_ADDR initialState,
     GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR wSeed, GM_ADDR akk, GM_ADDR uSeed,
@@ -974,28 +1114,33 @@ __aicore__ inline void RunChunkKdaPostWu(
 {
     GM_ADDR postScratch = userWorkspace + tiling.postWuScratchOffset;
 #if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
-    // Both dav-m200 mixed objects report g_coreType == MIX. Select CANN's
-    // separately compiled cube object explicitly.
+    // dav-m200 exposes both pipelines in the unified mixed image.
     if constexpr (KdaForward::CompilesCubePipeline()) {
 #else
     if ASCEND_IS_AIC {
 #endif
-        ChunkKdaFwdPostWuKernel<T, GK_T, BETA_T> op;
-        op.Init(q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices,
-                wSeed, akk, uSeed, nullptr, userWorkspace, userWorkspace, userWorkspace, akk, w, u,
-                userWorkspace, kg, vNew, postScratch, postScratch, tiling, &pipe, false);
-        op.ProcessAic();
+        if constexpr (RUN_CUBE) {
+            ChunkKdaFwdPostWuKernel<T, GK_T, BETA_T> op;
+            op.Init(q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices,
+                    wSeed, akk, uSeed, nullptr, userWorkspace, userWorkspace, userWorkspace, akk, w, u,
+                    userWorkspace, kg, vNew, postScratch, postScratch, tiling, &pipe, false);
+            op.template ProcessAic<SYNCHRONIZE_PIPELINES>();
+        }
     }
 #if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
-    if constexpr (KdaForward::CompilesVectorPipeline()) {
+    // The default-task 310P image is unified; run the requested vector stage
+    // directly even though the launched object is tagged DAV_CUBE.
+    {
 #else
     if ASCEND_IS_AIV {
 #endif
-        ChunkKdaFwdPostWuKernel<T, GK_T, BETA_T> op;
-        op.Init(q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices,
-                wSeed, akk, uSeed, nullptr, userWorkspace, userWorkspace, userWorkspace, akk, w, u,
-                userWorkspace, kg, vNew, postScratch, postScratch, tiling, &pipe);
-        op.ProcessAiv();
+        if constexpr (RUN_VECTOR) {
+            ChunkKdaFwdPostWuKernel<T, GK_T, BETA_T> op;
+            op.Init(q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices,
+                    wSeed, akk, uSeed, nullptr, userWorkspace, userWorkspace, userWorkspace, akk, w, u,
+                    userWorkspace, kg, vNew, postScratch, postScratch, tiling, &pipe);
+            op.template ProcessAiv<SYNCHRONIZE_PIPELINES>();
+        }
     }
 }
 

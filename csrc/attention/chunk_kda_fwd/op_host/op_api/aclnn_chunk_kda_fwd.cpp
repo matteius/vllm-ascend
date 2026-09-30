@@ -7,6 +7,7 @@
 #include "aclnn_chunk_kda_fwd.h"
 #include "chunk_kda_fwd.h"
 #include "../../../kda_layout_swap12/op_host/op_api/kda_layout_swap12.h"
+#include "../../../kda_gate_cumsum/op_host/op_api/kda_gate_cumsum.h"
 
 #include <algorithm>
 #include <cstring>
@@ -18,6 +19,7 @@
 #include "aclnn_kernels/common/op_error_check.h"
 #include "aclnn_kernels/contiguous.h"
 #include "aclnn_kernels/reshape.h"
+#include "aclnn_kernels/slice.h"
 #include "aclnn_kernels/transpose.h"
 #include "opdev/make_op_executor.h"
 #include "opdev/op_dfx.h"
@@ -36,7 +38,16 @@ constexpr int64_t MAX_KDA_K_DIM = 256;
 constexpr int64_t MAX_KDA_HEAD_NUM = 128;
 constexpr int64_t KDA_STAGE_FULL = -1;
 constexpr int64_t KDA_STAGE_GATE_PREPARE = 0;
-constexpr int64_t KDA_STAGE_COUNT = 4;
+constexpr int64_t KDA_STAGE_POST_WU = 1;
+constexpr int64_t KDA_STAGE_FWD_H = 2;
+constexpr int64_t KDA_STAGE_FINALIZE = 3;
+constexpr int64_t KDA_STAGE_POST_WU_FINALIZE = 4;
+constexpr int64_t KDA_STAGE_FINALIZE_WRITEBACK = 5;
+constexpr int64_t KDA_STAGE_PREPARE_CUBE = 6;
+constexpr int64_t KDA_STAGE_PREPARE_VECTOR_FINALIZE = 7;
+constexpr int64_t KDA_STAGE_PREPARE_WU_SCALE = 8;
+constexpr int64_t KDA_SCORE_REF_BLOCK_SIZE = 32;
+constexpr int64_t KDA_SCORE_SCRATCH_PLANES = 3;
 
 constexpr int64_t MAX_KDA_VARLEN_SEQUENCES = 1024;
 
@@ -373,9 +384,13 @@ aclnnStatus CheckDtypes(const ChunkKdaFwdParams &params)
     const DataType gateType = params.g->GetDataType();
     CHECK_COND(gateType == DataType::DT_FLOAT || gateType == DataType::DT_BF16,
                ACLNN_ERR_PARAM_INVALID, "g must be float32 or bfloat16.");
+    CHECK_COND(!IsAscend310P() || gateType == DataType::DT_FLOAT,
+               ACLNN_ERR_PARAM_INVALID, "Ascend 310P requires float32 g.");
     const DataType betaType = params.beta->GetDataType();
     CHECK_COND(betaType == DataType::DT_FLOAT || betaType == DataType::DT_BF16,
                ACLNN_ERR_PARAM_INVALID, "beta must be float32 or bfloat16.");
+    CHECK_COND(!IsAscend310P() || betaType == DataType::DT_FLOAT,
+               ACLNN_ERR_PARAM_INVALID, "Ascend 310P requires float32 beta.");
     if (params.aLogOptional != nullptr) {
         CHECK_COND(params.aLogOptional->GetDataType() == DataType::DT_FLOAT, ACLNN_ERR_PARAM_INVALID,
                    "aLogOptional must be float32.");
@@ -492,6 +507,9 @@ aclnnStatus CheckParams(const ChunkKdaFwdParams &params, KdaFwdLayout &layout, K
                ACLNN_ERR_PARAM_NULLPTR, "aqkOut and akkOut must not be nullptr.");
     CHECK_COND(params.chunkSize == 64 || params.chunkSize == 128, ACLNN_ERR_PARAM_INVALID,
                "chunkSize must be 64 or 128.");
+    CHECK_COND(!IsAscend310P() || params.chunkSize == 64,
+               ACLNN_ERR_PARAM_INVALID,
+               "Ascend 310P supports chunkSize 64 only.");
     CHECK_RET(ParseLayout(params.layout, layout) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(ResolveShapeInfo(params, layout, info) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_COND(info.hNum > 0 && info.hvNum >= info.hNum && info.hvNum % info.hNum == 0,
@@ -658,6 +676,8 @@ aclnnStatus aclnnChunkKdaFwdGetWorkspaceSize(
     }
 
     const op::Shape gkShape4 = MakeShape({info.batch, info.hvNum, info.seqlen, info.kDim});
+    const op::Shape gkSequenceMajorShape4 =
+        MakeShape({info.batch, info.seqlen, info.hvNum, info.kDim});
     const op::Shape matrixShape4 =
         MakeShape({info.batch, info.hvNum, info.seqlen, params.chunkSize});
     const op::Shape kShape4 = MakeShape({info.batch, info.hvNum, info.seqlen, info.kDim});
@@ -691,6 +711,43 @@ aclnnStatus aclnnChunkKdaFwdGetWorkspaceSize(
             DataType::DT_FLOAT);
     }
     CHECK_RET(gkCompute != nullptr, ACLNN_ERR_INNER_NULLPTR);
+
+    const aclTensor *gkFp16Compute = nullptr;
+    const aclTensor *betaFp16Compute = nullptr;
+    if (IsAscend310P()) {
+        const char *gateLayout = parsedLayout == KdaFwdLayout::BSND
+            ? "BSND" : "BNSD";
+        const aclTensor *gateOutput = gkCompute;
+        if (parsedLayout == KdaFwdLayout::BSND) {
+            // KdaGateCumsum preserves its public input layout, while the
+            // split KDA stages consume head-major [B, HV, T, K]. Accumulate
+            // into a sequence-major temporary before converting layouts.
+            gateOutput = AllocTensor(
+                executorPtr, gkSequenceMajorShape4, DataType::DT_FLOAT);
+            CHECK_RET(gateOutput != nullptr, ACLNN_ERR_INNER_NULLPTR);
+        }
+        const aclTensor *gateResult = l0op::KdaGateCumsum(
+            gHead, params.aLogOptional, params.dtBiasOptional,
+            params.cuSeqlensOptional, params.chunkSize,
+            params.useGateInKernel, params.safeGate,
+            params.lowerBound, gateLayout, gateOutput, executorPtr)[0];
+        CHECK_RET(gateResult != nullptr, ACLNN_ERR_INNER_NULLPTR);
+        if (parsedLayout == KdaFwdLayout::BSND) {
+            gateResult = Transpose(gateResult, {0, 2, 1, 3}, executorPtr);
+            CHECK_RET(gateResult != nullptr, ACLNN_ERR_INNER_NULLPTR);
+            if (params.gkOut != nullptr) {
+                gateResult = l0op::ViewCopy(gateResult, gkCompute, executorPtr);
+                CHECK_RET(gateResult != nullptr, ACLNN_ERR_INNER_NULLPTR);
+            }
+            gkCompute = gateResult;
+        }
+        gkFp16Compute = l0op::Cast(
+            gkCompute, params.q->GetDataType(), executorPtr);
+        betaFp16Compute = l0op::Cast(
+            betaHead, params.q->GetDataType(), executorPtr);
+        CHECK_RET(gkFp16Compute != nullptr && betaFp16Compute != nullptr,
+                  ACLNN_ERR_INNER_NULLPTR);
+    }
 
     const aclTensor *aqkCompute = params.aqkOut;
     const aclTensor *akkCompute = params.akkOut;
@@ -777,26 +834,119 @@ aclnnStatus aclnnChunkKdaFwdGetWorkspaceSize(
     const aclTensor *uSeedCompute = AllocTensor(
         executorPtr, splitStages ? vShape4 : placeholderShape,
         params.q->GetDataType());
-    CHECK_RET(qgScaledCompute != nullptr && uSeedCompute != nullptr,
+    const int64_t scoreBlocksPerTask =
+        (params.chunkSize + KDA_SCORE_REF_BLOCK_SIZE - 1) /
+        KDA_SCORE_REF_BLOCK_SIZE;
+    const int64_t prepareTaskCount = info.hvNum *
+        (params.cuSeqlensOptional == nullptr
+             ? info.batch * info.totalChunks
+             : info.totalChunks);
+    const int64_t scoreScratchElements = prepareTaskCount *
+        scoreBlocksPerTask * KDA_SCORE_SCRATCH_PLANES * params.chunkSize *
+        info.kDim;
+    const int64_t scoreMatrixElements =
+        2 * info.batch * info.hvNum * info.seqlen * params.chunkSize;
+    const aclTensor *scoreScratchCompute = AllocTensor(
+        executorPtr,
+        IsAscend310P() ? MakeShape({scoreScratchElements}) : placeholderShape,
+        params.q->GetDataType());
+    const aclTensor *scoreMatricesCompute = AllocTensor(
+        executorPtr,
+        IsAscend310P() ? MakeShape({scoreMatrixElements}) : placeholderShape,
+        DataType::DT_FLOAT);
+    CHECK_RET(qgScaledCompute != nullptr && uSeedCompute != nullptr &&
+                  scoreScratchCompute != nullptr &&
+                  scoreMatricesCompute != nullptr,
               ACLNN_ERR_INNER_NULLPTR);
 
-    auto launchStage = [&](int64_t stage) {
-        return l0op::KdaChunkForward(
+    const aclTensor *stageDependency = nullptr;
+    auto launchStage = [&](int64_t stage) -> l0op::KdaCoreOutputs {
+        const aclTensor *stageToken =
+            AllocTensor(executorPtr, placeholderShape, DataType::DT_FLOAT);
+        if (stageToken == nullptr) {
+            return {};
+        }
+        l0op::KdaCoreOutputs stageResult = l0op::KdaChunkForward(
             qHead, kHead, vHead, gHead, betaHead, params.aLogOptional,
             params.dtBiasOptional, initialStateCompute, params.cuSeqlensOptional,
-            params.chunkIndicesOptional, params.scale, params.chunkSize,
+            params.chunkIndicesOptional, stageDependency, gkFp16Compute,
+            betaFp16Compute, params.scale,
+            params.chunkSize,
             params.safeGate, parsedLayout == KdaFwdLayout::BSND,
             params.useGateInKernel, params.lowerBound, attnCompute,
             finalStateCompute, gkCompute, aqkCompute, akkCompute, wCompute,
             uCompute, qgCompute, kgCompute, vNewCompute, hCompute,
-            qgScaledCompute, uSeedCompute, stage, executorPtr);
+            qgScaledCompute, uSeedCompute, scoreScratchCompute,
+            scoreMatricesCompute, stageToken, stage, executorPtr);
+        stageDependency = stageResult[15];
+        return stageResult;
     };
     l0op::KdaCoreOutputs result{};
-    if (splitStages) {
+    if (splitStages && IsAscend310P()) {
+        // Keep the FP32 score planes as explicit tensors between the physical
+        // prepare launches. dav-m200 does not reliably lower the mixed-type
+        // FP32-to-FP16 export inside the unified custom-kernel image, so use
+        // the executor's ordinary elementwise/cast kernels before PostWU
+        // consumes these intermediates.
+        for (int64_t stage : {KDA_STAGE_GATE_PREPARE,
+                              KDA_STAGE_PREPARE_CUBE,
+                              KDA_STAGE_PREPARE_VECTOR_FINALIZE,
+                              KDA_STAGE_PREPARE_WU_SCALE}) {
+            result = launchStage(stage);
+            for (const aclTensor *tensor : result) {
+                CHECK_RET(tensor != nullptr, ACLNN_ERR_INNER_NULLPTR);
+            }
+        }
+
+        const int64_t scorePlaneElements = scoreMatrixElements / 2;
+        int64_t aqkOffsetsData[] = {0};
+        int64_t akkOffsetsData[] = {scorePlaneElements};
+        int64_t scorePlaneSizesData[] = {scorePlaneElements};
+        const aclIntArray *aqkOffsets =
+            executorPtr->AllocIntArray(aqkOffsetsData, 1);
+        const aclIntArray *akkOffsets =
+            executorPtr->AllocIntArray(akkOffsetsData, 1);
+        const aclIntArray *scorePlaneSizes =
+            executorPtr->AllocIntArray(scorePlaneSizesData, 1);
+        CHECK_RET(aqkOffsets != nullptr && akkOffsets != nullptr &&
+                      scorePlaneSizes != nullptr,
+                  ACLNN_ERR_INNER_NULLPTR);
+
+        const aclTensor *aqkFp32 = l0op::Slice(
+            scoreMatricesCompute, aqkOffsets, scorePlaneSizes, executorPtr);
+        const aclTensor *akkFp32 = l0op::Slice(
+            scoreMatricesCompute, akkOffsets, scorePlaneSizes, executorPtr);
+        aqkFp32 = l0op::Reshape(aqkFp32, matrixShape4, executorPtr);
+        akkFp32 = l0op::Reshape(akkFp32, matrixShape4, executorPtr);
+        CHECK_RET(aqkFp32 != nullptr && akkFp32 != nullptr,
+                  ACLNN_ERR_INNER_NULLPTR);
+        CHECK_RET(KdaFwdCopyMaybeCastAfter(
+                      aqkFp32, scoreMatricesCompute, aqkCompute,
+                      executorPtr) == ACLNN_SUCCESS &&
+                      KdaFwdCopyMaybeCastAfter(
+                          akkFp32, scoreMatricesCompute, akkCompute,
+                          executorPtr) == ACLNN_SUCCESS,
+                  ACLNN_ERR_INNER_NULLPTR);
+        // The cast/copy nodes consume stage 7's FP32 matrices. Make PostWU
+        // consume their result so its Akk/W/U reads cannot overtake them.
+        stageDependency = akkCompute;
+
+        for (int64_t stage : {KDA_STAGE_POST_WU,
+                              KDA_STAGE_POST_WU_FINALIZE,
+                              KDA_STAGE_FWD_H, KDA_STAGE_FINALIZE,
+                              KDA_STAGE_FINALIZE_WRITEBACK}) {
+            result = launchStage(stage);
+            for (const aclTensor *tensor : result) {
+                CHECK_RET(tensor != nullptr, ACLNN_ERR_INNER_NULLPTR);
+            }
+        }
+    } else if (splitStages) {
         // Physical launch boundaries reset the A5 event state between the
         // prepare, post-WU, recurrent, and output pipelines.
-        for (int64_t stage = KDA_STAGE_GATE_PREPARE; stage < KDA_STAGE_COUNT;
-             ++stage) {
+        const std::vector<int64_t> stages{
+            KDA_STAGE_GATE_PREPARE, KDA_STAGE_POST_WU,
+            KDA_STAGE_FWD_H, KDA_STAGE_FINALIZE};
+        for (int64_t stage : stages) {
             result = launchStage(stage);
             for (const aclTensor *tensor : result) {
                 CHECK_RET(tensor != nullptr, ACLNN_ERR_INNER_NULLPTR);

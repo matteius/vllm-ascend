@@ -44,10 +44,11 @@ CUBE_FRACTAL_SIZE = 16
 CUBE_DEVICE_ROUTED_BACKENDS = ("cube_310_routed", "cube_310_grouped", NATIVE_INT4_BACKEND)
 CUBE_BACKENDS = ("cube_310", "cube_310_tiled", *CUBE_DEVICE_ROUTED_BACKENDS)
 CUBE_TILED_BACKENDS = ("cube_310_tiled", "cube_310_routed", "cube_310_grouped")
-# Decode/MTP reaches 120 routes at the supported four-request shape. Keep
-# those rows on the native routed kernel so decode does not build and sort a
-# grouped-routing descriptor in every MoE layer.
+# Four requests with MTP k=2 reach 120 routes. The native INT4 operator
+# accepts 128 rows, while the W4A16 routed operator accepts only 80. The
+# grouped W4A16 backend handles larger shapes on device instead.
 MAX_CUBE_ROUTES = 128
+MAX_W4A16_ROUTES = 80
 # The fused down-projection epilogue stages one FP16 tile per route in UB.
 # Model c1 decode has at most three tokens times ten routes.
 MAX_FUSED_DOWN_ROUTES = 30
@@ -303,6 +304,7 @@ class W4SparseMoE(nn.Module):
         self.max_chunk_tokens = MAX_CUBE_TOKENS if metadata["backend"] in CUBE_BACKENDS else MAX_EAGER_TOKENS
         self.device_routing = metadata["backend"] in CUBE_DEVICE_ROUTED_BACKENDS
         self.native_int4 = metadata["backend"] == NATIVE_INT4_BACKEND
+        self.max_routed_rows = MAX_CUBE_ROUTES if self.native_int4 else MAX_W4A16_ROUTES
         self.fused_native_down_reduce = (
             self.native_int4 and intermediate == FUSED_DOWN_INPUTS and hidden == FUSED_DOWN_OUTPUTS
         )
@@ -488,13 +490,13 @@ class W4SparseMoE(nn.Module):
             renormalize=self.renormalize,
             routed_scaling_factor=self.routed_scaling_factor,
         )
-        if self.device_routing and block_input.shape[0] * self.top_k <= MAX_CUBE_ROUTES:
+        if self.device_routing and block_input.shape[0] * self.top_k <= self.max_routed_rows:
             result = self._forward_routed(block_input, weights, ids)
         elif self.grouped_routing:
             result = self._forward_grouped(block_input, weights, ids)
         else:
             if self.device_routing and torch.npu.is_current_stream_capturing():
-                raise RuntimeError(f"W4 decode graph exceeds {MAX_CUBE_ROUTES} routes; reduce capture sizes")
+                raise RuntimeError(f"W4 decode graph exceeds {self.max_routed_rows} routes; reduce capture sizes")
             result = self._forward_host_routed(block_input, weights, ids)
         if self.has_shared_expert and not self.shared_expert_replicated:
             if shared is None:
@@ -584,7 +586,7 @@ class W4SparseMoE(nn.Module):
             sorted_tokens = dispatch.token_indices.index_select(0, dispatch.order)
             group_ends = dispatch.group_list.contiguous()
             gate_up_bank = self.projections["gate_up_proj"]
-            if self.native_int4 and tokens * self.top_k > MAX_CUBE_ROUTES:
+            if self.native_int4 and tokens * self.top_k > self.max_routed_rows:
                 # Quantization belongs to the token, not its top-k copies.
                 # Share it across prefill routes; small decode avoids four
                 # gather launches because its packing work is already tiny.

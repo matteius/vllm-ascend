@@ -84,6 +84,41 @@ def _spec_compress_ratio(spec) -> int:
     return spec.tokens_per_state
 
 
+def test_mrv2_preserves_glm_pooled_mla_layout_markers(monkeypatch):
+    class FakeMLAAttention:
+        impl = SimpleNamespace(fa_quant_layer=False, enable_sparse_sfa_c8=False, uses_nz_cache=True)
+
+        @staticmethod
+        def get_kv_cache_spec(_config):
+            return AscendMLAAttentionSpec(
+                block_size=128,
+                num_kv_heads=1,
+                head_size=32,
+                dtype=torch.float16,
+                model_version="glm5_next",
+                indexes_kv_by_block_stride=True,
+                tokens_per_state=4,
+            )
+
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        model_config=SimpleNamespace(dtype=torch.float16),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
+    monkeypatch.setattr(attn_utils, "MLAAttention", FakeMLAAttention)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {"layer.attn": FakeMLAAttention()})
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda *_args: False)
+    monkeypatch.setattr(attn_utils, "kv_cache_dtype_str_to_dtype", lambda *_args: torch.float16)
+
+    spec = attn_utils.get_kv_cache_spec(config)["layer.attn"]
+    assert spec.model_version == "glm5_next"
+    assert spec.indexes_kv_by_block_stride
+    assert spec.tokens_per_state == 4
+    assert spec.use_nz_cache
+
+
 @pytest.mark.parametrize(("block_size", "kernel_block_size"), [(128, 128), (1152, 128), (2048, 128)])
 @pytest.mark.parametrize("kv_transfer", [False, True])
 @pytest.mark.parametrize("cache_kind", ["full", "sliding_window", "sparse", "full_sparse", "mixed"])

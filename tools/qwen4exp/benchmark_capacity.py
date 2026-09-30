@@ -82,7 +82,9 @@ def build_prompt(tokenizer, tokens: int, label: str, mode: str) -> tuple[list[in
     return fit_prompt(head, filler, tail, tokens), passcode
 
 
-def stream_request(base: str, payload: dict, barrier: threading.Barrier, expected: str | None) -> dict:
+def stream_request(
+    base: str, payload: dict, barrier: threading.Barrier, expected: str | None, timeout_s: int = 7200
+) -> dict:
     request = urllib.request.Request(
         base + "/v1/completions", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}
     )
@@ -93,7 +95,7 @@ def stream_request(base: str, payload: dict, barrier: threading.Barrier, expecte
     usage = None
     finish = None
     done = False
-    with urllib.request.urlopen(request, timeout=7200) as response:
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:
         for line in response:
             if not line.startswith(b"data: "):
                 continue
@@ -136,6 +138,31 @@ def stream_request(base: str, payload: dict, barrier: threading.Barrier, expecte
     }
 
 
+def capacity_summary(
+    results: list[dict], peaks: dict[str, float], before: dict[str, float], after: dict[str, float], concurrency: int
+) -> dict:
+    if len(results) != concurrency:
+        raise ValueError("capacity summary requires one completed result per session")
+    overlap = max(0.0, min(result["last"] for result in results) - max(result["first"] for result in results))
+    wall = max(result["end"] for result in results) - min(result["start"] for result in results)
+    preemptions = after["num_preemptions_total"] - before["num_preemptions_total"]
+    return {
+        "event": "summary",
+        "passed": (
+            all(result["correct"] and result["done"] for result in results)
+            and (concurrency == 1 or overlap > 0)
+            and peaks["num_requests_running"] >= concurrency
+            and preemptions == 0
+        ),
+        "decode_overlap_s": overlap,
+        "observed_running_peak": peaks["num_requests_running"],
+        "observed_waiting_peak": peaks["num_requests_waiting"],
+        "kv_usage_peak": peaks["kv_cache_usage_perc"],
+        "e2e_aggregate_tok_s": sum(result["usage"]["completion_tokens"] for result in results) / wall,
+        "metric_deltas": {key: after[key] - before[key] for key in METRICS if key.endswith("_total")},
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8002")
@@ -146,19 +173,23 @@ def main() -> None:
         "--prompt-token-lengths", type=int, nargs="+", help="Override lengths per session for mixed batches"
     )
     parser.add_argument("--output-tokens", type=int, default=512)
-    parser.add_argument("--concurrency", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--context-tokens", type=int, default=262144)
+    parser.add_argument("--concurrency", type=int, choices=(1, 2, 3, 4), default=2)
+    parser.add_argument("--request-timeout-s", type=int, default=7200)
     parser.add_argument("--mode", choices=("throughput", "recall"), default="throughput")
     parser.add_argument(
         "--warm-prefixes", action="store_true", help="Prime each independent prefix before the concurrent run"
     )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if args.prompt_tokens <= 0 or args.output_tokens <= 0:
+    if args.prompt_tokens <= 0 or args.output_tokens <= 0 or args.request_timeout_s <= 0:
         parser.error("token counts must be positive")
     try:
         lengths = prompt_lengths(args.prompt_tokens, args.concurrency, args.prompt_token_lengths)
     except ValueError as exc:
         parser.error(str(exc))
+    if any(length + args.output_tokens > args.context_tokens for length in lengths):
+        parser.error("each prompt plus output budget must fit the per-session context")
     # Read the checkpoint's tokenizer directly. Importing transformers would
     # also auto-load torch_npu in the serving venv; this client needs no NPU.
     from tokenizers import Tokenizer
@@ -200,7 +231,7 @@ def main() -> None:
             for index, payload in enumerate(payloads):
                 emit({"event": "warmup_start", "session": index})
                 warmup = {**payload, "max_tokens": WARMUP_OUTPUT_TOKENS, "ignore_eos": True}
-                result = stream_request(args.base_url, warmup, threading.Barrier(1), None)
+                result = stream_request(args.base_url, warmup, threading.Barrier(1), None, args.request_timeout_s)
                 emit({"event": "warmup_result", "session": index, **result})
                 if not result["correct"]:
                     raise AssertionError("prefix warmup failed")
@@ -214,7 +245,12 @@ def main() -> None:
             for payload, (_, passcode) in zip(payloads, prompts):
                 futures.append(
                     executor.submit(
-                        stream_request, args.base_url, payload, barrier, passcode if args.mode == "recall" else None
+                        stream_request,
+                        args.base_url,
+                        payload,
+                        barrier,
+                        passcode if args.mode == "recall" else None,
+                        args.request_timeout_s,
                     )
                 )
             while not all(future.done() for future in futures):
@@ -227,22 +263,10 @@ def main() -> None:
                 results.append(result)
                 emit({"event": "result", "session": index, **result})
         after = metrics()
-        overlap = max(0.0, min(result["last"] for result in results) - max(result["first"] for result in results))
-        wall = max(result["end"] for result in results) - min(result["start"] for result in results)
-        passed = all(result["correct"] for result in results)
-        emit(
-            {
-                "event": "summary",
-                "passed": passed,
-                "decode_overlap_s": overlap,
-                "observed_running_peak": peaks["num_requests_running"],
-                "kv_usage_peak": peaks["kv_cache_usage_perc"],
-                "e2e_aggregate_tok_s": sum(result["usage"]["completion_tokens"] for result in results) / wall,
-                "metric_deltas": {key: after[key] - before[key] for key in METRICS if key.endswith("_total")},
-            }
-        )
-        if not passed:
-            raise AssertionError("capacity probe failed output validation")
+        summary = capacity_summary(results, peaks, before, after, args.concurrency)
+        emit(summary)
+        if not summary["passed"]:
+            raise AssertionError("capacity probe failed output, overlap, running-count, or preemption gate")
 
 
 if __name__ == "__main__":

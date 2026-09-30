@@ -872,6 +872,28 @@ at::Tensor mhc_sinkhorn_310_meta(
     return at::empty_like(logits);
 }
 
+void qwen4exp_ple_decode_310_meta(
+    const at::Tensor &key,
+    const at::Tensor &value,
+    const at::Tensor &hidden,
+    const at::Tensor &norm_key_weight,
+    const at::Tensor &norm_query_weight,
+    const at::Tensor &norm_conv_weight,
+    const at::Tensor &current_conv_weight,
+    at::Tensor &output,
+    double norm_eps)
+{
+    (void)key;
+    (void)value;
+    (void)hidden;
+    (void)norm_key_weight;
+    (void)norm_query_weight;
+    (void)norm_conv_weight;
+    (void)current_conv_weight;
+    (void)output;
+    (void)norm_eps;
+}
+
 at::Tensor npu_recurrent_gated_delta_rule_meta(
     const at::Tensor& query,
     const at::Tensor& key,
@@ -2303,6 +2325,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // mla_cache_write_310
     ops.impl("mla_cache_write_310", &vllm_ascend::meta::mla_cache_write_310_meta);
     ops.impl("mhc_sinkhorn_310", &vllm_ascend::meta::mhc_sinkhorn_310_meta);
+    // qwen4exp_ple_decode_310
+    ops.impl("qwen4exp_ple_decode_310", &vllm_ascend::meta::qwen4exp_ple_decode_310_meta);
     // chunk_gated_delta_rule_fwd_h
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o_vllm
