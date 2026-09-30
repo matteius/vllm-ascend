@@ -15,10 +15,9 @@
  *
  * The checkpoint remains byte-packed in canonical row-major order. Each AI
  * core decodes only its current 128-output-channel tile, restores logical K
- * order in UB, and writes 16x16 fragments directly in NZ order to a reusable
- * per-output-tile workspace. CATLASS therefore consumes an already-NZ B operand:
- * there is no full [N,K] fp16 materialization, no activation de-interleave,
- * and no ND-to-NZ conversion in the matmul path.
+ * order in UB, and writes 16x16 fragments directly in NZ order. The grouped
+ * NZ-packed path retains one decoded B tile in L1 and feeds Cube directly;
+ * the canonical and single-expert paths use a reusable GM workspace.
  */
 
 #ifndef W2_BLOCKED_DEQUANT_MATMUL_V310_H
@@ -53,6 +52,12 @@ constexpr uint32_t W2_TILE_M = 128;
 constexpr uint32_t W2_TILE_N = 128;
 constexpr uint32_t W2_TILE_K = 128;
 constexpr uint32_t W2_K_FRACTALS_PER_TILE = W2_TILE_K / W2_FRACTAL_SIZE;
+constexpr uint32_t W2_L1_TILE_N = 32;
+constexpr uint32_t W2_L1_MAX_K = 4096;
+constexpr uint32_t W2_L1_WEIGHT_BYTES = W2_L1_TILE_N * W2_L1_MAX_K * sizeof(half);
+constexpr uint32_t W2_L1_A_STAGES = 2;
+constexpr uint32_t W2_L1_A_STAGE_BYTES = W2_TILE_M * W2_TILE_K * sizeof(half);
+constexpr uint32_t W2_L1_MAX_CUBE_K = 512;
 static_assert(W2_BLOCK_SIZE == 2 * W2_FRACTAL_SIZE);
 // The unified-core CATLASS epilogue uses UB [0, 96 KiB) for a maximum-size
 // 128x128 FP32 accumulator followed by its FP16 output.  Keep dequant scratch
@@ -78,6 +83,11 @@ public:
         ArchTag, half, layout::RowMajor, half, layout::zN, half, layout::RowMajor>;
     using BlockMmad = Gemm::Block::BlockMmadTla<
         DispatchPolicyTla, L1TileShapeTla, L0TileShapeTla, half, half, half, void, TileCopy>;
+    static_assert(W2_L1_WEIGHT_BYTES + W2_L1_A_STAGES * W2_L1_A_STAGE_BYTES <= ArchTag::L1_SIZE,
+                  "GLM W2/W4 decoded tile and activation stages must fit L1");
+    static_assert(W2_L1_A_STAGES * W2_L1_A_STAGE_BYTES <= ArchTag::L0A_SIZE &&
+                      W2_L1_A_STAGES * W2_L1_TILE_N * W2_L1_MAX_CUBE_K * sizeof(half) <= ArchTag::L0B_SIZE,
+                  "GLM W2/W4 Cube stages must fit L0");
 
     __aicore__ inline W2BlockedDequantMatmulV310Cube() {}
 
@@ -88,13 +98,15 @@ public:
     __aicore__ inline void InitGeometry(GM_ADDR x, GM_ADDR codes, GM_ADDR blockScale,
                                         GM_ADDR y, GM_ADDR user, int64_t numTokens,
                                         int64_t nDim, int64_t kDim,
-                                        int64_t codesPerByte, bool nzPacked = false)
+                                        int64_t codesPerByte, bool nzPacked = false,
+                                        bool useL1 = false)
     {
         T_ = numTokens;
         N_ = nDim;
         K_ = kDim;
         codesPerByte_ = codesPerByte;
         nzPacked_ = nzPacked;
+        useL1_ = useL1 && nzPacked && K_ <= W2_L1_MAX_K;
         bitsPerCode_ = 8 / codesPerByte_;
         packedK_ = K_ / codesPerByte_;
         packedTileCols_ = W2_TILE_K / codesPerByte_;
@@ -117,6 +129,10 @@ public:
 
     __aicore__ inline void Process()
     {
+        if (useL1_) {
+            ProcessFromL1();
+            return;
+        }
         const uint32_t coreId = GetBlockIdx();
         const uint32_t coreNum = GetBlockNum();
         const uint32_t nBlocks = CeilDivU<uint32_t>((uint32_t)N_, W2_TILE_N);
@@ -162,6 +178,142 @@ public:
     }
 
 private:
+    __aicore__ inline void ProcessFromL1()
+    {
+        const uint32_t nBlocks = CeilDivU<uint32_t>((uint32_t)N_, W2_L1_TILE_N);
+        const int64_t rows = T_;
+        const auto input = xGm_;
+        const auto output = yGm_;
+        AllocBuffers();
+        FillTables();
+        for (uint32_t nb = GetBlockIdx(); nb < nBlocks; nb += GetBlockNum()) {
+            const uint32_t n0 = nb * W2_L1_TILE_N;
+            const uint32_t nActual = MinU<uint32_t>(W2_L1_TILE_N, (uint32_t)N_ - n0);
+            DequantTileToNz(n0, nActual, true);
+            SetFlag<HardEvent::MTE3_MTE1>(EVENT_ID4);
+            for (int64_t row = 0; row < rows; row += W2_TILE_M) {
+                T_ = MinU<int64_t>(W2_TILE_M, rows - row);
+                xGm_ = input[row * K_];
+                yGm_ = output[row * N_];
+                MatmulFromL1(n0, nActual, row == 0);
+            }
+            SetFlag<HardEvent::MTE1_MTE3>(EVENT_ID4);
+            WaitFlag<HardEvent::MTE1_MTE3>(EVENT_ID4);
+        }
+        T_ = rows;
+        xGm_ = input;
+        yGm_ = output;
+    }
+
+    __aicore__ inline void MatmulFromL1(uint32_t n0, uint32_t nActual, bool firstRow)
+    {
+        auto aLayout = tla::MakeLayout<half, layout::RowMajor>((uint32_t)T_, (uint32_t)K_);
+        auto tensorA = tla::MakeTensor(xGm_, aLayout, Arch::PositionGM{});
+        using CopyA = typename TileCopy::template CopyGmToL1A<decltype(tensorA)>;
+        CopyA copyA;
+        typename TileCopy::CopyL1ToL0A copyL0A;
+        typename TileCopy::CopyL1ToL0B copyL0B;
+        typename BlockMmad::TileMmad tileMmad;
+        const uint32_t mActual = T_ == 1 ? W2_FRACTAL_SIZE : (uint32_t)T_;
+        const uint32_t mAligned = AlignUpU<uint32_t>(mActual, W2_FRACTAL_SIZE);
+        uint32_t cubeK = W2_L1_MAX_CUBE_K;
+        while (cubeK > W2_TILE_K &&
+               (K_ % cubeK != 0 || mAligned * cubeK * sizeof(half) > W2_L1_A_STAGE_BYTES)) {
+            cubeK -= W2_FRACTAL_SIZE;
+        }
+        auto aL1Layout = tla::MakeLayout<half, typename TileCopy::LayoutTagL1A>(mAligned, cubeK);
+        auto bL1Layout = tla::MakeLayout<half, typename TileCopy::LayoutTagL1B>((uint32_t)K_, nActual);
+        auto tensorL1B = tla::MakeTensor(resource.l1Buf.template GetBufferByByte<half>(0), bL1Layout,
+                                        Arch::PositionL1{});
+        auto aL0Layout = tla::MakeLayout<half, typename TileCopy::LayoutTagL0A>(mActual, cubeK);
+        auto bL0Layout = tla::MakeLayout<half, typename TileCopy::LayoutTagL0B>(cubeK, nActual);
+        auto l0C = resource.l0CBuf.template GetBufferByByte<float>(0);
+        auto tensorL0C = tla::MakeTensor(l0C, tla::MakeLayoutL0C(mActual, nActual), Arch::PositionL0C{});
+        for (uint32_t stage = 0; stage < W2_L1_A_STAGES; ++stage) {
+            SetFlag<HardEvent::MTE1_MTE2>(stage);
+            SetFlag<HardEvent::M_MTE1>(stage);
+        }
+        if (firstRow) {
+            WaitFlag<HardEvent::MTE3_MTE1>(EVENT_ID4);
+        }
+        for (uint32_t k0 = 0; k0 < K_; k0 += cubeK) {
+            const uint32_t stage = (k0 / cubeK) % W2_L1_A_STAGES;
+            auto l1A = resource.l1Buf.template GetBufferByByte<half>(
+                W2_L1_WEIGHT_BYTES + stage * W2_L1_A_STAGE_BYTES);
+            auto tensorL1A = tla::MakeTensor(l1A, aL1Layout, Arch::PositionL1{});
+            auto tileA = GetTile(tensorA, tla::MakeCoord((uint32_t)0, k0),
+                                 tla::MakeShape((uint32_t)T_, cubeK));
+            WaitFlag<HardEvent::MTE1_MTE2>(stage);
+            copyA(tensorL1A, tileA);
+            SetFlag<HardEvent::MTE2_MTE1>(stage);
+            auto l0A = resource.l0ABuf.template GetBufferByByte<half>(stage * W2_L1_A_STAGE_BYTES);
+            auto l0B = resource.l0BBuf.template GetBufferByByte<half>(
+                stage * W2_L1_TILE_N * cubeK * sizeof(half));
+            auto tensorL0A = tla::MakeTensor(l0A, aL0Layout, Arch::PositionL0A{});
+            auto tensorL0B = tla::MakeTensor(l0B, bL0Layout, Arch::PositionL0B{});
+            auto tileL1A = GetTile(tensorL1A, tla::MakeCoord((uint32_t)0, (uint32_t)0),
+                                   tla::MakeShape(mActual, cubeK));
+            auto tileL1B = GetTile(tensorL1B, tla::MakeCoord(k0, (uint32_t)0),
+                                   tla::MakeShape(cubeK, nActual));
+            WaitFlag<HardEvent::M_MTE1>(stage);
+            WaitFlag<HardEvent::MTE2_MTE1>(stage);
+            copyL0A(tensorL0A, tileL1A);
+            copyL0B(tensorL0B, tileL1B);
+            SetFlag<HardEvent::MTE1_MTE2>(stage);
+            SetFlag<HardEvent::MTE1_M>(EVENT_ID0);
+            WaitFlag<HardEvent::MTE1_M>(EVENT_ID0);
+            const uint8_t unitFlag = k0 + cubeK == K_ ? 0b11 : 0b10;
+            tileMmad(tensorL0C, tensorL0A, tensorL0B, mActual, nActual, cubeK, k0 == 0, unitFlag);
+            SetFlag<HardEvent::M_MTE1>(stage);
+        }
+        for (uint32_t stage = 0; stage < W2_L1_A_STAGES; ++stage) {
+            WaitFlag<HardEvent::M_MTE1>(stage);
+            WaitFlag<HardEvent::MTE1_MTE2>(stage);
+        }
+        StoreL1Accumulator(l0C, n0, nActual);
+    }
+
+    __aicore__ inline void StoreL1Accumulator(LocalTensor<float> accumulator, uint32_t n0,
+                                               uint32_t nActual)
+    {
+        const uint32_t mAligned = AlignUpU<uint32_t>((uint32_t)T_, W2_FRACTAL_SIZE);
+        const uint32_t nAligned = AlignUpU<uint32_t>(nActual, W2_FRACTAL_SIZE);
+        const uint32_t elements = mAligned * nAligned;
+        auto result = resource.ubBuf.template GetBufferByByte<float>(0);
+        auto converted = resource.ubBuf.template GetBufferByByte<half>(elements * sizeof(float));
+        SetFlag<HardEvent::M_V>(EVENT_ID7);
+        WaitFlag<HardEvent::M_V>(EVENT_ID7);
+        DataCopyParams fromCube;
+        fromCube.blockCount = nAligned / W2_FRACTAL_SIZE;
+        fromCube.blockLen = mAligned / W2_FRACTAL_SIZE;
+        fromCube.srcStride = 0;
+        fromCube.dstStride = 0;
+        DataCopyEnhancedParams enhanced;
+        enhanced.blockMode = BlockMode::BLOCK_MODE_MATRIX;
+        DataCopy(result, accumulator, fromCube, enhanced);
+        Cast(converted, result, RoundMode::CAST_NONE, elements);
+        SetFlag<HardEvent::V_MTE3>(EVENT_ID7);
+        WaitFlag<HardEvent::V_MTE3>(EVENT_ID7);
+        for (uint32_t nf = 0; nf < nAligned / W2_FRACTAL_SIZE; ++nf) {
+            for (uint32_t mf = 0; mf < mAligned / W2_FRACTAL_SIZE; ++mf) {
+                const uint32_t row = mf * W2_FRACTAL_SIZE;
+                const uint32_t ubOffset =
+                    (nf * (mAligned / W2_FRACTAL_SIZE) + mf) * W2_FRACTAL_SIZE * W2_FRACTAL_SIZE;
+                DataCopyParams toGm;
+                toGm.blockCount = MinU<uint32_t>(W2_FRACTAL_SIZE, (uint32_t)T_ - row);
+                toGm.blockLen = 1;
+                toGm.srcStride = 0;
+                toGm.dstStride = (N_ - W2_FRACTAL_SIZE) * sizeof(half) / 32;
+                DataCopy(yGm_[static_cast<int64_t>(row) * N_ + n0 + nf * W2_FRACTAL_SIZE],
+                         converted[ubOffset], toGm);
+            }
+        }
+        SetFlag<HardEvent::MTE3_V>(EVENT_ID7);
+        WaitFlag<HardEvent::MTE3_V>(EVENT_ID7);
+        SetFlag<HardEvent::V_M>(EVENT_ID7);
+        WaitFlag<HardEvent::V_M>(EVENT_ID7);
+    }
+
     __aicore__ inline void AllocBuffers()
     {
         uint32_t off = W2_MMAD_EPILOGUE_UB_BYTES;
@@ -279,7 +431,7 @@ private:
         }
     }
 
-    __aicore__ inline void DequantTileToNz(uint32_t n0, uint32_t nActual)
+    __aicore__ inline void DequantTileToNz(uint32_t n0, uint32_t nActual, bool toL1 = false)
     {
         for (uint32_t scaleRowBase = 0; scaleRowBase < nActual; scaleRowBase += W2_BLOCK_SIZE) {
             const int64_t scaleRow = (static_cast<int64_t>(n0) + scaleRowBase) / W2_BLOCK_SIZE;
@@ -324,7 +476,12 @@ private:
                     }
                     SetFlag<HardEvent::V_MTE3>(EVENT_ID2);
                     WaitFlag<HardEvent::V_MTE3>(EVENT_ID2);
-                    if (nzPacked_) {
+                    if (toL1) {
+                        auto weightL1 = resource.l1Buf.template GetBufferByByte<half>(0);
+                        DataCopy(weightL1[nFractal * nzColumnBlockStride +
+                                          k0 * W2_FRACTAL_SIZE], signedHalfUB_,
+                                 (int32_t)decodedTileCount_);
+                    } else if (nzPacked_) {
                         DataCopy(wdqNzGm_[nzBase + k0 * W2_FRACTAL_SIZE],
                                  signedHalfUB_, decodedTileCount_);
                     } else {
@@ -375,6 +532,7 @@ private:
     int64_t kbCount_;
     int64_t coreNzBase_;
     bool nzPacked_;
+    bool useL1_;
 };
 
 }  // namespace NsW2
