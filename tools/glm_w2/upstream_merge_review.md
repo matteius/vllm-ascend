@@ -26,6 +26,10 @@ These upstream changes landed while the local GLM 310P path was being optimized.
 
 The recorded pre-optimization decode trace assigned roughly 14–15 seconds of a 29.8-second 16-iteration one-stream span to grouped expert projections. The NZ-packed code layout greatly reduced that isolated projection cost, but there is no matching post-fusion operator attribution yet. A fresh trace is needed before ranking KDA writeback or graph work above expert dequantization. The newest equal-scale NZ multiply change (`3afc45460`) is mathematically exact but remains unmeasured on NPU.
 
+The 310P source audit found that pure KDA decode already returns the recurrent operator's output tensor directly to normalization. The native convolution receives persistent state directly. The upstream output-buffer and strided-state-copy changes therefore have no equivalent extra copy to eliminate in the current pure-decode path. Mixed speculative/non-speculative batches still scatter into a combined tensor and need a separate profile before an output-buffer change is justified.
+
+The local KPool metadata builder now has per-draft-step persistent output buffers and capture/drafting hooks adapted from upstream. Its buffers freeze after graph capture so replay cannot silently replace a captured block-table address. The upstream proposer remains eager for this branch because the retained model-side indexer uses host `tolist()` and per-request selection; the W2 draft model is also only a stub. Complete graph MTP needs a device-side indexer, real W2 draft weights/forward, compatible vLLM runtime, and hardware parity before the eager gate can be lifted.
+
 ## Validation and deployment boundary
 
 - The merge is source-only. It did not change the running Threadripper server or use the NPU.

@@ -3,6 +3,7 @@
 """Independent pooled-indexer and compressor-state metadata for GLM-Next."""
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from vllm.config import VllmConfig
@@ -17,6 +18,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from vllm_ascend import envs
+from vllm_ascend.attention.kpool_graph_buffers import KPoolGraphBufferSets
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolStateSpec,
     get_kv_cache_compression_ratio,
@@ -70,7 +72,7 @@ class AscendIndexerKPoolMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
     seq_lens: torch.Tensor
-    seq_lens_cpu: torch.Tensor
+    seq_lens_cpu: torch.Tensor | None
     positions: torch.Tensor
     block_size: int
     compress_ratio: int
@@ -131,38 +133,18 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             self.storage_block_size
         )
         scheduler_config = vllm_config.scheduler_config
-        # ACLGraph replay keeps the addresses captured on the first run. The
-        # derived compressed metadata therefore needs persistent storage that
-        # is refreshed in place on every builder invocation.
-        self._slot_mapping_buffer = torch.empty(
-            scheduler_config.max_num_batched_tokens,
-            dtype=torch.int64,
-            device=device,
-        )
-        self._seq_lens_buffer = torch.empty(
-            scheduler_config.max_num_seqs,
-            dtype=torch.int32,
-            device=device,
-        )
-        self._cum_query_lens_buffer = torch.empty(
-            scheduler_config.max_num_seqs,
-            dtype=torch.int32,
-            device=device,
-        )
-        self._raw_seq_lens_buffer = torch.empty(
-            scheduler_config.max_num_seqs,
-            dtype=torch.int32,
-            device=device,
-        )
+        # Each draft step owns a stable common slot-mapping tensor. Keep the
+        # derived buffers separate by that address so graph capture and replay
+        # see the same storage without draft steps overwriting each other.
         max_logical_blocks = cdiv(
             vllm_config.model_config.max_model_len,
             self.logical_block_size,
         )
-        self._block_table_buffer = torch.empty(
-            scheduler_config.max_num_seqs,
+        self._graph_buffers = KPoolGraphBufferSets(
+            device,
+            scheduler_config.max_num_batched_tokens,
+            max(scheduler_config.max_num_seqs, scheduler_config.max_num_batched_tokens),
             max_logical_blocks * self.indexer_blocks_per_logical_block,
-            dtype=torch.int32,
-            device=device,
         )
 
     def build(
@@ -175,8 +157,10 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         del common_prefix_len, fast_build, kwargs
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
-        positions = common_attn_metadata.positions[:num_input_tokens].long()
-        slot_mapping = self._slot_mapping_buffer[:num_input_tokens]
+        buffers = self._graph_buffers.get(common_attn_metadata.slot_mapping)
+        positions = buffers.positions[:num_input_tokens]
+        positions.copy_(common_attn_metadata.positions[:num_input_tokens])
+        slot_mapping = buffers.slots[:num_input_tokens]
         slot_mapping.copy_(
             format_indexer_kpool_slot_mapping(
                 common_attn_metadata.slot_mapping[:num_input_tokens],
@@ -185,16 +169,16 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
                 self.compress_ratio,
             )
         )
-        seq_lens = self._seq_lens_buffer[:num_reqs]
+        seq_lens = buffers.seq_lens[:num_reqs]
         torch.div(
             common_attn_metadata.seq_lens[:num_reqs],
             self.compress_ratio,
             rounding_mode="floor",
             out=seq_lens,
         )
-        cum_query_lens = self._cum_query_lens_buffer[:num_reqs]
+        cum_query_lens = buffers.query_ends[:num_reqs]
         cum_query_lens.copy_(common_attn_metadata.query_start_loc[: num_reqs + 1][1:])
-        raw_seq_lens = self._raw_seq_lens_buffer[:num_reqs]
+        raw_seq_lens = buffers.raw_seq_lens[:num_reqs]
         raw_seq_lens.copy_(common_attn_metadata.seq_lens[:num_reqs])
         if common_attn_metadata._seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
@@ -216,21 +200,17 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             )
         logical_width = expanded_block_table.shape[1] // split
         expanded_width = logical_width * self.indexer_blocks_per_logical_block
-        if expanded_width > self._block_table_buffer.shape[1]:
-            # The __init__ estimate (max_model_len / logical_block_size) can be
+        if expanded_width > buffers.block_table.shape[1] or num_reqs > buffers.block_table.shape[0]:
+            # The initial estimate (max_model_len / logical_block_size) can be
             # too narrow: the 310P page-attention limit (block_size*head_size
             # <= 16384) forces the DSA KV cache into 32-wide kernel blocks, so
             # the scheduler block table is split/expanded beyond the logical
-            # estimate. Grow the persistent buffer to fit (grows once to the
-            # widest build; safe under enforce_eager -- no captured-graph
-            # address pinning).
-            self._block_table_buffer = torch.empty(
-                self._block_table_buffer.shape[0],
-                expanded_width,
-                dtype=self._block_table_buffer.dtype,
-                device=self._block_table_buffer.device,
+            # estimate. Grow this draft step's buffer before graph capture; a
+            # replay of the same bucket then keeps its captured address.
+            buffers = self._graph_buffers.ensure_table_capacity(
+                common_attn_metadata.slot_mapping, num_reqs, expanded_width
             )
-        block_table = self._block_table_buffer[:num_reqs, :expanded_width]
+        block_table = buffers.block_table[:num_reqs, :expanded_width]
         # The common full-group table is expanded for its MLA kernel:
         # scheduler block N becomes [split*N, ..., split*N+split-1]. The
         # compressed indexer owns one physical page per scheduler block, so it
@@ -274,6 +254,26 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             raw_seq_lens=raw_seq_lens,
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
         )
+
+    def build_for_graph_capture(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        attn_state: Any = None,
+        **kwargs,
+    ) -> AscendIndexerKPoolMetadata:
+        del attn_state
+        metadata = self.build(0, common_attn_metadata, **kwargs)
+        self._graph_buffers.freeze(common_attn_metadata.slot_mapping)
+        return metadata
+
+    def build_for_drafting(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        draft_index: int,
+        **kwargs,
+    ) -> AscendIndexerKPoolMetadata:
+        del draft_index
+        return self.build(0, common_attn_metadata, fast_build=True, **kwargs)
 
 
 class AscendIndexerKPoolBackend(AttentionBackend):
@@ -368,6 +368,24 @@ class AscendIndexerKPoolStateMetadataBuilder(AttentionMetadataBuilder):
             block_size=self.block_size,
             cache_role=self.cache_role,
         )
+
+    def build_for_graph_capture(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        attn_state: Any = None,
+        **kwargs,
+    ) -> AscendIndexerKPoolStateMetadata:
+        del attn_state
+        return self.build(0, common_attn_metadata, **kwargs)
+
+    def build_for_drafting(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        draft_index: int,
+        **kwargs,
+    ) -> AscendIndexerKPoolStateMetadata:
+        del draft_index
+        return self.build(0, common_attn_metadata, fast_build=True, **kwargs)
 
 
 class AscendIndexerKPoolStateBackend(AttentionBackend):
