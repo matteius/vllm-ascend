@@ -678,6 +678,33 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             and (is_breakable_cudagraph_enabled() or isinstance(self.model, BreakableACLGraphWrapper))
         )
 
+    def set_update_stream(self, update_stream: Any) -> None:
+        if hasattr(self._runnable, "set_update_stream"):
+            self._runnable.set_update_stream(update_stream)
+        self.update_stream = update_stream
+
+    def _maybe_update_metadata(
+        self,
+        att_backend: Any,
+        multi_steps_attn_metadata: list[dict[str, Any]],
+    ) -> None:
+        if not use_updatable_graph(att_backend):
+            return
+
+        update_params = []
+        for per_step_metadata in multi_steps_attn_metadata:
+            for layer_name, metadata in per_step_metadata.items():
+                update_params.append(
+                    {
+                        "layer_name": layer_name,
+                        "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                        "actual_seq_lengths_kv": metadata.seq_lens_list,
+                        "block_table": metadata.block_tables,
+                    }
+                )
+        self._runnable.update_draft_model_metadata(update_params)  # type: ignore
+        self._runnable.set_attn_backend(att_backend)  # type: ignore
+
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         self._lim_topk_compactors = []
         draft_model = getattr(self.model, "model", None)
