@@ -355,15 +355,21 @@ private:
             previousWeight[head] = rowSum[head] == 0.0f ? 0.0f : ScalarExp(rowMax[head] - newMax, scratch);
             Adds(softmaxRows[rowOffset], softmaxRows[rowOffset], -newMax, tileWidth);
             PipeBarrier<PIPE_V>();
-            Exp(softmaxRows[rowOffset], softmaxRows[rowOffset], tileWidth);
-            PipeBarrier<PIPE_V>();
+            rowMax[head] = newMax;
+        }
+        // All active rows are contiguous in UB. One vector exponential avoids
+        // repeating pipeline setup once per query head for every 64-token
+        // tile while preserving the per-row FP32 max and reduction order.
+        Exp(softmaxRows, softmaxRows, queryHeads * tileWidth);
+        PipeBarrier<PIPE_V>();
+        for (int64_t head = 0; head < queryHeads; ++head) {
+            const int64_t rowOffset = head * TOKEN_TILE;
             for (int64_t lane = tileTokens; lane < tileWidth; ++lane) {
                 softmaxRows.SetValue(rowOffset + lane, 0.0f);
             }
             PipeBarrier<PIPE_V>();
             const float tileSum = ReduceSum(softmaxRows[rowOffset], scratch);
             rowSum[head] = rowSum[head] * previousWeight[head] + tileSum;
-            rowMax[head] = newMax;
         }
         Cast(probabilityRows, softmaxRows, RoundMode::CAST_NONE, queryHeads * tileWidth);
         PipeBarrier<PIPE_V>();
