@@ -77,6 +77,49 @@ def test_resident_bank_streams_directly_into_final_grouped_storage():
     assert torch.equal(bank.gate_packed_bank[0], replacement)
 
 
+def test_resident_gate_up_share_one_allocation_and_rebuild_together():
+    bank = _PackedW2ExpertBank(
+        hidden=256,
+        inter=128,
+        num_experts=2,
+        local_expert_offset=0,
+        num_local_experts=2,
+        offload_to_cpu=False,
+    )
+    for expert_id in range(2):
+        for projection, value in (("gate", 3), ("up", 5)):
+            bank.place_resident_tensor(
+                expert_id,
+                f"{projection}_packed",
+                torch.full((128, 64), value + expert_id, dtype=torch.uint8),
+                device="cpu",
+            )
+            bank.place_resident_tensor(
+                expert_id,
+                f"{projection}_scale",
+                torch.full((4, 8), value + expert_id),
+                device="cpu",
+            )
+
+    for kind in ("packed", "scale"):
+        fused = getattr(bank, f"gate_up_{kind}_bank")
+        gate = getattr(bank, f"gate_{kind}_bank")
+        up = getattr(bank, f"up_{kind}_bank")
+        assert fused.untyped_storage().data_ptr() == gate.untyped_storage().data_ptr()
+        assert fused.untyped_storage().data_ptr() == up.untyped_storage().data_ptr()
+        assert torch.equal(fused[:, : gate.shape[1]], gate)
+        assert torch.equal(fused[:, gate.shape[1] :], up)
+
+    bank.place_resident_tensor(0, "gate_packed", torch.full((128, 128), 7, dtype=torch.uint8), device="cpu")
+    assert bank[0].up_packed is None
+    assert bank[1].gate_packed is None
+    assert bank[1].up_packed is None
+    assert bank.gate_up_packed_bank.shape == (2, 256, 128)
+    bank.place_resident_tensor(0, "up_packed", torch.full((128, 128), 9, dtype=torch.uint8), device="cpu")
+    assert torch.equal(bank.gate_up_packed_bank[0, :128], bank[0].gate_packed)
+    assert torch.equal(bank.gate_up_packed_bank[0, 128:], bank[0].up_packed)
+
+
 def test_resident_bank_rebuilds_projection_for_overlay_width_change():
     bank = _PackedW2ExpertBank(
         hidden=64,

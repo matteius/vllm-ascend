@@ -278,6 +278,21 @@ def _can_use_w2_grouped_cube(grouped_op: Any, experts: Any, num_routes: int) -> 
     gate_codes, gate_scale, up_codes, up_scale, down_codes, down_scale = banks
     hidden = int(experts[experts.local_expert_offset].hidden)
     inter = int(experts[experts.local_expert_offset].inter)
+    # Gate/up views of a fused allocation have a larger expert stride than a
+    # standalone bank. The native operator requires a contiguous input bank;
+    # only hand it the full fused allocation in that case.
+    if any(not bank.is_contiguous() for bank in (gate_codes, gate_scale, up_codes, up_scale)):
+        fused_codes = getattr(experts, "gate_up_packed_bank", None)
+        fused_scales = getattr(experts, "gate_up_scale_bank", None)
+        if (
+            fused_codes is None
+            or fused_scales is None
+            or not fused_codes.is_contiguous()
+            or not fused_scales.is_contiguous()
+            or fused_codes.shape[1] != 2 * inter
+            or fused_scales.shape[1] != 2 * gate_scale.shape[1]
+        ):
+            return False
     return (
         gate_codes.shape[:2] == up_codes.shape[:2]
         and gate_scale.shape == up_scale.shape
@@ -659,8 +674,18 @@ class AscendW2DynamicFusedMoEMethod310(AscendMoEScheme):
         sorted_tokens = dispatch.token_indices.index_select(0, dispatch.order)
         sorted_x = x.index_select(0, sorted_tokens).to(torch.float16).contiguous()
         group_ends = dispatch.group_list.to(torch.int64).contiguous()
-        gate = grouped_op(sorted_x, experts.gate_packed_bank, experts.gate_scale_bank, group_ends)
-        up = grouped_op(sorted_x, experts.up_packed_bank, experts.up_scale_bank, group_ends)
+        fused_codes = getattr(experts, "gate_up_packed_bank", None)
+        fused_scales = getattr(experts, "gate_up_scale_bank", None)
+        if (
+            fused_codes is not None
+            and fused_scales is not None
+            and fused_codes.shape[1] == 2 * experts.gate_packed_bank.shape[1]
+            and fused_scales.shape[1] == 2 * experts.gate_scale_bank.shape[1]
+        ):
+            gate, up = grouped_op(sorted_x, fused_codes, fused_scales, group_ends).chunk(2, dim=-1)
+        else:
+            gate = grouped_op(sorted_x, experts.gate_packed_bank, experts.gate_scale_bank, group_ends)
+            up = grouped_op(sorted_x, experts.up_packed_bank, experts.up_scale_bank, group_ends)
         hidden_act = (torch.nn.functional.silu(gate.to(torch.float32)) * up.to(torch.float32)).to(torch.float16)
         routed = grouped_op(hidden_act, experts.down_packed_bank, experts.down_scale_bank, group_ends).to(torch.float32)
         routed *= dispatch.route_weights.index_select(0, dispatch.order)

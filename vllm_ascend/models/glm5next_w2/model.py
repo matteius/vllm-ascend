@@ -323,9 +323,18 @@ class _PackedW2ExpertBank(list[_PackedW2Expert]):
             in_features = self.inter if name == "down_packed" else self.hidden
             tensor = _pack_codes_nz(tensor.cpu(), in_features).view(torch.int8)
 
-        bank_name = f"{name}_bank"
+        # Gate and up consume the same activations. Store their rows in one
+        # allocation so the grouped Cube operator can project both in one call.
+        # The per-projection banks remain views for the eager fallback.
+        fused = name.startswith(("gate_", "up_"))
+        kind = name.rsplit("_", 1)[-1]
+        bank_name = f"gate_up_{kind}_bank" if fused else f"{name}_bank"
         grouped = getattr(self, bank_name, None)
-        expected_shape = (self.num_local_experts, *tensor.shape)
+        expected_shape = (
+            (self.num_local_experts, 2 * tensor.shape[0], *tensor.shape[1:])
+            if fused
+            else (self.num_local_experts, *tensor.shape)
+        )
         if grouped is None:
             grouped = torch.empty(
                 expected_shape,
@@ -335,8 +344,14 @@ class _PackedW2ExpertBank(list[_PackedW2Expert]):
             setattr(self, bank_name, grouped)
         elif grouped.shape != expected_shape or grouped.dtype != tensor.dtype:
             old_device_type = grouped.device.type
+            affected = (f"gate_{kind}", f"up_{kind}") if fused else (name,)
             for resident_expert in self[self.local_expert_offset : self.local_expert_offset + self.num_local_experts]:
-                setattr(resident_expert, name, None)
+                for projection in affected:
+                    setattr(resident_expert, projection, None)
+            for projection in affected:
+                projection_bank = f"{projection}_bank"
+                if projection_bank != bank_name and hasattr(self, projection_bank):
+                    delattr(self, projection_bank)
             delattr(self, bank_name)
             del grouped
             gc.collect()
@@ -349,8 +364,12 @@ class _PackedW2ExpertBank(list[_PackedW2Expert]):
             )
             setattr(self, bank_name, grouped)
 
+        if fused:
+            rows = tensor.shape[0]
+            setattr(self, f"gate_{kind}_bank", grouped[:, :rows])
+            setattr(self, f"up_{kind}_bank", grouped[:, rows:])
         expert = self[expert_id]
-        destination = grouped[local]
+        destination = getattr(self, f"{name}_bank")[local] if fused else grouped[local]
         destination.copy_(tensor)
         setattr(expert, name, destination)
 
