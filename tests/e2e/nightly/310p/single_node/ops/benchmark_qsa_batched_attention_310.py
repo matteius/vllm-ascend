@@ -12,7 +12,10 @@ import time
 import torch
 import torch_npu
 
-from vllm_ascend.models.qwen4_exp.ops.qsa_batched_attention_310 import qsa_batched_prefill_310
+from vllm_ascend.models.qwen4_exp.ops.qsa_batched_attention_310 import (
+    QSAPrefillGatherStreams,
+    qsa_batched_prefill_310,
+)
 from vllm_ascend.models.qwen4_exp.ops.qsa_gather_nz_310 import (
     qsa_gather_key_transposed_nz_310,
     qsa_gather_value_nz_310,
@@ -141,6 +144,20 @@ def main() -> None:
             scale=head_dim**-0.5,
         )
 
+    parallel_gather_streams = QSAPrefillGatherStreams()
+
+    def serving_parallel() -> torch.Tensor:
+        return qsa_batched_prefill_310(
+            query,
+            key_cache,
+            value_cache,
+            selection,
+            block_table,
+            query_start_loc,
+            scale=head_dim**-0.5,
+            gather_streams=parallel_gather_streams.get(),
+        )
+
     def serving_sorted() -> torch.Tensor:
         sorted_selection = QSAGroupSelection(
             group_indices=torch.sort(selection.group_indices, dim=-1).values,
@@ -218,6 +235,7 @@ def main() -> None:
     native_result, native_times = (None, None) if args.serving_only else measure(native)
     batched_result, batched_times = (None, None) if args.serving_only else measure(batched)
     serving_result, serving_times = measure(serving_batched)
+    parallel_result, parallel_times = measure(serving_parallel)
     sorted_result, sorted_times = measure(serving_sorted) if args.sort_groups else (None, None)
     bounded_results = {tile: measure(lambda tile=tile: serving_bounded(tile)) for tile in args.tile_sizes}
     nz_key_result, nz_key_times = (
@@ -402,6 +420,7 @@ def main() -> None:
             )
     difference = None if args.serving_only else batched_result.float() - native_result.float()
     serving_difference = None if args.serving_only else serving_result.float() - native_result.float()
+    parallel_difference = parallel_result.float() - serving_result.float()
     sorted_difference = sorted_result.float() - serving_result.float() if sorted_result is not None else None
     comparison_result = serving_result if native_result is None else native_result
     nz_key_difference = nz_key_result.float() - comparison_result.float() if nz_key_result is not None else None
@@ -430,6 +449,11 @@ def main() -> None:
                 "native_ms": native_times,
                 "batched_ms": batched_times,
                 "serving_batched_ms": serving_times,
+                "serving_parallel_ms": parallel_times,
+                "serving_parallel_max_abs_difference": parallel_difference.abs().max().item(),
+                "serving_parallel_relative_rms_difference": (
+                    parallel_difference.square().mean().sqrt() / serving_result.float().square().mean().sqrt()
+                ).item(),
                 "sorted_groups_ms": sorted_times,
                 "sorted_groups_max_abs_difference": sorted_difference.abs().max().item()
                 if sorted_difference is not None
