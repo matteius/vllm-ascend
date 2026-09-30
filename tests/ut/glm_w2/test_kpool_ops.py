@@ -128,7 +128,8 @@ def test_indexer_completes_a_pool_across_prefill_chunks():
     indexer.topk_indices_buffer = topk_buffer
     indexer.skip_k_cache_insert = False
 
-    for start, end in ((0, 6), (6, 9)):
+    compression_batch_sizes = []
+    for start, end in ((0, 6), (6, 7), (7, 9)):
         positions = torch.arange(start, end, dtype=torch.int32)
         slots = torch.full((end - start,), -1, dtype=torch.int32)
         completed = (positions + 1) % 4 == 0
@@ -145,9 +146,15 @@ def test_indexer_completes_a_pool_across_prefill_chunks():
             ),
             "state": SimpleNamespace(slot_mapping=positions),
         }
-        with patch(
-            "vllm_ascend.models.glm5next.sparse_attn_indexer_kpool.get_forward_context",
-            return_value=SimpleNamespace(attn_metadata=metadata),
+        with (
+            patch(
+                "vllm_ascend.models.glm5next.sparse_attn_indexer_kpool.get_forward_context",
+                return_value=SimpleNamespace(attn_metadata=metadata),
+            ),
+            patch(
+                "vllm_ascend.models.glm5next.sparse_attn_indexer_kpool.compress_kpool",
+                wraps=compress_kpool,
+            ) as compress,
         ):
             indexer.forward_oot(
                 keys[start:end],
@@ -159,11 +166,13 @@ def test_indexer_completes_a_pool_across_prefill_chunks():
                 index_kpool=4,
                 positions=positions,
             )
+            compression_batch_sizes.append(compress.call_args.args[0].shape[0])
 
+    assert compression_batch_sizes == [1, 0, 1]
     expected = compress_kpool(keys[4:8].unsqueeze(0), gates[4:8].unsqueeze(0), ape)
     torch.testing.assert_close(key_cache[0, 1, 0], expected[0].to(key_cache.dtype))
     # One complete pool is selected; token 8 remains the mandatory tail.
-    selected = topk_buffer[2]
+    selected = topk_buffer[1]
     assert selected[0] in (0, 4)
     assert selected[4] == 8
 

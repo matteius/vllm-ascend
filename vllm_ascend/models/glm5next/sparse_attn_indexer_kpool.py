@@ -116,7 +116,10 @@ class SparseAttnIndexerKpool(CustomOp):
         ] = torch.cat((keys[valid_state].float(), gates[valid_state].float()), dim=-1)
 
         completed = ((positions + 1) % pool_size == 0) & (indexer_metadata.slot_mapping[:num_tokens] >= 0)
-        compressed = compress_kpool(pool_keys, pool_gates, ape)
+        # Only the final token of a pool writes a compressed key.  Select
+        # before the softmax and Hadamard transform so incomplete pools do
+        # not consume the compression work during large prefills.
+        compressed = compress_kpool(pool_keys[completed], pool_gates[completed], ape)
         pool_slots = indexer_metadata.slot_mapping[:num_tokens][completed].long()
         block_size = key_cache.shape[1]
         # The shared GLM cache is a page-strided view of an int8 backing.
@@ -135,7 +138,7 @@ class SparseAttnIndexerKpool(CustomOp):
         flat_cache.index_copy_(
             0,
             element_offsets.reshape(-1),
-            compressed[completed].to(key_cache.dtype).reshape(-1),
+            compressed.to(key_cache.dtype).reshape(-1),
         )
 
     def forward_oot(
