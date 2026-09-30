@@ -1,0 +1,9 @@
+{
+  "blocks": 342,
+  "logical_shape": [342, 32, 384, 16],
+  "logical_stride": [393216, 6144, 16, 1],
+  "physical_shape": [342, 64, 384, 16],
+  "parity": "exact FP16",
+  "strided_median_ms": 2.8704924989142455,
+  "physical_median_ms": 0.061506500060204417
+}

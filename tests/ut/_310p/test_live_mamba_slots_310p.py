@@ -7,8 +7,45 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 
-from vllm_ascend._310p.prefix_mamba_state import LiveMambaRequestSlots
+from vllm_ascend._310p.prefix_mamba_state import LiveMambaRequestSlots, supports_compact_live_mamba_state
+
+
+def test_glm_multi_request_uses_compact_live_mamba_state() -> None:
+    assert supports_compact_live_mamba_state(4, "glm5_next_text")
+    assert supports_compact_live_mamba_state(4, "qwen4_exp_text")
+    assert supports_compact_live_mamba_state(1, None)
+    assert not supports_compact_live_mamba_state(4, None)
+
+
+def test_glm_live_state_rejects_runner_without_compact_remap() -> None:
+    pytest.importorskip("torch_npu")
+    from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
+
+    runner = object.__new__(NPUModelRunner310)
+    runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
+    runner.model_config = SimpleNamespace(use_mla=False, hf_text_config=SimpleNamespace(model_type="glm5_next_text"))
+    runner.use_sparse = False
+    runner.supports_compact_mamba_state = False
+    runner._get_layer_kv_cache_specs = lambda _: {
+        "model.layers.1.attn": MLAAttentionSpec(
+            block_size=512,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.float16,
+            model_version="glm5_next",
+        ),
+        "model.layers.0.linear_attn": MambaSpec(
+            block_size=512,
+            shapes=((3, 16), (1, 16, 16)),
+            dtypes=(torch.float16, torch.float32),
+            mamba_cache_mode="none",
+        ),
+    }
+
+    with pytest.raises(ValueError, match="requires compact Mamba block-table remapping"):
+        runner.initialize_kv_cache_tensors(SimpleNamespace())
 
 
 def test_lanes_follow_request_identity_and_reuse_starts_zero() -> None:

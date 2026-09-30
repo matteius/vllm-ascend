@@ -33,6 +33,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 )
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
+    get_glm5_next_fixed_pool_bytes,
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
     get_glm5_next_max_memory_usage,
@@ -47,6 +48,7 @@ _orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_k
 _orig_get_kv_cache_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_groups
 _orig_get_packed_kv_cache_groups = vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups
 _orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups
+_orig_get_kv_cache_configs = vllm.v1.core.kv_cache_utils.get_kv_cache_configs
 _orig_max_memory_usage_bytes_from_groups = vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups
 _orig_pool_bytes_per_block = vllm.v1.core.kv_cache_utils._pool_bytes_per_block
 if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
@@ -159,9 +161,7 @@ def _has_qwen4exp_qsa_ring_group(groups: list[KVCacheGroupSpec]) -> bool:
         from vllm_ascend.models.qwen4_exp.kv_cache import AscendQSARawRingSpec
     except Exception:  # pragma: no cover - model package optional at patch time
         return False
-    return any(
-        isinstance(group.kv_cache_spec, AscendQSARawRingSpec) for group in groups
-    )
+    return any(isinstance(group.kv_cache_spec, AscendQSARawRingSpec) for group in groups)
 
 
 def _get_kimi_k3_dspark_mixed_kv_cache_groups(
@@ -645,6 +645,56 @@ def _ascend_get_kv_cache_config_from_groups(
     return kv_cache_config
 
 
+def _ascend_get_kv_cache_configs(
+    vllm_config: VllmConfig,
+    kv_cache_specs: list[dict[str, KVCacheSpec]],
+    available_memory: list[int],
+) -> list[KVCacheConfig]:
+    """Reconcile GLM ranks while retaining their fixed live KDA reserve.
+
+    vLLM re-plans a larger rank with ``min_blocks * bytes_per_block``. GLM's
+    planner subtracts fixed live KDA bytes from that budget, leaving the
+    re-planned rank with fewer blocks than the limiting rank. Re-plan against
+    the original per-rank memory, then add the fixed reserve to the common
+    variable-block budget.
+    """
+    configs = _orig_get_kv_cache_configs(vllm_config, kv_cache_specs, available_memory)
+    if len(configs) < 2 or any(_get_glm5_next_cache_layout(cfg.kv_cache_groups) is None for cfg in configs):
+        return configs
+
+    if len(configs) != len(available_memory):
+        raise ValueError("GLM KV cache rank count does not match memory profiles")
+    initial = [
+        _ascend_get_kv_cache_config_from_groups(vllm_config, cfg.kv_cache_groups, memory)
+        for cfg, memory in zip(configs, available_memory)
+    ]
+    variable_ranks = [
+        cfg.num_blocks
+        for cfg in initial
+        if (layout := _get_glm5_next_cache_layout(cfg.kv_cache_groups)) is not None
+        and (layout.main_slot_count or layout.small_slot_count)
+    ]
+    common_blocks = min(variable_ranks or [cfg.num_blocks for cfg in initial])
+    reconciled = []
+    for cfg in configs:
+        groups = cfg.kv_cache_groups
+        layout = _get_glm5_next_cache_layout(groups)
+        assert layout is not None
+        fixed_bytes = get_glm5_next_fixed_pool_bytes(vllm_config, groups)
+        block_bytes = get_glm5_next_pool_bytes_per_block(groups)
+        planned = _ascend_get_kv_cache_config_from_groups(
+            vllm_config, groups, fixed_bytes + common_blocks * block_bytes
+        )
+        if layout.main_slot_count == layout.small_slot_count == 0:
+            # Mamba-only PP ranks use fixed per-request state tensors while
+            # sharing the global scheduler block-ID range.
+            planned.num_blocks = common_blocks
+        if planned.num_blocks != common_blocks:
+            raise ValueError("GLM KV cache ranks could not agree on a common block count")
+        reconciled.append(planned)
+    return reconciled
+
+
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
 assert _orig_get_packed_kv_cache_groups is not None
 vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
@@ -654,6 +704,7 @@ KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
     _kv_cache_config_has_mamba_layers
 )
 vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
+vllm.v1.core.kv_cache_utils.get_kv_cache_configs = _ascend_get_kv_cache_configs
 vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
 vllm.v1.core.kv_cache_utils._pool_bytes_per_block = _ascend_pool_bytes_per_block
 
@@ -661,3 +712,4 @@ vllm.v1.core.kv_cache_utils._pool_bytes_per_block = _ascend_pool_bytes_per_block
 import vllm.v1.engine.core  # noqa: E402
 
 vllm.v1.engine.core.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+vllm.v1.engine.core.get_kv_cache_configs = _ascend_get_kv_cache_configs

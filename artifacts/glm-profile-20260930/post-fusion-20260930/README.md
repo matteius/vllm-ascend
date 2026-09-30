@@ -118,13 +118,37 @@ returned to the linear scan and the candidate package was not used for serving.
 | W4 gate/up | 32 | 4.0421 ms | 4.0533 ms |
 | W2 down | 32 | 4.9823 ms | 4.9607 ms |
 
-A direct QSA probe with the trace's 342-page geometry measured 2.90 ms per
-call for the logical `[342,32,384,16]` view backed by 64 physical channels.
-A contiguous 64-channel control took 0.065 ms. That control has a different
-logical KV-head count, so the timing isolates the copy cost but is not an
-equivalent attention result. The source now passes QSA a contiguous physical
-page and an explicit logical KV-head count; the kernel uses its existing
-physical page stride for addressing. A regression compares this path against
-an unpadded page. The requested NPU deferral began before this change could
-be built or measured end to end. The compact live-KDA planner remains a
-separate route to avoid padding the MLA page in the first place.
+A direct QSA probe with the trace's 342-page geometry initially measured
+2.90 ms per call for the logical `[342,32,384,16]` view backed by 64
+physical channels. A contiguous 64-channel control took 0.065 ms. That
+control had a different logical KV-head count, so it isolated copy cost but
+was not equivalent attention. The source now passes QSA a contiguous physical
+page and an explicit logical KV-head count; the kernel uses its physical page
+stride for addressing. The compact live-KDA planner remains a separate route
+to avoid padding the MLA page in the first place.
+
+## Physical-page QSA and four-rank integration
+
+The isolated native QSA build passed two Ascend 310P parity tests, including a
+40-token case across two pages with exact FP16 output. With 342 physical pages
+and the same logical KV-head count in both calls, the strided view measured
+2.8705 ms median and the contiguous physical-page call measured 0.0615 ms
+median. `benchmark-qsa-physical-page.py` and `qsa-physical-page-342.json`
+record the probe. This is an isolated operator result, not a serving rate.
+
+The first full TP4 load of the isolated package failed before serving because
+vLLM's cross-rank shrinker omitted GLM's fixed live-KDA memory reserve and
+returned different KV block counts. Re-planning each worker with its fixed
+reserve plus a common variable-block budget fixed startup. A second TP4 load
+served `/v1/models` at port 8003 and reported 37,780 tokens of NPU KV cache.
+
+Its first generation request then exited with an AICPU `index 9 is out of
+bounds for dimension 0 with size 4` error, followed by an AICore exception in
+`RecurrentGatedDeltaRuleV310`. The isolated package had an older 310P runner
+condition that enabled four-request compact Mamba state for Qwen but omitted
+GLM. The planner allocated four live KDA state slots while the runner left
+scheduler block IDs 9–11 unmapped. The candidate package now enables GLM
+remapping and checks this invariant before allocation; the repository runner
+has the same condition and early check. Twenty-two CPU planner and compact
+state tests pass. NPU use was deferred before another full serve, so there is
+no end-to-end throughput result for this candidate and port 8003 is down.

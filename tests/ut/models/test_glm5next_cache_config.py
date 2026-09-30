@@ -23,12 +23,13 @@ from vllm.v1.request import Request
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
+    get_glm5_next_fixed_pool_bytes,
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
     get_glm5_next_max_memory_usage,
     get_glm5_next_pool_bytes_per_block,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
@@ -90,7 +91,7 @@ def make_specs(pool: int = 16):
     return specs
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(scope="module", autouse=True)
 def register_cache_specs():
     # Match production: vLLM registers built-in specs before the Ascend hook.
     register_all_kvcache_specs(None)
@@ -135,7 +136,7 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     }
     main = placements[layout.mla_names[0]]
     indexer = placements[layout.indexer_names[0]]
-    state = placements[layout.tail_names[0]]
+    state = placements[layout.state_names[0]]
     assert main.offset == 0
     assert indexer.offset == 0
     assert state is indexer
@@ -147,7 +148,7 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     )
     assert set(get_kv_cache_tensor_layers(indexer)) == {
         layout.indexer_names[0],
-        layout.tail_names[0],
+        layout.state_names[0],
     }
 
     # Scheduler groups consume disjoint IDs from the shared global BlockPool.
@@ -182,6 +183,30 @@ def test_kv_cache_config_preserves_retention_interval(retention_interval):
     assert plan.prefix_cache_retention_interval == retention_interval
 
 
+def test_worker_block_counts_retain_fixed_kda_reserve(monkeypatch):
+    from vllm_ascend.patch.platform import patch_kv_cache_utils
+
+    config = make_config()
+    groups = get_glm5_next_kv_cache_groups(config, make_specs())
+    fixed_bytes = get_glm5_next_fixed_pool_bytes(config, groups)
+    block_bytes = get_glm5_next_pool_bytes_per_block(groups)
+    worker_memory = [fixed_bytes + 100 * block_bytes, fixed_bytes + 99 * block_bytes]
+    limiting = get_glm5_next_kv_cache_config(config, groups, worker_memory[1])
+    # vLLM's generic shrinker omits the fixed live-state reserve here.
+    broken = get_glm5_next_kv_cache_config(config, groups, limiting.num_blocks * block_bytes)
+    assert broken.num_blocks < limiting.num_blocks
+    monkeypatch.setattr(patch_kv_cache_utils, "_orig_get_kv_cache_configs", lambda *_: [broken, limiting])
+
+    configs = patch_kv_cache_utils._ascend_get_kv_cache_configs(config, [make_specs(), make_specs()], worker_memory)
+
+    assert [worker.num_blocks for worker in configs] == [99, 99]
+    assert generate_scheduler_kv_cache_config(configs).num_blocks == 99
+    assert all(
+        sum(tensor.size for tensor in worker.kv_cache_tensors) <= available_memory
+        for worker, available_memory in zip(configs, worker_memory)
+    )
+
+
 def test_pipeline_projection_supports_a_mamba_only_worker():
     config = make_config()
     groups = get_glm5_next_kv_cache_groups(config, make_specs())
@@ -205,6 +230,31 @@ def test_pipeline_projection_supports_a_mamba_only_worker():
     assert plan.num_blocks == 1 + config.scheduler_config.max_num_seqs * len(projected_groups)
     assert len(plan.kv_cache_tensors) == 1
     assert get_kv_cache_tensor_layers(plan.kv_cache_tensors[0]) == [local_mamba_name]
+
+
+def test_worker_block_counts_include_mamba_only_pipeline_rank(monkeypatch):
+    from vllm_ascend.patch.platform import patch_kv_cache_utils
+
+    config = make_config()
+    groups = get_glm5_next_kv_cache_groups(config, make_specs())
+    projected_groups = [
+        KVCacheGroupSpec([groups[2].layer_names[0]] if group is groups[2] else [], group.kv_cache_spec)
+        for group in groups
+    ]
+    full_memory = get_glm5_next_fixed_pool_bytes(config, groups) + 100 * get_glm5_next_pool_bytes_per_block(groups)
+    mamba_memory = get_glm5_next_fixed_pool_bytes(config, projected_groups)
+    full = get_glm5_next_kv_cache_config(config, groups, full_memory)
+    mamba = get_glm5_next_kv_cache_config(config, projected_groups, mamba_memory)
+    assert full.num_blocks != mamba.num_blocks
+    monkeypatch.setattr(patch_kv_cache_utils, "_orig_get_kv_cache_configs", lambda *_: [full, mamba])
+
+    configs = patch_kv_cache_utils._ascend_get_kv_cache_configs(
+        config, [make_specs(), make_specs()], [full_memory, mamba_memory]
+    )
+
+    assert [worker.num_blocks for worker in configs] == [100, 100]
+    assert generate_scheduler_kv_cache_config(configs).num_blocks == 100
+    assert sum(tensor.size for tensor in configs[1].kv_cache_tensors) == mamba_memory
 
 
 def test_long_context_keeps_kda_state_fixed_per_request():

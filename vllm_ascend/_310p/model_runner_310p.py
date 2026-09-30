@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from functools import partial
 from typing import Any, cast
 
@@ -48,7 +48,6 @@ from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
 from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
-from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
 from vllm_ascend._310p.prefix_mamba_state import (
@@ -56,6 +55,7 @@ from vllm_ascend._310p.prefix_mamba_state import (
     PrefixMambaStateTier,
     prefix_mamba_active_columns,
     prefix_mamba_slot_count,
+    supports_compact_live_mamba_state,
 )
 from vllm_ascend._310p.qwen4exp_mtp import (
     is_qwen4exp_mtp_config,
@@ -74,6 +74,7 @@ from vllm_ascend.utils import (
     get_kv_cache_tensor_layers,
     is_rc_device,
     lmhead_tp_enable,
+    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -265,10 +266,9 @@ class NPUModelRunner310(NPUModelRunner):
         )
         self.supports_compact_mamba_state = self.supports_prefix_mamba_state_tier or (
             not self.cache_config.enable_prefix_caching
-            and (
-                self.max_num_reqs == 1
-                or getattr(self.model_config.hf_text_config, "model_type", None)
-                in {"qwen4_exp_text", "glm5_next_text"}
+            and supports_compact_live_mamba_state(
+                self.max_num_reqs,
+                getattr(self.model_config.hf_text_config, "model_type", None),
             )
             and (self.speculative_config is None or self._qwen4exp_mtp_ple)
         )
@@ -1177,11 +1177,17 @@ class NPUModelRunner310(NPUModelRunner):
         # per-request descriptors. Reuse the base Ascend allocator so the
         # runner creates exactly the physical storage the planner admitted.
         layer_specs = self._get_layer_kv_cache_specs(kv_cache_config)
-        uses_glm5_next_shared_slots = (
-            getattr(getattr(self.model_config, "hf_text_config", None), "model_type", None) == "glm5_next_text"
-            or any(getattr(spec, "model_version", None) == "glm5_next" for spec in layer_specs.values())
+        uses_glm5_next_shared_slots = getattr(
+            getattr(self.model_config, "hf_text_config", None), "model_type", None
+        ) == "glm5_next_text" or any(
+            getattr(spec, "model_version", None) == "glm5_next" for spec in layer_specs.values()
         )
         if uses_glm5_next_shared_slots:
+            if (
+                any(isinstance(spec, MambaSpec) and spec.mamba_cache_mode == "none" for spec in layer_specs.values())
+                and not self.supports_compact_mamba_state
+            ):
+                raise ValueError("GLM-Next live KDA state requires compact Mamba block-table remapping on 310P")
             raw_caches = NPUModelRunner._allocate_kv_cache_tensors(
                 self,
                 kv_cache_config,
@@ -1214,8 +1220,8 @@ class NPUModelRunner310(NPUModelRunner):
                     spec = layer_specs[name]
                     if spec.dtype != torch.float16 or spec.head_size != 512:
                         raise ValueError("310P GLM host MLA requires FP16 512-wide latent cache")
-                    hot = raw_caches[name].view(spec.dtype).view(
-                        -1, spec.head_size // NZ_INNER, HOT_BLOCK_SIZE, NZ_INNER
+                    hot = (
+                        raw_caches[name].view(spec.dtype).view(-1, spec.head_size // NZ_INNER, HOT_BLOCK_SIZE, NZ_INNER)
                     )
                     kv_caches[name] = [hot, hot]
                     self._glm_host_kv_layers[name] = GlmHostKVLayer(kv_cache_config.num_blocks, hot, spec.block_size)

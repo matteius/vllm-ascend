@@ -459,6 +459,14 @@ def _compact_mamba_pool_bytes(vllm_config: VllmConfig, layout: _Glm5NextCacheLay
     )
 
 
+def get_glm5_next_fixed_pool_bytes(vllm_config: VllmConfig, groups: list[KVCacheGroupSpec]) -> int:
+    """Return cache bytes that do not scale with scheduler block count."""
+    layout = _get_glm5_next_cache_layout(groups)
+    if layout is None:
+        raise ValueError("Expected GLM-Next cache groups.")
+    return _compact_mamba_pool_bytes(vllm_config, layout) + _host_hot_bytes(vllm_config, layout)
+
+
 def _required_scheduler_blocks(vllm_config: VllmConfig, layout: _Glm5NextCacheLayout) -> int:
     """Count virtual IDs held at peak, including in-flight KDA blocks."""
     blocks = sum(
@@ -492,7 +500,7 @@ def get_glm5_next_kv_cache_config(
         raise ValueError("Expected GLM-Next cache groups.")
 
     bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
-    fixed_bytes = _compact_mamba_pool_bytes(vllm_config, layout) + _host_hot_bytes(vllm_config, layout)
+    fixed_bytes = get_glm5_next_fixed_pool_bytes(vllm_config, groups)
     if fixed_bytes > available_memory:
         if envs.VLLM_ASCEND_310P_GLM_HOST_KV:
             raise ValueError("GLM-Next fixed KDA state and MLA hot cache exceed the available KV cache memory.")
@@ -505,9 +513,7 @@ def get_glm5_next_kv_cache_config(
         # Host pages use the scheduler's logical range. Do not allocate host
         # history for surplus device indexer capacity beyond the configured
         # maximum simultaneous requests.
-        useful_blocks = 1 + vllm_config.scheduler_config.max_num_seqs * _required_scheduler_blocks(
-            vllm_config, layout
-        )
+        useful_blocks = 1 + vllm_config.scheduler_config.max_num_seqs * _required_scheduler_blocks(vllm_config, layout)
         num_blocks = min(num_blocks, useful_blocks)
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     if envs.VLLM_ASCEND_310P_GLM_HOST_KV:
@@ -573,6 +579,7 @@ def get_glm5_next_kv_cache_config(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,
         kv_cache_groups=groups,
+        prefix_cache_retention_interval=getattr(vllm_config.cache_config, "prefix_cache_retention_interval", None),
     )
 
 

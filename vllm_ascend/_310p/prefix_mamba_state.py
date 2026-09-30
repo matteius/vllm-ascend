@@ -19,6 +19,11 @@ import torch
 PREFIX_MAMBA_MIN_SLOTS = 64
 
 
+def supports_compact_live_mamba_state(max_num_reqs: int, model_type: str | None) -> bool:
+    """Recognize models whose live recurrent state uses per-request slots."""
+    return max_num_reqs == 1 or model_type in {"qwen4_exp_text", "glm5_next_text"}
+
+
 def prefix_mamba_slot_count(max_num_reqs: int, num_speculative_tokens: int) -> int:
     """One shared pool: null slot plus both live windows of every request."""
     if max_num_reqs < 1 or num_speculative_tokens < 0:
