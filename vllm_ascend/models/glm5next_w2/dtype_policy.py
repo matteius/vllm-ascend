@@ -3,7 +3,7 @@
 """Authoritative dtype policy for the Ascend 310P GLM-5.3-Flash W2 path (G3).
 
 THIS FILE IS THE SINGLE SOURCE OF TRUTH for every dtype decision in the Ascend
-GLM-5.3-Flash (``glm5_next``, 288 routed experts at 2-bit / W2) 310P
+GLM-5.3-Flash (``glm5_next``, 288 routed experts) 310P
 implementation. Every downstream GLM W2 task (G4 KDA linear-attn, G5 DSA sparse
 attention, G6 W2 MoE, G7 assembly / MTP-1) MUST read dtypes from
 :data:`ASCEND_GLM5NEXT_W2_DTYPE_POLICY` (or a policy derived from a
@@ -22,10 +22,13 @@ Pinned assumptions
   path). Accumulation / reduction sites (router/softmax, attention scores,
   RMSNorm, MoE combine, logits) run in ``float32`` for numerical stability,
   then cast back to ``float16``.
-* Routed experts are **2-bit (W2)**: weights are packed into ``uint8`` code
-  banks (reusing the DeepSeek E1.1/E1.2 format) with ``float16`` per-group
-  dequant scales, the per-token activation is quantized to ``int8``
-  (W2A8-dynamic, E1.3), and the expert matmul accumulates in ``float32``.
+* The E1.3 fallback uses **2-bit (W2)** packed ``uint8`` codes, ``float16``
+  dequant scales and per-token ``int8`` activations. The active grouped 310P
+  serving path is different: its checkpoint uses W4 experts in layers 3–32
+  and W2 experts in layers 33–44, with ``float16`` activations and ``float32``
+  stored block scales rounded to ``float16`` inside the Cube operator. The
+  policy fields below describe the fallback contract; they do not override
+  the checkpoint's mixed code widths or the grouped operator's input types.
 * KDA linear attention, DSA sparse attention (+ its indexer), the dense MLP
   (first ``first_k_dense_replace`` layers), the single shared expert and the
   LM head all ride the ``float16`` main dtype; caches ride ``float16``.
@@ -53,7 +56,7 @@ if TYPE_CHECKING:
 # The one and only place dtype literals are allowed to live.
 _MAIN = torch.float16
 _ACCUM = torch.float32
-# W2 routed experts: 2-bit codes packed into uint8 banks, INT8 dynamic act.
+# E1.3 fallback: W2 codes in uint8 banks, INT8 dynamic activations.
 _W2_PACKED = torch.uint8
 _INT8_ACT = torch.int8
 
@@ -75,7 +78,7 @@ class Glm5NextW2DtypePolicy:
     lm_head_dtype: torch.dtype = _MAIN
     logits_dtype: torch.dtype = _ACCUM
 
-    # --- MoE: router fp32, shared-expert fp16, routed experts W2A8 ---------
+    # --- MoE: router fp32, shared-expert fp16, fallback experts W2A8 -------
     router_dtype: torch.dtype = _ACCUM
     shared_expert_dtype: torch.dtype = _MAIN
     # Routed-expert weight is a packed 2-bit (W2) code bank stored as uint8.

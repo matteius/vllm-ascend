@@ -52,6 +52,25 @@ def test_score_uses_relu_before_signed_head_weighting():
     torch.testing.assert_close(scores, torch.tensor([[4.0, -3.0]]), atol=0.1, rtol=0)
 
 
+def test_head_weighted_query_changes_kpool_ranking():
+    """Keep the per-head ReLU when optimizing the pooled-key score."""
+    queries = torch.zeros(1, 2, 128, dtype=torch.bfloat16)
+    queries[0, 0, 0] = 1
+    queries[0, 1, 1] = 1
+    keys = torch.zeros(2, 128, dtype=torch.bfloat16)
+    keys[0, 0], keys[0, 1] = 1, -2
+    keys[1, 0], keys[1, 1] = 0.25, 0.25
+    rotated_keys = hadamard128(keys).to(torch.bfloat16)
+    weights = torch.ones(1, 2, dtype=torch.bfloat16)
+
+    reference = score_kpool(queries, weights, rotated_keys)
+    folded_query = hadamard128((queries.float() * weights[:, :, None].float()).sum(1)).to(torch.bfloat16)
+    folded = folded_query.float() @ rotated_keys.float().T
+
+    assert reference[0, 0] > reference[0, 1]
+    assert folded[0, 0] < folded[0, 1]
+
+
 def test_topk_keeps_completed_pools_and_current_tail():
     logits = torch.tensor([[1.0, 4.0, 2.0], [1.0, 4.0, 2.0], [1.0, 4.0, 2.0]])
     positions = torch.tensor([2, 4, 11], dtype=torch.int32)
