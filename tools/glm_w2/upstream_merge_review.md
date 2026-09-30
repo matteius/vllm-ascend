@@ -12,6 +12,20 @@
 | `547fde3ab` | Keep FP16 MoE gate projection in NZ instead of casting activation/weight to FP32. | The upstream 310P fused-MoE runner receives this change, but our GLM W2 route uses the external `GateLinear` and custom expert method. Test router top-k parity before changing its precision. |
 | `8d3eb1461` | Share compatible Mamba state slots across cache groups to restore context capacity. | Merged into the generic 310P runners; our GLM host-context path has separate cache plumbing. Check capacity and aliasing before enabling it for GLM. |
 
+## GLM KDA and GDN overlap audit
+
+These upstream changes landed while the local GLM 310P path was being optimized. A merged commit is not necessarily an active kernel in our serving path. The current launcher, `artifacts/glm-profile-20260930/serve-fp16-mhc.sh`, runs `Glm5NextW2ForCausalLM` with `--enforce-eager` and no speculative configuration. Our W2 adapter calls `glm5next_w2/kda_310.py`, `npu_causal_conv1d_310`, `npu_recurrent_gated_delta_rule_310`, and `chunk_kda_fwd` rather than upstream's Triton GLM KDA wrapper.
+
+| Upstream change | What it actually changes | Effect on current GLM 310P server | Action |
+| --- | --- | --- | --- |
+| `e152f7f2d` KDA decode writeback | The upstream Triton recurrent wrapper writes directly into the graph output buffer on pure decode, avoiding a zero plus copy. | Not active: we retained the local GLM package. Our recurrent C++ binding allocates an output tensor, and the local KDA integration can still copy outputs into the caller's buffer. | Profile the post-expert-optimization decode trace. If that copy is material, add an optional output tensor to the 310P op and test padded, mixed and speculative batches. |
+| `341982c83` convolution state copies | The upstream Triton helper packs strided state rows by row/channel tiles, then writes them back after convolution. | Not active: our `npu_causal_conv1d_310` receives the persistent `conv_state` directly. There is no matching Python pack/writeback pair in `kda_310.py`. | Inspect the native operator's cache traffic before adapting the Triton algorithm; avoid introducing a redundant staging copy. |
+| `5a84871b2` GLM MTP graph | Gives multi-KV draft steps stable per-step slot buffers and graph-capture metadata; upstream reports A3 W8A8 MTP graph gains. | Incomplete for us: generic proposer code merged, but the local KPool metadata builder was retained and the live server is eager without MTP. | Treat graph MTP as a separate integration after the vLLM version alignment and a correct 310P KPool parity test. |
+| `7e2c563f5` FLA GDN prefill | Adds an external `fla_npu` chunk GDN path selected by A2/A3/A5 hardware capabilities. | No direct GLM gain: 310P lacks `FLA_GDN_PREFILL`, and GLM KDA uses per-channel bounded decay rather than the generic GDN gate contract. | Do not substitute this kernel for GLM KDA without deriving and validating the different gate math. |
+| `f2d529279` gate-transpose reuse | Reuses one `[B,H,T]` contiguous cumulative-gate layout across the Triton FLA GDN chunk kernels. | No direct GLM gain: our 310P GLM prefill calls its AscendC KDA chunk op with `raw_gate` in BSND layout. | Search for duplicate gate layout conversion in a new 310P KDA prefill trace before porting the idea. |
+
+The recorded pre-optimization decode trace assigned roughly 14–15 seconds of a 29.8-second 16-iteration one-stream span to grouped expert projections. The NZ-packed code layout greatly reduced that isolated projection cost, but there is no matching post-fusion operator attribution yet. A fresh trace is needed before ranking KDA writeback or graph work above expert dequantization. The newest equal-scale NZ multiply change (`3afc45460`) is mathematically exact but remains unmeasured on NPU.
+
 ## Validation and deployment boundary
 
 - The merge is source-only. It did not change the running Threadripper server or use the NPU.
