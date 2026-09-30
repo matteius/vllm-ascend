@@ -198,6 +198,44 @@ def test_glm5_next_cache_initialization_uses_shared_slot_allocator() -> None:
     )
 
 
+def test_glm_host_kv_initialization_binds_hot_pages_to_attention() -> None:
+    runner = object.__new__(NPUModelRunner310)
+    runner.model_config = SimpleNamespace(use_mla=False, enforce_eager=True)
+    runner.vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
+        cache_config=SimpleNamespace(enable_prefix_caching=False),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
+    )
+    runner.speculative_config = None
+    runner.use_sparse = False
+    runner.runner_only_attn_layers = set()
+    runner.shared_kv_cache_layers = {}
+    layer_name = "model.layers.3.self_attn"
+    attention = SimpleNamespace(impl=SimpleNamespace())
+    runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: attention})
+    runner.kv_caches = []
+    runner._live_mamba_slots = None
+    spec = SimpleNamespace(model_version="glm5_next", dtype=torch.float16, block_size=512, head_size=512)
+    descriptor = SimpleNamespace(layers=[layer_name], glm_host_hot=True)
+    cache_config = SimpleNamespace(
+        num_blocks=4,
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[layer_name])],
+        kv_cache_tensors=[descriptor],
+    )
+    raw = {layer_name: torch.empty((2 * 32 * 32 * 16 * 2,), dtype=torch.uint8)}
+    host_layer = object()
+    with (
+        patch.object(NPUModelRunner, "_allocate_kv_cache_tensors", return_value=raw),
+        patch.object(NPUModelRunner, "_reshape_kv_cache_tensors", return_value={layer_name: []}),
+        patch("vllm_ascend.models.glm5next.host_kv.GlmHostKVLayer", return_value=host_layer),
+        patch("vllm.v1.worker.utils.bind_kv_cache"),
+    ):
+        caches = runner.initialize_kv_cache_tensors(cache_config)
+    assert caches[layer_name][0].shape == (2, 32, 32, 16)
+    assert caches[layer_name][0] is caches[layer_name][1]
+    assert attention.impl.host_kv_layer is host_layer
+
+
 def test_iter_kv_cache_tensors_flattens_hybrid_layout() -> None:
     attention_k = torch.empty(2)
     attention_v = torch.empty(2)

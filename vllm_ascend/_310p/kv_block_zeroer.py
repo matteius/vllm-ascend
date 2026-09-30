@@ -61,7 +61,13 @@ class AscendKVBlockZeroer310(KVBlockZeroer):
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
                     continue
-                kv_tuple = static_forward_context[layer_name].kv_cache
+                layer = static_forward_context[layer_name]
+                if getattr(getattr(layer, "impl", None), "host_kv_layer", None) is not None:
+                    # Scheduler IDs address host history. The hot NPU tensor
+                    # has a different bounded page range and is overwritten
+                    # by staging before each attention read.
+                    continue
+                kv_tuple = layer.kv_cache
                 assert len(kv_tuple) == 2, "K and V are not stored separately"
                 for kv in kv_tuple:
                     dp = kv.data_ptr()

@@ -212,6 +212,62 @@ def test_long_context_keeps_kda_state_fixed_per_request():
     assert plan.num_blocks >= config.model_config.max_model_len // 512
 
 
+def test_host_mla_planner_reserves_logical_history_and_bounded_hot_cache(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_310P_GLM_HOST_KV", "1")
+    monkeypatch.setenv("VLLM_ASCEND_310P_ENABLE_MLA", "1")
+    config = make_config()
+    config.model_config.max_model_len = 262_144
+    config.model_config.hf_text_config = SimpleNamespace(index_topk=2048, index_kpool=4)
+    groups = get_glm5_next_kv_cache_groups(config, make_specs())
+    layout = _get_glm5_next_cache_layout(groups)
+    assert layout is not None
+    required = get_glm5_next_max_memory_usage(config, groups)
+    plan = get_glm5_next_kv_cache_config(config, groups, required)
+    placements = {name: tensor for tensor in plan.kv_cache_tensors for name in get_kv_cache_tensor_layers(tensor)}
+    main = placements[layout.mla_names[0]]
+    indexer = placements[layout.indexer_names[0]]
+    assert getattr(main, "glm_host_hot", False)
+    assert not getattr(indexer, "glm_host_hot", False)
+    assert main.size == 2064 * 32 * 512 * 2
+    assert indexer.size == plan.num_blocks * layout.small_page_size
+    assert plan.num_blocks >= config.model_config.max_model_len // 512
+    assert get_glm5_next_pool_bytes_per_block(groups) == layout.small_page_size
+
+
+def test_host_mla_scheduler_admits_four_256k_requests(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_310P_GLM_HOST_KV", "1")
+    monkeypatch.setenv("VLLM_ASCEND_310P_ENABLE_MLA", "1")
+    config = make_config()
+    config.model_config.max_model_len = 262_144
+    config.model_config.hf_text_config = SimpleNamespace(index_topk=2048, index_kpool=4)
+    config.max_in_flight_tokens = config.model_config.max_model_len
+    groups = get_glm5_next_kv_cache_groups(config, make_specs())
+    layout = _get_glm5_next_cache_layout(groups)
+    assert layout is not None
+    fixed = sum(
+        len(group.layer_names) * group.kv_cache_spec.page_size_bytes * config.scheduler_config.max_num_seqs
+        for group in layout.mamba_groups
+    )
+    hot = 2064 * 32 * 512 * 2
+    block_bytes = get_glm5_next_pool_bytes_per_block(groups)
+    one_request_blocks = (get_glm5_next_max_memory_usage(config, groups) - fixed - hot) // block_bytes
+    budget = fixed + hot + (1 + 4 * one_request_blocks) * block_bytes
+    plan = get_glm5_next_kv_cache_config(config, groups, budget)
+    generous_plan = get_glm5_next_kv_cache_config(config, groups, budget * 2)
+    assert generous_plan.num_blocks == plan.num_blocks
+    manager = KVCacheManager(
+        generate_scheduler_kv_cache_config([plan]),
+        max_model_len=config.model_config.max_model_len,
+        scheduler_block_size=512,
+        hash_block_size=512,
+        max_in_flight_tokens=config.max_in_flight_tokens,
+        enable_caching=False,
+    )
+    for index in range(4):
+        request = Request(str(index), [1] * config.model_config.max_model_len, SamplingParams(), None)
+        assert manager.allocate_slots(request, num_new_tokens=request.num_tokens) is not None
+
+
 def test_scheduler_admits_four_contexts_with_live_kda_state():
     config = make_config()
     config.model_config.max_model_len = 8_192

@@ -235,6 +235,7 @@ class AscendMLAImpl310(AscendMLAImpl):
             tuple[torch.device, int],
             tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         ] = {}
+        self.host_kv_layer = None
 
     def _mla_preprocess(self, layer_name, hidden_states, kv_cache, attn_metadata):
         if self.glm_indexer is None:
@@ -320,9 +321,12 @@ class AscendMLAImpl310(AscendMLAImpl):
         )
         cache_rows = latent.reshape(-1, num_kv_heads, self.kv_lora_rank)
         cache_rows = cache_rows.view(-1, self.kv_lora_rank // _NZ_INNER, _NZ_INNER)
-        _write_nz_latent_cache(kv_cache[0], cache_rows, slots)
-        if kv_cache[1].data_ptr() != kv_cache[0].data_ptr():
-            _write_nz_latent_cache(kv_cache[1], cache_rows, slots)
+        if self.host_kv_layer is None:
+            _write_nz_latent_cache(kv_cache[0], cache_rows, slots)
+            if kv_cache[1].data_ptr() != kv_cache[0].data_ptr():
+                _write_nz_latent_cache(kv_cache[1], cache_rows, slots)
+        else:
+            self.host_kv_layer.write(cache_rows, slots)
         empty_rope = latent.new_empty(batch, num_kv_heads, sequence, 0)
         if is_prefill:
             return empty_rope, latent
@@ -447,19 +451,61 @@ class AscendMLAImpl310(AscendMLAImpl):
         if op is None:
             raise RuntimeError("vLLM Ascend was built without the native 310P paged-latent attention operator")
         record_attention_compute_start()
-        latent_output = op(
-            query,
-            kv_c_and_k_pe_cache[0],
-            kv_c_and_k_pe_cache[1],
-            group_indices,
-            group_counts,
-            tail_starts,
-            tail_counts,
-            block_table,
-            query_start_loc,
-            self.scale,
-            _QSA_COMPRESS_RATIO,
-        )
+        if self.host_kv_layer is None:
+            latent_output = op(
+                query,
+                kv_c_and_k_pe_cache[0],
+                kv_c_and_k_pe_cache[1],
+                group_indices,
+                group_counts,
+                tail_starts,
+                tail_counts,
+                block_table,
+                query_start_loc,
+                self.scale,
+                _QSA_COMPRESS_RATIO,
+            )
+        else:
+            if self.glm_indexer is None:
+                raise RuntimeError("GLM host MLA requires the kpool indexer")
+            # Batch consecutive queries while their selected-page union fits
+            # the hot cache; split at an overflow or request boundary.
+            segments = self.host_kv_layer.prefill_segments(
+                block_table,
+                group_indices,
+                group_counts,
+                tail_starts,
+                tail_counts,
+                prefill_meta.actual_seq_lengths_q,
+                _QSA_COMPRESS_RATIO,
+            )
+            outputs = []
+            for start, end, request in segments:
+                hot_table = self.host_kv_layer.stage_prefill(
+                    block_table[request : request + 1],
+                    group_indices[start:end],
+                    group_counts[start:end],
+                    tail_starts[start:end],
+                    tail_counts[start:end],
+                    _QSA_COMPRESS_RATIO,
+                )
+                segment_start = torch.tensor([0, end - start], dtype=torch.int32, device=query.device)
+                outputs.append(
+                    op(
+                        query[start:end],
+                        kv_c_and_k_pe_cache[0],
+                        kv_c_and_k_pe_cache[1],
+                        group_indices[start:end],
+                        group_counts[start:end],
+                        tail_starts[start:end],
+                        tail_counts[start:end],
+                        hot_table,
+                        segment_start,
+                        self.scale,
+                        _QSA_COMPRESS_RATIO,
+                    )
+                )
+            latent_output = torch.cat(outputs, dim=1)
         projected = self._v_up_proj(latent_output.transpose(0, 1).contiguous())
         if num_actual_tokens < num_tokens:
             projected = torch.nn.functional.pad(projected, (0, 0, 0, num_tokens - num_actual_tokens))
@@ -666,6 +712,17 @@ class AscendMLAImpl310(AscendMLAImpl):
             decode_meta.block_table[:num_tokens].to(torch.int32),
             key_cache.shape[2],
         )
+        if self.host_kv_layer is not None:
+            if self.glm_indexer is None:
+                raise RuntimeError("GLM host MLA requires the kpool indexer")
+            block_table = self.host_kv_layer.stage(
+                block_table,
+                group_sentinel,
+                sequence_lengths,
+                tail_starts,
+                tail_counts,
+                _QSA_COMPRESS_RATIO,
+            )
         latent_output = op(
             query.contiguous(),
             key_cache,

@@ -16,38 +16,62 @@ contexts. KDA recurrent state and the incomplete kpool tail need only current
 state per live request. The compact KDA and bounded score changes in this
 branch address those two sources of unnecessary NPU memory use.
 
-The current GLM planner still allocates MLA and indexer tensors using one
-global scheduler block-ID range. Even if a state group's physical pages are
-small, its virtual IDs increase the size of the large MLA allocation. A host
-tier must split physical page addressing from scheduler IDs; replacing the
-MLA tensor with a CPU tensor alone cannot make the existing attention kernel
-read it.
+The scheduler still allocates one global block-ID range. In host mode the
+planner sizes the device pool from compressed indexer pages and reserves a
+separate fixed MLA hot cache; the host MLA history uses the full logical ID
+range. The QSA block table is remapped to hot 32-token pages for each call.
 
-## Implementation sequence
+## Implemented opt-in path
 
-1. Keep the compressed indexer and live KDA state on NPU. Put the full MLA
-   latent history in a bounded pinned host pool. Account for host pages and
-   NPU pages separately in the KV planner, including the null block and
-   in-flight prefill blocks.
-2. Add a request-stable mapping from scheduler block IDs to host MLA pages.
-   Release it on request completion and preemption. Keep current prefill
-   writes causal and copy complete latent pages to host in batches.
-3. Allocate a bounded NPU hot cache for the current prefill chunk and sparse
-   selections. After kpool top-k, deduplicate selected MLA page IDs, gather
-   them from host in one batched transfer, and remap token IDs to hot slots
-   before sparse MLA attention. Join the transfer stream once per step.
-4. Validate the 310P sparse MLA kernel's hot-cache addressing. If it assumes
-   global page IDs, add a focused 310P gather/remap kernel; keep the model
-   and cache-manager interfaces generic.
-5. Start with no prefix caching, no MTP, TP=2, and a fixed maximum of four
-   live requests. Add prefix reuse and speculative decoding after page
-   identity and state restoration are verified.
+Set `VLLM_ASCEND_310P_ENABLE_MLA=1` and
+`VLLM_ASCEND_310P_GLM_HOST_KV=1` before starting the 310P worker. The
+second flag defaults to off. Use an explicit `--max-model-len` and
+`--max-num-seqs` so the planner can reserve the full logical block pool.
+Pass `--enforce-eager` because host transfers are not graph-safe yet.
+The planner checks the estimated host allocation against available RAM and
+reserves an NPU hot cache large enough for the worst sparse selection of
+every live request. The NPU still holds the compressed kpool indexer and
+live KDA state. It caps logical pages at the configured maximum request
+concurrency, so surplus device memory does not inflate the host allocation.
+
+Each MLA layer stores its normalized 512-wide FP16 rows under the original
+scheduler block IDs in host RAM. Before QSA attention, it copies selected
+32-token pages to its NPU hot cache and remaps the QSA block table. Decode
+stages one combined batch. Continued prefill batches consecutive queries
+until their selected-page union reaches the fixed hot cache. Fresh short
+prefill still uses the native flash path. Scheduler block reuse is safe
+because all visible rows are overwritten before they are selected.
+
+This first implementation is a correctness path: it synchronizes device to
+host for writes and kpool selections and recopies selected pages at each
+attention call. Decode throughput and long-prefill latency are expected to
+be substantially worse than the all-NPU 16K baseline until page residency
+and batched asynchronous copies are added. It has
+CPU unit coverage only; NPU startup and output equivalence remain untested
+because the current live NPU experiment is reserved for the user.
+
+The opt-in path requires FP16 MLA cache, 310P, DCP=1, PCP=1, no prefix caching,
+and no speculative decoding. Pinning host pages is attempted; pageable host
+memory is used if that allocation fails. TP ranks maintain separate host
+copies, and the planner reserves RAM for all local TP ranks.
+
+## Remaining performance work
+
+1. Validate the 310P QSA kernel's remapped 32-token page addressing against
+   the existing all-NPU output at 16K, followed by 32K and 128K.
+2. Keep recently selected host pages resident on NPU, avoid repeated D2H
+   metadata transfers, and batch asynchronous H2D page copies.
+3. Profile continued-prefill grouping and tune segment boundaries against
+   QSA launch overhead and host transfer volume.
+4. Measure four concurrent 256K requests on two cards. Only then consider
+   prefix reuse and speculative decoding with explicit host-state restore.
 
 ## Gates before serving longer contexts
 
 - CPU: scheduler admission for four long requests, block-ID reuse, request
-  completion/preemption, and exact selected-token equivalence against the
-  NPU-resident reference on small tensors.
+  completion/preemption, and exact selected-page equivalence against the
+  resident reference on small tensors. Selected-page and reuse unit tests
+  pass; full scheduler admission is pending.
 - NPU, when available: real-weight output equivalence at 16K, then 32K/128K,
   then four 256K windows; record host transfer bytes, hot-cache hit rate,
   prefill time, decode tokens/s, NPU peak memory, and host RSS.

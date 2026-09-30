@@ -4598,8 +4598,13 @@ class NPUModelRunner(GPUModelRunner):
                 compact_mamba = len(shared_layers) == 1 and isinstance(
                     layer_kv_cache_spec[shared_layers[0]], MambaSpec
                 ) and layer_kv_cache_spec[shared_layers[0]].mamba_cache_mode == "none"
+                glm_host_hot = getattr(descriptor, "glm_host_hot", False)
                 if not use_legacy_shared_by_layout:
-                    expected_blocks = self.max_num_reqs if compact_mamba else kv_cache_config.num_blocks
+                    expected_blocks = (
+                        descriptor.size // descriptor.block_stride
+                        if glm_host_hot
+                        else self.max_num_reqs if compact_mamba else kv_cache_config.num_blocks
+                    )
                     expected_size = expected_blocks * descriptor.block_stride
                     if (
                         descriptor.offset != 0
@@ -5036,6 +5041,12 @@ class NPUModelRunner(GPUModelRunner):
         """
         kv_caches: dict[str, torch.Tensor] = {}
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
+        glm_host_hot_layers = {
+            layer_name
+            for descriptor in kv_cache_config.kv_cache_tensors
+            if getattr(descriptor, "glm_host_hot", False)
+            for layer_name in get_kv_cache_tensor_layers(descriptor)
+        }
         for group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
             current_kv_cache_spec = group.kv_cache_spec
@@ -5051,7 +5062,7 @@ class NPUModelRunner(GPUModelRunner):
                     kv_tensor = kv_cache_raw_tensors[layer_name]
                     sum_page_size_bytes = kv_tensor.numel()
                     num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
-                    assert num_blocks == kv_cache_config.num_blocks, \
+                    assert layer_name in glm_host_hot_layers or num_blocks == kv_cache_config.num_blocks, \
                         f"num_blocks: {num_blocks} should be equal to " \
                         f"kv_cache_config.num_blocks: {kv_cache_config.num_blocks}"
                     kv_cache_shape = attn_backend.get_kv_cache_shape(

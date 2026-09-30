@@ -1179,6 +1179,34 @@ class NPUModelRunner310(NPUModelRunner):
                 kv_cache_config,
                 raw_caches,
             )
+            host_hot_names = [
+                name
+                for descriptor in getattr(kv_cache_config, "kv_cache_tensors", ())
+                if getattr(descriptor, "glm_host_hot", False)
+                for name in getattr(descriptor, "layers", getattr(descriptor, "shared_by", []))
+            ]
+            self._glm_host_kv_layers = {}
+            if host_hot_names:
+                from vllm_ascend.models.glm5next.host_kv import HOT_BLOCK_SIZE, NZ_INNER, GlmHostKVLayer
+
+                if not self.model_config.enforce_eager:
+                    raise ValueError("310P GLM host MLA requires --enforce-eager until transfers are graph-safe")
+                if self.vllm_config.cache_config.enable_prefix_caching or self.speculative_config is not None:
+                    raise ValueError("310P GLM host MLA does not support prefix caching or speculative decoding")
+                if (
+                    self.vllm_config.parallel_config.decode_context_parallel_size != 1
+                    or self.vllm_config.parallel_config.prefill_context_parallel_size != 1
+                ):
+                    raise ValueError("310P GLM host MLA requires DCP=1 and PCP=1")
+                for name in host_hot_names:
+                    spec = layer_specs[name]
+                    if spec.dtype != torch.float16 or spec.head_size != 512:
+                        raise ValueError("310P GLM host MLA requires FP16 512-wide latent cache")
+                    hot = raw_caches[name].view(spec.dtype).view(
+                        -1, spec.head_size // NZ_INNER, HOT_BLOCK_SIZE, NZ_INNER
+                    )
+                    kv_caches[name] = [hot, hot]
+                    self._glm_host_kv_layers[name] = GlmHostKVLayer(kv_cache_config.num_blocks, hot, spec.block_size)
         else:
             kv_caches = self._allocate_kv_cache_tensors(kv_cache_config)
         if self._live_mamba_slots is not None:
@@ -1212,6 +1240,9 @@ class NPUModelRunner310(NPUModelRunner):
         from vllm.v1.worker.utils import bind_kv_cache
 
         bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches)
+        for name, host_layer in getattr(self, "_glm_host_kv_layers", {}).items():
+            attention = self.compilation_config.static_forward_context[name]
+            attention.impl.host_kv_layer = host_layer
         for layer_name, index_cache in self._qsa_index_caches.items():
             layer = self.compilation_config.static_forward_context[layer_name]
             layer.qsa_index_cache = index_cache

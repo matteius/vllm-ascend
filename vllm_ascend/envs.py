@@ -99,6 +99,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # bring-up flag only; leave it at 0 (default) for all production 310P runs
     # until MLA has been verified on hardware. Valid values: 0 or 1.
     "VLLM_ASCEND_310P_ENABLE_MLA": lambda: bool(int(os.getenv("VLLM_ASCEND_310P_ENABLE_MLA", "0"))),
+    # Experimental GLM-5.3-Flash MLA host-history tier on Ascend 310P.
+    # Keep full latent history in host RAM and stage kpool-selected 32-token
+    # pages on NPU for attention. Requires ENABLE_MLA=1, no prefix cache, and
+    # no speculative decoding. Default: 0; valid values: 0 or 1. Not sensitive.
+    "VLLM_ASCEND_310P_GLM_HOST_KV": lambda: _strict_binary_env("VLLM_ASCEND_310P_GLM_HOST_KV"),
     # Fold each RMSNorm into the per-token activation quant of the W8A8 linear
     # that consumes it, using the 310P npu_(add_)rms_norm_dynamic_quant kernels.
     # Correct but off by default: it is free rather than a win. The fused

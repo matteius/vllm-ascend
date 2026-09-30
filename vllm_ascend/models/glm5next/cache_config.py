@@ -10,6 +10,7 @@ pages, compressed-indexer/state pages, and fixed live KDA state per request.
 
 from dataclasses import dataclass
 
+import psutil
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
@@ -28,8 +29,12 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend import envs
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio
 from vllm_ascend.utils import vllm_version_is
+
+_HOST_HOT_BLOCK_SIZE = 32
+_HOST_RAM_HEADROOM = 0.90
 
 
 @dataclass(frozen=True)
@@ -363,6 +368,8 @@ def get_glm5_next_kv_cache_groups(
 
     if not any(_is_glm5_next_spec(spec) for spec in kv_cache_spec.values()):
         raise ValueError("Expected GLM-Next cache specs.")
+    if envs.VLLM_ASCEND_310P_GLM_HOST_KV and not envs.VLLM_ASCEND_310P_ENABLE_MLA:
+        raise ValueError("GLM host MLA requires VLLM_ASCEND_310P_ENABLE_MLA=1")
 
     scheduler_config = getattr(vllm_config, "scheduler_config", None)
     if getattr(scheduler_config, "disable_hybrid_kv_cache_manager", False):
@@ -398,7 +405,49 @@ def get_glm5_next_pool_bytes_per_block(groups: list[KVCacheGroupSpec]) -> int:
         raise ValueError("Expected GLM-Next cache groups.")
     # A Mamba-only pipeline worker still needs virtual block IDs, but its
     # physical state is entirely in the fixed live pool.
+    if envs.VLLM_ASCEND_310P_GLM_HOST_KV:
+        return max(1, layout.small_slot_count * layout.small_page_size)
     return max(1, layout.main_slot_count * layout.main_page_size + layout.small_slot_count * layout.small_page_size)
+
+
+def _host_hot_pages(vllm_config: VllmConfig, layout: _Glm5NextCacheLayout) -> int:
+    """Reserve one worst-case sparse selection per live request."""
+    text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+    topk = getattr(text_config, "index_topk", 2048)
+    pool = getattr(text_config, "index_kpool", 4)
+    if not isinstance(topk, int) or not isinstance(pool, int) or topk <= 0 or pool <= 0:
+        raise ValueError("GLM host KV requires positive index_topk and index_kpool")
+    if layout.full_group.kv_cache_spec.block_size % _HOST_HOT_BLOCK_SIZE:
+        raise ValueError("GLM host KV requires a scheduler block divisible by 32")
+    # Every selected four-token pool can occupy a different 32-token page.
+    # Include one page per request for its incomplete tail. Prefill is run one
+    # query at a time if its union exceeds this reserve.
+    pages = vllm_config.scheduler_config.max_num_seqs * (cdiv(topk, pool) + 1)
+    return cdiv(pages, 16) * 16
+
+
+def _host_hot_bytes(vllm_config: VllmConfig, layout: _Glm5NextCacheLayout) -> int:
+    if not envs.VLLM_ASCEND_310P_GLM_HOST_KV:
+        return 0
+    return (
+        _host_hot_pages(vllm_config, layout)
+        * layout.main_page_size
+        // (layout.full_group.kv_cache_spec.block_size // _HOST_HOT_BLOCK_SIZE)
+        * layout.main_slot_count
+    )
+
+
+def _check_host_capacity(vllm_config: VllmConfig, num_blocks: int, layout: _Glm5NextCacheLayout) -> None:
+    host_bytes = num_blocks * layout.main_page_size * layout.main_slot_count
+    local_ranks = getattr(vllm_config.parallel_config, "tensor_parallel_size", 1)
+    available = psutil.virtual_memory().available
+    if host_bytes * local_ranks > available * _HOST_RAM_HEADROOM:
+        raise ValueError(
+            f"GLM host MLA history needs {host_bytes / 2**30:.1f} GiB per rank "
+            f"across {local_ranks} rank(s); "
+            f"only {available / 2**30:.1f} GiB of host RAM is currently available. "
+            "Reduce max-model-len or max-num-seqs."
+        )
 
 
 def _compact_mamba_pool_bytes(vllm_config: VllmConfig, layout: _Glm5NextCacheLayout) -> int:
@@ -443,14 +492,26 @@ def get_glm5_next_kv_cache_config(
         raise ValueError("Expected GLM-Next cache groups.")
 
     bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
-    fixed_bytes = _compact_mamba_pool_bytes(vllm_config, layout)
+    fixed_bytes = _compact_mamba_pool_bytes(vllm_config, layout) + _host_hot_bytes(vllm_config, layout)
     if fixed_bytes > available_memory:
+        if envs.VLLM_ASCEND_310P_GLM_HOST_KV:
+            raise ValueError("GLM-Next fixed KDA state and MLA hot cache exceed the available KV cache memory.")
         raise ValueError("GLM-Next live KDA state exceeds the available KV cache memory.")
     if layout.main_slot_count == layout.small_slot_count == 0:
         num_blocks = 1 + vllm_config.scheduler_config.max_num_seqs * len(groups)
     else:
         num_blocks = max((available_memory - fixed_bytes) // bytes_per_block, 0)
+    if envs.VLLM_ASCEND_310P_GLM_HOST_KV:
+        # Host pages use the scheduler's logical range. Do not allocate host
+        # history for surplus device indexer capacity beyond the configured
+        # maximum simultaneous requests.
+        useful_blocks = 1 + vllm_config.scheduler_config.max_num_seqs * _required_scheduler_blocks(
+            vllm_config, layout
+        )
+        num_blocks = min(num_blocks, useful_blocks)
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+    if envs.VLLM_ASCEND_310P_GLM_HOST_KV:
+        _check_host_capacity(vllm_config, num_blocks, layout)
     tensors: list[KVCacheTensor] = []
 
     def make_tensor(size: int, layer_names: list[str], page_size: int) -> KVCacheTensor:
@@ -476,13 +537,16 @@ def get_glm5_next_kv_cache_config(
             for group in layout.mamba_groups:
                 if slot < len(group.layer_names):
                     shared_by.append(group.layer_names[slot])
-        tensors.append(
-            make_tensor(
-                layout.main_page_size * num_blocks,
-                shared_by,
-                layout.main_page_size,
-            )
+        tensor = make_tensor(
+            (_host_hot_bytes(vllm_config, layout) // layout.main_slot_count)
+            if envs.VLLM_ASCEND_310P_GLM_HOST_KV
+            else layout.main_page_size * num_blocks,
+            shared_by,
+            layout.main_page_size,
         )
+        if envs.VLLM_ASCEND_310P_GLM_HOST_KV:
+            tensor.glm_host_hot = True  # type: ignore[attr-defined]  # NPU staging descriptor.
+        tensors.append(tensor)
 
     for indexer_name, state_name in zip(layout.indexer_names, layout.state_names):
         tensors.append(
@@ -525,4 +589,8 @@ def get_glm5_next_max_memory_usage(
     # One request therefore needs enough IDs for every group even though one
     # physical tensor slot can be reused by layers from different groups.
     blocks = _required_scheduler_blocks(vllm_config, layout)
-    return blocks * get_glm5_next_pool_bytes_per_block(groups) + _compact_mamba_pool_bytes(vllm_config, layout)
+    return (
+        blocks * get_glm5_next_pool_bytes_per_block(groups)
+        + _compact_mamba_pool_bytes(vllm_config, layout)
+        + _host_hot_bytes(vllm_config, layout)
+    )
