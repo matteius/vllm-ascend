@@ -9,13 +9,41 @@ import pytest
 import torch
 
 from vllm_ascend.models.qwen4_exp.dtype_policy import ASCEND_QWEN4EXP_DTYPE_POLICY
-from vllm_ascend.models.qwen4_exp.model import _QSAAttention
+from vllm_ascend.models.qwen4_exp.model import _qsa_selection_policy, _QSAAttention
 from vllm_ascend.models.qwen4_exp.ops.qsa_batched_attention_310 import QSAPrefillGatherStreams, _request_slices
 from vllm_ascend.models.qwen4_exp.ops.qsa_indexer import (
+    QSA_SELECTION_FAST_TOPK,
+    QSA_SELECTION_STABLE_ARGSORT,
     _use_qsa_matmul_score,
     _use_qsa_matmul_score_batch,
 )
 from vllm_ascend.models.qwen4_exp.w4_moe import CUBE_DEVICE_ROUTED_BACKENDS, FORMAT
+
+
+def test_qsa_selection_policy_defaults_to_exact_stable_sort() -> None:
+    assert _qsa_selection_policy(SimpleNamespace()) == QSA_SELECTION_STABLE_ARGSORT
+    config = SimpleNamespace(ascend_qsa_selection={})
+    assert _qsa_selection_policy(config) == QSA_SELECTION_STABLE_ARGSORT
+
+
+def test_qsa_selection_policy_accepts_explicit_fast_topk() -> None:
+    config = SimpleNamespace(ascend_qsa_selection={"policy": QSA_SELECTION_FAST_TOPK})
+    assert _qsa_selection_policy(config) == QSA_SELECTION_FAST_TOPK
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        QSA_SELECTION_FAST_TOPK,
+        {"policy": [QSA_SELECTION_FAST_TOPK]},
+        {"policy": "unvalidated"},
+        {"policy": QSA_SELECTION_STABLE_ARGSORT, "extra": True},
+    ],
+)
+def test_qsa_selection_policy_rejects_invalid_metadata(metadata) -> None:
+    config = SimpleNamespace(ascend_qsa_selection=metadata)
+    with pytest.raises(ValueError, match="ascend_qsa_selection|QSA selection policy"):
+        _qsa_selection_policy(config)
 
 
 @pytest.mark.parametrize("backend", [None, "eager_dequant", "cube_310", "cube_310_tiled", *CUBE_DEVICE_ROUTED_BACKENDS])
@@ -49,6 +77,7 @@ def test_batched_qsa_limit_and_group_list_cover_w8_and_routed_w4(backend, tp_siz
     )
     limit = 8 if backend is None or backend in CUBE_DEVICE_ROUTED_BACKENDS else 2
     assert module.reuse_query_rope is (limit == 8)
+    assert module.qsa_selection_policy == QSA_SELECTION_STABLE_ARGSORT
     assert module._batched_qsa_max_decode_tokens == limit
     expected = torch.arange(1, limit * module.num_kv_heads + 1, dtype=torch.int64)
     expected *= module.num_heads // module.num_kv_heads

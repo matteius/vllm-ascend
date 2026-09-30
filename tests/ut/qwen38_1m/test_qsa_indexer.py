@@ -45,9 +45,13 @@ from vllm_ascend.models.qwen4_exp.ops.qsa_cache import (
     qsa_scatter_rows,
 )
 from vllm_ascend.models.qwen4_exp.ops.qsa_indexer import (
+    QSA_SELECTION_FAST_TOPK,
+    QSA_SELECTION_STABLE_ARGSORT,
     QSAGroupSelection,
+    _fast_topk_indices,
     _qsa_position_geometry,
     _repair_native_group_indices,
+    _select_topk_indices,
     _stable_topk_indices,
     _use_qsa_matmul_score,
     copy_group_selection_into,
@@ -256,6 +260,33 @@ def test_bounded_stable_topk_matches_full_stable_sort(scores, k):
     score_tensor = torch.tensor(scores)
     expected = torch.argsort(score_tensor, dim=1, descending=True, stable=True)[:, :k]
     assert torch.equal(_stable_topk_indices(score_tensor, k), expected)
+
+
+def test_fast_topk_matches_exact_selection_without_cutoff_ties():
+    scores = torch.tensor(
+        [
+            [9.0, 8.0, 8.0, 7.0, 6.0],
+            [1.0, 4.0, 3.0, 2.0, 0.0],
+        ]
+    )
+    expected = _stable_topk_indices(scores, 4)
+    actual = _fast_topk_indices(scores, 4)
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [QSA_SELECTION_STABLE_ARGSORT, QSA_SELECTION_FAST_TOPK],
+)
+def test_topk_policy_dispatch(policy):
+    scores = torch.tensor([[4.0, 1.0, 3.0, 2.0]])
+    expected = _stable_topk_indices(scores, 3)
+    assert torch.equal(_select_topk_indices(scores, 3, policy), expected)
+
+
+def test_topk_policy_rejects_unknown_value():
+    with pytest.raises(ValueError, match="qsa selection policy"):
+        _select_topk_indices(torch.ones((1, 4)), 2, "implicit_fast_path")
 
 
 @pytest.mark.parametrize("visible_groups", [258, 511, 512])

@@ -13,7 +13,11 @@ import time
 import torch
 import torch_npu
 
-from vllm_ascend.models.qwen4_exp.ops.qsa_indexer import _stable_topk_indices, qsa_indexer_select_groups_310
+from vllm_ascend.models.qwen4_exp.ops.qsa_indexer import (
+    _fast_topk_indices,
+    _stable_topk_indices,
+    qsa_indexer_select_groups_310,
+)
 from vllm_ascend.utils import enable_custom_op
 
 
@@ -153,6 +157,7 @@ def main() -> None:
     stable_selection = legacy_candidate_topk(scores, topk_width)
     argsort_selection = _stable_topk_indices(scores, topk_width)
     repaired_selection = repaired_topk(scores, topk_width)
+    fast_selection = _fast_topk_indices(scores, topk_width)
     raw_selection = raw_topk(scores, topk_width)
     torch_npu.npu.synchronize()
     if not torch.equal(stable_selection, argsort_selection):
@@ -192,6 +197,7 @@ def main() -> None:
         samples[f"{name}_and_stable_topk"] = combined_times
     for name, fn in (
         ("candidate_topk_legacy", legacy_candidate_topk),
+        ("canonical_fast_topk", _fast_topk_indices),
         ("raw_topk", raw_topk),
         ("repaired_topk", repaired_topk),
         ("stable_argsort", _stable_topk_indices),
@@ -209,6 +215,7 @@ def main() -> None:
         sort_sweep[width] = {}
         for name, fn in (
             ("candidate_topk_legacy", legacy_candidate_topk),
+            ("canonical_fast_topk", _fast_topk_indices),
             ("raw_topk", raw_topk),
             ("repaired_topk", repaired_topk),
             ("stable_argsort", _stable_topk_indices),
@@ -231,6 +238,7 @@ def main() -> None:
                 "bounded_blocks": bounded_blocks,
                 "wide_matmul_selection_equal": torch.equal(matmul_selection, argsort_selection),
                 "repaired_selection_equal": torch.equal(repaired_selection, argsort_selection),
+                "fast_selection_equal": torch.equal(fast_selection, argsort_selection),
                 "raw_selection_equal": torch.equal(raw_selection, argsort_selection),
                 "raw_selection_mismatches": torch.count_nonzero(raw_selection != argsort_selection).item(),
                 "wide_matmul_max_score_error": max_score_error,

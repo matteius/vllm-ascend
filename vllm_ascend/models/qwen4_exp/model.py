@@ -133,7 +133,13 @@ from .ngram_embedding import (
 )
 from .ops.qsa_batched_attention_310 import QSAPrefillGatherStreams, qsa_batched_prefill_310
 from .ops.qsa_index_cache_310 import qsa_index_cache_update_310
-from .ops.qsa_indexer import QSAGroupSelection, copy_group_selection_into, qsa_indexer_select_groups_310
+from .ops.qsa_indexer import (
+    QSA_SELECTION_POLICIES,
+    QSA_SELECTION_STABLE_ARGSORT,
+    QSAGroupSelection,
+    copy_group_selection_into,
+    qsa_indexer_select_groups_310,
+)
 from .ops.qsa_sparse_attention_310 import qsa_sparse_attention_310
 from .ple_layer import AscendQwen4ExpPLELayer
 from .qsa import (
@@ -1200,6 +1206,23 @@ class _GDNAttention(nn.Module, MambaBase):
 
 
 _QSARopeStepCache = dict[tuple[object, ...], tuple[torch.Tensor, torch.Tensor]]
+_QSA_SELECTION_CONFIG_KEY = "ascend_qsa_selection"
+
+
+def _qsa_selection_policy(config: object) -> str:
+    """Resolve the per-model QSA tie policy before graph capture."""
+    metadata = getattr(config, _QSA_SELECTION_CONFIG_KEY, None)
+    if metadata is None:
+        return QSA_SELECTION_STABLE_ARGSORT
+    if not isinstance(metadata, dict):
+        raise ValueError(f"{_QSA_SELECTION_CONFIG_KEY} must be a dictionary")
+    unknown = set(metadata) - {"policy"}
+    if unknown:
+        raise ValueError(f"unsupported {_QSA_SELECTION_CONFIG_KEY} fields: {sorted(unknown)}")
+    policy = metadata.get("policy", QSA_SELECTION_STABLE_ARGSORT)
+    if not isinstance(policy, str) or policy not in QSA_SELECTION_POLICIES:
+        raise ValueError(f"QSA selection policy must be one of {sorted(QSA_SELECTION_POLICIES)}, got {policy!r}")
+    return policy
 
 
 def _step_rope_cos_sin(
@@ -1276,6 +1299,7 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
         self.compute_dtype = dtype_policy.accumulation_dtype
         self.params_dtype = dtype_policy.qsa_main_dtype
         self.prefill_gather_streams = prefill_gather_streams
+        self.qsa_selection_policy = _qsa_selection_policy(config)
         expert_quant = w4_config(config)
         self.reuse_query_rope = expert_quant is None or expert_quant["backend"] in CUBE_DEVICE_ROUTED_BACKENDS
         # QSA arithmetic is independent of expert quantization. Both W8 and
@@ -1805,6 +1829,7 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
                         max_visible_groups=current_max_groups,
                         max_matmul_decode_tokens=self._batched_qsa_max_decode_tokens,
                         query_lens=current_query_lens,
+                        selection_policy=self.qsa_selection_policy,
                     )
                     copy_group_selection_into(weak_selection, current)
 
@@ -1823,6 +1848,7 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
                     max_visible_groups=max_visible_groups,
                     max_matmul_decode_tokens=self._batched_qsa_max_decode_tokens,
                     query_lens=query_lens,
+                    selection_policy=self.qsa_selection_policy,
                 )
             sparse_attention = qsa_sparse_attention_310
             use_batched_prefill = (

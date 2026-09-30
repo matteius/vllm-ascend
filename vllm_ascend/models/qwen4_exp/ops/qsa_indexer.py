@@ -34,6 +34,9 @@ _QSA_MATMUL_PREFILL_MIN_TOKENS = 128
 _QSA_MATMUL_DECODE_MAX_TOKENS = 2
 _QSA_MATMUL_DECODE_MIN_GROUPS = 2048
 _QSA_MATMUL_MAX_TILE_ELEMENTS = 1 << 25
+QSA_SELECTION_STABLE_ARGSORT = "stable_argsort"
+QSA_SELECTION_FAST_TOPK = "fast_topk"
+QSA_SELECTION_POLICIES = frozenset((QSA_SELECTION_STABLE_ARGSORT, QSA_SELECTION_FAST_TOPK))
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,34 @@ def _stable_topk_indices(scores: torch.Tensor, k: int) -> torch.Tensor:
     if k <= 0 or k > scores.shape[1]:
         raise ValueError("k must be in [1, scores.shape[1]]")
     return torch.argsort(scores, dim=1, descending=True, stable=True)[:, :k]
+
+
+def _fast_topk_indices(scores: torch.Tensor, k: int) -> torch.Tensor:
+    """Select top-k cheaply and restore canonical order within that set.
+
+    The selected set can differ from the exact stable policy only when more
+    entries tie at the cutoff than fit in ``k``. Sorting the chosen indices
+    first and then their values restores score-descending/index-ascending
+    order for every entry that raw top-k retained. The index sort uses FP32 so
+    ArgSort stays on 310P AiCore instead of falling back to AiCPU for INT32.
+    """
+    if k <= 0 or k > scores.shape[1]:
+        raise ValueError("k must be in [1, scores.shape[1]]")
+    selected = torch.topk(scores, k, dim=1, sorted=False).indices
+    index_order = torch.argsort(selected.to(torch.float32), dim=1, stable=True)
+    selected = selected.gather(1, index_order)
+    selected_values = scores.gather(1, selected)
+    value_order = torch.argsort(selected_values, dim=1, descending=True, stable=True)
+    return selected.gather(1, value_order)
+
+
+def _select_topk_indices(scores: torch.Tensor, k: int, policy: str) -> torch.Tensor:
+    """Dispatch an explicit QSA selection policy."""
+    if policy == QSA_SELECTION_STABLE_ARGSORT:
+        return _stable_topk_indices(scores, k)
+    if policy == QSA_SELECTION_FAST_TOPK:
+        return _fast_topk_indices(scores, k)
+    raise ValueError(f"qsa selection policy must be one of {sorted(QSA_SELECTION_POLICIES)}, got {policy!r}")
 
 
 def _repair_native_group_indices(selected: torch.Tensor, visible_groups: torch.Tensor) -> torch.Tensor:
@@ -388,6 +419,7 @@ def qsa_indexer_select_groups_310(
     max_visible_groups: int | None = None,
     max_matmul_decode_tokens: int = _QSA_MATMUL_DECODE_MAX_TOKENS,
     query_lens: Sequence[int] | None = None,
+    selection_policy: str = QSA_SELECTION_STABLE_ARGSORT,
 ) -> QSAGroupSelection:
     """Select learned QSA groups on 310P.
 
@@ -475,6 +507,10 @@ def qsa_indexer_select_groups_310(
             positions.to(dtype=torch.int32).contiguous(),
             compress_ratio,
         )
+    if selection_policy not in QSA_SELECTION_POLICIES:
+        raise ValueError(
+            f"qsa selection policy must be one of {sorted(QSA_SELECTION_POLICIES)}, got {selection_policy!r}"
+        )
     block_topk = token_topk // compress_ratio
     selected_width = min(block_topk, scores.shape[1])
     visible_groups, tail_starts, tail_counts = _qsa_position_geometry(positions, compress_ratio, scores.shape[1])
@@ -482,7 +518,7 @@ def qsa_indexer_select_groups_310(
         group_ids = torch.arange(capacity, device=query.device)
         scores.masked_fill_(group_ids.unsqueeze(0) >= visible_groups.unsqueeze(1), -torch.inf)
     selected = _repair_native_group_indices(
-        _stable_topk_indices(scores, selected_width).to(torch.int32),
+        _select_topk_indices(scores, selected_width, selection_policy).to(torch.int32),
         visible_groups,
     )
     group_counts = visible_groups.clamp_max(selected_width)
@@ -573,4 +609,7 @@ __all__ = [
     "QSAGroupSelection",
     "copy_group_selection_into",
     "select_topk_blocks",
+    "QSA_SELECTION_FAST_TOPK",
+    "QSA_SELECTION_POLICIES",
+    "QSA_SELECTION_STABLE_ARGSORT",
 ]
