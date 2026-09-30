@@ -71,3 +71,27 @@ class TestAscendKVBlockZeroer310(TestBase):
 
         self.assertEqual(len(self.zeroer._kv_tensors), 1)
         self.assertEqual(self.zeroer._logical_page_ratio, 2)
+
+    def test_host_hot_cache_is_not_zeroed_by_scheduler_ids(self):
+        hot = torch.ones(2, 32, 32, 16)
+        group = SimpleNamespace(
+            kv_cache_spec=FullAttentionSpec(
+                block_size=128,
+                num_kv_heads=1,
+                head_size=512,
+                dtype=torch.float16,
+            ),
+            kv_cache_group_id=0,
+            layer_names=["host_layer"],
+        )
+        layer = SimpleNamespace(kv_cache=(hot, hot), impl=SimpleNamespace(host_kv_layer=object()))
+        self.zeroer.init_meta(
+            attn_groups_iter=[group],
+            kernel_block_sizes=[[32]],
+            cache_dtype="float16",
+            runner_only_attn_layers=set(),
+            static_forward_context={"host_layer": layer},
+        )
+        self.zeroer.zero_block_ids([100])
+        self.assertEqual(self.zeroer._kv_tensors, [])
+        self.assertTrue(torch.all(hot == 1))

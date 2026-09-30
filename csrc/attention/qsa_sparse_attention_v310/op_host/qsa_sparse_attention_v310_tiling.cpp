@@ -15,8 +15,11 @@ constexpr uint32_t BLOCK_TABLE = 7;
 constexpr uint32_t QUERY_START_LOC = 8;
 constexpr int64_t NZ_INNER = 16;
 constexpr int64_t QSA_COMPRESS_RATIO = 4;
-constexpr int64_t MAX_HEAD_DIM = 256;
-constexpr int64_t MAX_QUERY_HEADS_PER_KV_HEAD = 24;
+constexpr int64_t MAX_HEAD_DIM = 512;
+constexpr int64_t MAX_QUERY_HEADS_PER_KV_HEAD = 64;
+// Query, product, and accumulator are the dominant UB buffers. Capping their
+// combined head elements at 6,144 keeps the complete task below 96 KiB.
+constexpr int64_t MAX_HEAD_ELEMENTS_PER_TASK = 6144;
 constexpr int64_t MAX_DATA_COPY_BLOCK_SIZE = 65535;
 
 ge::graphStatus Tiling(gert::TilingContext *context)
@@ -53,7 +56,7 @@ ge::graphStatus Tiling(gert::TilingContext *context)
                 OP_LOGE(context, "cache block size must be a positive multiple of compression ratio up to 65535"),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(headDim <= 0 || headDim > MAX_HEAD_DIM || headDim % NZ_INNER != 0,
-                OP_LOGE(context, "head dimension must be a positive multiple of 16 up to 256"),
+                OP_LOGE(context, "head dimension must be a positive multiple of 16 up to 512"),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(cache.GetDim(3) != NZ_INNER, OP_LOGE(context, "NZ cache inner dimension must be 16"),
                 return ge::GRAPH_FAILED);
@@ -63,7 +66,7 @@ ge::graphStatus Tiling(gert::TilingContext *context)
     const int64_t numKvHeads = cacheHeadDimBlocks / (headDim / NZ_INNER);
     OP_CHECK_IF(numKvHeads <= 0, OP_LOGE(context, "cache must contain at least one KV head"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(numQueryHeads % numKvHeads != 0 || numQueryHeads / numKvHeads > MAX_QUERY_HEADS_PER_KV_HEAD,
-                OP_LOGE(context, "query heads per KV head must be between 1 and 24"), return ge::GRAPH_FAILED);
+                OP_LOGE(context, "query heads per KV head must be between 1 and 64"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(groups.GetDim(0) != numTokens, OP_LOGE(context, "selection rows must equal query tokens"),
                 return ge::GRAPH_FAILED);
     const int64_t *compressRatio = context->GetAttrs()->GetInt(1);
@@ -79,7 +82,9 @@ ge::graphStatus Tiling(gert::TilingContext *context)
     const int64_t headsPerKvHead = numQueryHeads / numKvHeads;
     const int64_t baseTasks = numTokens * numKvHeads;
     const int64_t desiredTiles = std::max<int64_t>(1, coreCount / baseTasks);
-    const int64_t headsPerTask = (headsPerKvHead + desiredTiles - 1) / desiredTiles;
+    const int64_t headsPerTask = std::min<int64_t>(
+        (headsPerKvHead + desiredTiles - 1) / desiredTiles,
+        std::max<int64_t>(1, MAX_HEAD_ELEMENTS_PER_TASK / headDim));
     const int64_t taskTilesPerKvHead = (headsPerKvHead + headsPerTask - 1) / headsPerTask;
     const int64_t taskCount = baseTasks * taskTilesPerKvHead;
     const uint32_t blockDim = static_cast<uint32_t>(std::min<int64_t>(taskCount, coreCount));

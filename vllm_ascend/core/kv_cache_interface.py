@@ -31,13 +31,20 @@ def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
 
 def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     """Return the physical token rows represented by one scheduler block."""
+
+    def physical_size(spec: KVCacheSpec) -> int:
+        configured = getattr(spec, "storage_block_size", None)
+        if configured is not None:
+            return configured
+        if isinstance(spec, MLAAttentionSpec):
+            return spec.block_size // get_kv_cache_compression_ratio(spec)
+        return spec.block_size
+
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        storage_block_sizes = {
-            getattr(spec, "storage_block_size", spec.block_size) for spec in kv_cache_spec.kv_cache_specs.values()
-        }
+        storage_block_sizes = {physical_size(spec) for spec in kv_cache_spec.kv_cache_specs.values()}
         assert len(storage_block_sizes) == 1, "All specs in one KV cache group must use the same storage block size."
         return storage_block_sizes.pop()
-    return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
+    return physical_size(kv_cache_spec)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -56,6 +63,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
     store_on_host: bool = False
+    # Some 310P MLA backends consume the latent cache through vector kernels
+    # that require the physical FRACTAL_NZ page layout.  Keep this on the spec
+    # so allocation follows backend selection rather than model-name checks.
+    use_nz_cache: bool = False
     # Ascend kernels consume padded pages through an explicit physical block
     # stride. vLLM main removed this field from AttentionSpec, but it remains
     # part of the Ascend runner/backend contract.

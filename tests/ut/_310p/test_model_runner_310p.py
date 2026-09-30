@@ -27,6 +27,7 @@ from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
 from tests.ut.base import TestBase
 from vllm_ascend._310p.model_runner_310p import (
     NPUModelRunner310,
+    _allocate_attention_cache_pair,
     _allocate_attention_cache_tensor,
     _get_attention_cache_tensor_shape,
     _get_layer_attention_backends,
@@ -34,6 +35,8 @@ from vllm_ascend._310p.model_runner_310p import (
 )
 from vllm_ascend._310p.prefix_mamba_state import PrefixMambaStateTier
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -84,6 +87,7 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
         calls.append("update")
 
     def fake_model(**kwargs):
+        assert "is_dummy_run" not in kwargs
         calls.append("model")
         return torch.ones(1)
 
@@ -154,7 +158,7 @@ def test_glm5_next_cache_initialization_uses_shared_slot_allocator() -> None:
     runner.shared_kv_cache_layers = {}
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.kv_caches = []
-    runner._qsa_index_caches = {}
+    runner._live_mamba_slots = None
 
     layer_name = "model.layers.3.self_attn"
     spec = SimpleNamespace(model_version="glm5_next")
@@ -185,6 +189,7 @@ def test_glm5_next_cache_initialization_uses_shared_slot_allocator() -> None:
         result = runner.initialize_kv_cache_tensors(cache_config)
 
     assert result is reshaped_caches
+    assert runner._qsa_index_caches == {}
     allocate.assert_called_once_with(runner, cache_config)
     reshape.assert_called_once_with(runner, cache_config, raw_caches)
     bind_kv_cache.assert_called_once_with(
@@ -192,6 +197,44 @@ def test_glm5_next_cache_initialization_uses_shared_slot_allocator() -> None:
         runner.compilation_config.static_forward_context,
         runner.kv_caches,
     )
+
+
+def test_glm_host_kv_initialization_binds_hot_pages_to_attention() -> None:
+    runner = object.__new__(NPUModelRunner310)
+    runner.model_config = SimpleNamespace(use_mla=False, enforce_eager=True)
+    runner.vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
+        cache_config=SimpleNamespace(enable_prefix_caching=False),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
+    )
+    runner.speculative_config = None
+    runner.use_sparse = False
+    runner.runner_only_attn_layers = set()
+    runner.shared_kv_cache_layers = {}
+    layer_name = "model.layers.3.self_attn"
+    attention = SimpleNamespace(impl=SimpleNamespace())
+    runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: attention})
+    runner.kv_caches = []
+    runner._live_mamba_slots = None
+    spec = SimpleNamespace(model_version="glm5_next", dtype=torch.float16, block_size=512, head_size=512)
+    descriptor = SimpleNamespace(layers=[layer_name], glm_host_hot=True)
+    cache_config = SimpleNamespace(
+        num_blocks=4,
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[layer_name])],
+        kv_cache_tensors=[descriptor],
+    )
+    raw = {layer_name: torch.empty((2 * 32 * 32 * 16 * 2,), dtype=torch.uint8)}
+    host_layer = object()
+    with (
+        patch.object(NPUModelRunner, "_allocate_kv_cache_tensors", return_value=raw),
+        patch.object(NPUModelRunner, "_reshape_kv_cache_tensors", return_value={layer_name: []}),
+        patch("vllm_ascend.models.glm5next.host_kv.GlmHostKVLayer", return_value=host_layer),
+        patch("vllm.v1.worker.utils.bind_kv_cache"),
+    ):
+        caches = runner.initialize_kv_cache_tensors(cache_config)
+    assert caches[layer_name][0].shape == (2, 32, 32, 16)
+    assert caches[layer_name][0] is caches[layer_name][1]
+    assert attention.impl.host_kv_layer is host_layer
 
 
 def test_iter_kv_cache_tensors_flattens_hybrid_layout() -> None:
@@ -290,6 +333,68 @@ def test_mla_cache_allocation_keeps_nd_layout() -> None:
     assert cache.shape == (4, 16, 1, 8)
     assert cache.is_contiguous()
     empty_nz.assert_not_called()
+
+
+def test_native_310p_mla_cache_allocation_uses_nz_layout() -> None:
+    cache_spec = AscendMLAAttentionSpec(
+        block_size=32,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.float16,
+        use_nz_cache=True,
+    )
+    expected = torch.empty(4, 32, 32, 16)
+
+    with patch(
+        "vllm_ascend._310p.model_runner_310p.torch_npu.empty_with_format",
+        return_value=expected,
+        create=True,
+    ) as empty_nz:
+        cache = _allocate_attention_cache_tensor(
+            (4, 32, 32, 16),
+            torch.float16,
+            torch.device("cpu"),
+            cache_spec,
+        )
+
+    assert cache is expected
+    empty_nz.assert_called_once_with(
+        size=(4, 32, 32, 16),
+        dtype=torch.float16,
+        device=torch.device("cpu"),
+        acl_format=ACL_FORMAT_FRACTAL_NZ,
+    )
+
+
+def test_native_310p_nope_mla_aliases_one_latent_cache_for_key_and_value() -> None:
+    cache_spec = AscendMLAAttentionSpec(
+        block_size=32,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.float16,
+        use_nz_cache=True,
+    )
+    expected = torch.empty(4, 32, 32, 16)
+
+    with patch(
+        "vllm_ascend._310p.model_runner_310p._allocate_attention_cache_tensor",
+        return_value=expected,
+    ) as allocate:
+        key_cache, value_cache = _allocate_attention_cache_pair(
+            expected.shape,
+            torch.float16,
+            torch.device("cpu"),
+            cache_spec,
+        )
+
+    assert key_cache is expected
+    assert value_cache is expected
+    allocate.assert_called_once_with(
+        expected.shape,
+        torch.float16,
+        torch.device("cpu"),
+        cache_spec,
+    )
 
 
 def test_nested_hybrid_cache_copy_uses_scheduler_block_geometry() -> None:
@@ -777,6 +882,31 @@ def test_multi_request_remap_precopy_and_postprocess_follow_row_identity() -> No
     torch.testing.assert_close(states[tier.slot_for(146)], torch.full((2,), 11, dtype=torch.float16))
     torch.testing.assert_close(states[tier.slot_for(202)], torch.full((2,), 22, dtype=torch.float16))
     np.testing.assert_array_equal(raw, np.stack([np.arange(101, 157), np.arange(201, 257)]))
+
+
+def test_graph_dispatch_does_not_treat_later_prefill_chunk_as_decode() -> None:
+    runner = object.__new__(NPUModelRunner310)
+    runner.input_batch = SimpleNamespace(
+        num_computed_tokens_cpu=np.array([8], dtype=np.int32),
+        num_prompt_tokens=np.array([16], dtype=np.int32),
+    )
+    runner.attn_state = AscendAttentionState.DecodeOnly
+    runner.speculative_config = None
+
+    with patch(
+        "vllm_ascend.worker.model_runner_v1.NPUModelRunner._determine_batch_execution_and_padding",
+        return_value="dispatch-result",
+    ) as parent_dispatch:
+        result = runner._determine_batch_execution_and_padding(
+            num_tokens=1,
+            num_reqs=1,
+            num_scheduled_tokens_np=np.array([1], dtype=np.int32),
+            max_num_scheduled_tokens=1,
+            use_cascade_attn=False,
+        )
+
+    assert result == "dispatch-result"
+    assert parent_dispatch.call_args.kwargs["force_uniform_decode"] is None
 
 
 class TestNPUModelRunner310(TestBase):

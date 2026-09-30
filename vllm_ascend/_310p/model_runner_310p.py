@@ -48,9 +48,11 @@ from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
 from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
+from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
 from vllm_ascend._310p.prefix_mamba_state import (
+    LiveMambaRequestSlots,
     PrefixMambaStateTier,
     prefix_mamba_active_columns,
     prefix_mamba_slot_count,
@@ -72,7 +74,6 @@ from vllm_ascend.utils import (
     get_kv_cache_tensor_layers,
     is_rc_device,
     lmhead_tp_enable,
-    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -169,7 +170,7 @@ def _allocate_attention_cache_tensor(
     device: torch.device,
     cache_spec: AttentionSpec,
 ) -> torch.Tensor:
-    if isinstance(cache_spec, MLAAttentionSpec):
+    if isinstance(cache_spec, MLAAttentionSpec) and not getattr(cache_spec, "use_nz_cache", False):
         # Ascend MLA consumes an ND latent cache. FRACTAL_NZ is the private
         # dense 310P K/V layout and can expand this rank-4 MLA tensor heavily.
         return torch.empty(shape, dtype=dtype, device=device)
@@ -179,6 +180,32 @@ def _allocate_attention_cache_tensor(
         device=device,
         acl_format=ACL_FORMAT_FRACTAL_NZ,
     )
+
+
+def _allocate_attention_cache_pair(
+    shape: tuple[int, ...],
+    dtype: torch.dtype,
+    device: torch.device,
+    cache_spec: AttentionSpec,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Allocate the physical K/V pages required by a 310P backend."""
+    key_cache = _allocate_attention_cache_tensor(
+        shape,
+        dtype,
+        device,
+        cache_spec,
+    )
+    if isinstance(cache_spec, MLAAttentionSpec) and getattr(cache_spec, "use_nz_cache", False):
+        # Native NoPE MLA stores one normalized latent. It is both the key and
+        # the value before W_UV, so two physical copies waste half the cache.
+        return key_cache, key_cache
+    value_cache = _allocate_attention_cache_tensor(
+        shape,
+        dtype,
+        device,
+        cache_spec,
+    )
+    return key_cache, value_cache
 
 
 class NPUModelRunner310(NPUModelRunner):
@@ -237,8 +264,12 @@ class NPUModelRunner310(NPUModelRunner):
             and (self.speculative_config is None or self._qwen4exp_mtp_ple)
         )
         self.supports_compact_mamba_state = self.supports_prefix_mamba_state_tier or (
-            self.max_num_reqs == 1
-            and not self.cache_config.enable_prefix_caching
+            not self.cache_config.enable_prefix_caching
+            and (
+                self.max_num_reqs == 1
+                or getattr(self.model_config.hf_text_config, "model_type", None)
+                in {"qwen4_exp_text", "glm5_next_text"}
+            )
             and (self.speculative_config is None or self._qwen4exp_mtp_ple)
         )
         self.num_compact_mamba_blocks = (
@@ -248,6 +279,11 @@ class NPUModelRunner310(NPUModelRunner):
             )
             if self.supports_prefix_mamba_state_tier
             else (1 + self.speculative_config.num_speculative_tokens if self._qwen4exp_mtp_ple else 1)
+        )
+        self._live_mamba_slots = (
+            LiveMambaRequestSlots(self.max_num_reqs, self.num_compact_mamba_blocks)
+            if self.supports_compact_mamba_state and not self.supports_prefix_mamba_state_tier and self.max_num_reqs > 1
+            else None
         )
         # NoPE MLA models (GLM-5.3-Flash) have no extended/decoupled (xdrope)
         # rope; the base runner references these attributes without ever
@@ -421,7 +457,10 @@ class NPUModelRunner310(NPUModelRunner):
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
     ):
-        is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        is_prefilling = (
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] < self.input_batch.num_prompt_tokens[:num_reqs]
+        )
+        is_all_decode = not np.any(is_prefilling)
 
         # The parent dummy run starts with a prefill-like attention state and
         # switches to SpecDecoding while building metadata. Do not veto its
@@ -471,6 +510,7 @@ class NPUModelRunner310(NPUModelRunner):
     def _build_attention_metadata(self, *args: Any, **kwargs: Any):
         # Parent dummy_run assigns ChunkedPrefill for non-MLA MTP (910B FIA graph).
         # 310P must capture SpecDecoding + splitfuse for SpecDecoding uniform decode graphs.
+        # TODO: Migrate 310P MTP graph capture and replay before dropping SpecDecoding.
         if self._spec_dummy_capture:
             self.attn_state = AscendAttentionState.SpecDecoding
         return super()._build_attention_metadata(*args, **kwargs)
@@ -516,6 +556,7 @@ class NPUModelRunner310(NPUModelRunner):
             and not np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0)
             and np.all(num_scheduled_tokens == self.uniform_decode_query_len)
         ):
+            # TODO: Retire this state with the 310P MTP splitfuse graph path.
             attn_state = AscendAttentionState.SpecDecoding
             self.attn_state = attn_state
         return attn_state
@@ -523,6 +564,16 @@ class NPUModelRunner310(NPUModelRunner):
     def _remap_compact_mamba_block_tables(self, num_reqs: int, num_scheduled_tokens: np.ndarray | None = None) -> None:
         if not self.supports_compact_mamba_state:
             return
+        live_slots = getattr(self, "_live_mamba_slots", None)
+        live_lanes: tuple[int, ...] = ()
+        if live_slots is not None:
+            live_lanes, new_lanes = live_slots.assign(self.input_batch.req_ids[:num_reqs], set(self.requests))
+            for lane in new_lanes:
+                start = lane * self.num_compact_mamba_blocks
+                stop = start + self.num_compact_mamba_blocks
+                for state in self._compact_mamba_state_tensors:
+                    state[start:stop].zero_()
+            self._compact_mamba_lane_by_req = dict(zip(self.input_batch.req_ids[:num_reqs], live_lanes))
         multi_group_table = cast(MultiGroupBlockTable310, self.input_batch.block_table)
         self._prefix_mamba_active_columns = {}
         mapped_tables: dict[int, np.ndarray] = {}
@@ -561,13 +612,18 @@ class NPUModelRunner310(NPUModelRunner):
                 # Keep scheduler-owned CPU block ids unchanged.
                 device_table = block_table.block_table.gpu
                 num_columns = device_table.shape[1]
-                compact_columns = torch.arange(num_columns, dtype=device_table.dtype, device=device_table.device)
-                compact_columns.remainder_(self.num_compact_mamba_blocks)
-                device_table[:num_reqs].copy_(compact_columns.unsqueeze(0))
-                mapped_tables[group_idx] = np.broadcast_to(
-                    np.arange(num_columns, dtype=np.int32) % self.num_compact_mamba_blocks,
-                    (num_reqs, num_columns),
-                ).copy()
+                if live_slots is not None:
+                    mapped = live_slots.mapped_columns(live_lanes, num_columns)
+                    device_table[:num_reqs].copy_(torch.as_tensor(mapped, device=device_table.device))
+                    mapped_tables[group_idx] = mapped
+                else:
+                    compact_columns = torch.arange(num_columns, dtype=device_table.dtype, device=device_table.device)
+                    compact_columns.remainder_(self.num_compact_mamba_blocks)
+                    device_table[:num_reqs].copy_(compact_columns.unsqueeze(0))
+                    mapped_tables[group_idx] = np.broadcast_to(
+                        np.arange(num_columns, dtype=np.int32) % self.num_compact_mamba_blocks,
+                        (num_reqs, num_columns),
+                    ).copy()
         self.input_batch._prefix_mamba_postprocess_tables = mapped_tables
 
     def _stage_prefix_mamba_request_ids(self) -> None:
@@ -593,7 +649,11 @@ class NPUModelRunner310(NPUModelRunner):
                     for column in self._prefix_mamba_active_columns[group_idx][row]:
                         mapped_ids[column] = tier.slot_for(raw_ids[group_idx][column])
                 else:
-                    mapped_ids = [column % self.num_compact_mamba_blocks for column in range(len(raw_ids[group_idx]))]
+                    lane = getattr(self, "_compact_mamba_lane_by_req", {}).get(req_id, 0)
+                    mapped_ids = [
+                        lane * self.num_compact_mamba_blocks + column % self.num_compact_mamba_blocks
+                        for column in range(len(raw_ids[group_idx]))
+                    ]
                 mapped[group_idx] = mapped_ids
             self._prefix_raw_req_block_ids[req_id] = raw_ids
             req_state.block_ids = tuple(mapped)
@@ -821,13 +881,6 @@ class NPUModelRunner310(NPUModelRunner):
                 self.mrope_positions.cpu,
                 non_blocking=True,
             )
-        elif self.uses_xdrope_dim > 0:
-            self._calc_xdrope_positions(scheduler_output)
-            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True,
-            )
-
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
         base_num_reqs = self.input_batch.num_reqs
@@ -1075,17 +1128,28 @@ class NPUModelRunner310(NPUModelRunner):
             static_forward_context=(self.compilation_config.static_forward_context),
         )
 
-    def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
+    def initialize_kv_cache_tensors(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int] | None = None,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
+    ) -> dict[str, torch.Tensor]:
         """
         Override the base class method.
         Initialize the memory buffer for KV cache.
 
         Args:
             kv_cache_config: The KV cache config
+            kv_cache_allocation_context: Sleep-mode pool used only for discardable
+            KV backing allocations. Sharing and bind stay outside.
         Returns:
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
+        # The private 310P allocator populates this map for QSA layers. GLM's
+        # shared-slot path deliberately bypasses that allocator, so initialize
+        # the empty state before choosing either path.
+        self._qsa_index_caches: dict[str, torch.Tensor] = {}
         # 310P limitation: KV transfer is not supported
         if self.vllm_config.kv_transfer_config is not None:
             logger.error("KV cache transfer is not supported.")
@@ -1108,16 +1172,14 @@ class NPUModelRunner310(NPUModelRunner):
                 "VLLM_ASCEND_310P_ENABLE_MLA=1: initializing experimental MLA "
                 "KV cache on 310P via AscendMLABackend310 (unverified on hardware)."
             )
-        # GLM-Next's planner emits one descriptor per physical cache slot and
-        # deliberately aliases MLA/Mamba or indexer/state layers whose block
-        # IDs come from independent scheduler groups.  Expanding those
-        # descriptors into private per-layer tensors multiplies the planned
-        # allocation and can OOM even though memory profiling admitted the
-        # cache.  Reuse the base Ascend shared-slot allocator and reshape path
-        # for this model; other 310P models retain their private cache layout.
+        # GLM-Next's planner emits one descriptor per physical cache slot.
+        # Indexer/state layers alias a slot; live KDA states have fixed
+        # per-request descriptors. Reuse the base Ascend allocator so the
+        # runner creates exactly the physical storage the planner admitted.
         layer_specs = self._get_layer_kv_cache_specs(kv_cache_config)
-        uses_glm5_next_shared_slots = any(
-            getattr(spec, "model_version", None) == "glm5_next" for spec in layer_specs.values()
+        uses_glm5_next_shared_slots = (
+            getattr(getattr(self.model_config, "hf_text_config", None), "model_type", None) == "glm5_next_text"
+            or any(getattr(spec, "model_version", None) == "glm5_next" for spec in layer_specs.values())
         )
         if uses_glm5_next_shared_slots:
             raw_caches = NPUModelRunner._allocate_kv_cache_tensors(
@@ -1129,8 +1191,43 @@ class NPUModelRunner310(NPUModelRunner):
                 kv_cache_config,
                 raw_caches,
             )
+            host_hot_names = [
+                name
+                for descriptor in getattr(kv_cache_config, "kv_cache_tensors", ())
+                if getattr(descriptor, "glm_host_hot", False)
+                for name in getattr(descriptor, "layers", getattr(descriptor, "shared_by", []))
+            ]
+            self._glm_host_kv_layers = {}
+            if host_hot_names:
+                from vllm_ascend.models.glm5next.host_kv import HOT_BLOCK_SIZE, NZ_INNER, GlmHostKVLayer
+
+                if not self.model_config.enforce_eager:
+                    raise ValueError("310P GLM host MLA requires --enforce-eager until transfers are graph-safe")
+                if self.vllm_config.cache_config.enable_prefix_caching or self.speculative_config is not None:
+                    raise ValueError("310P GLM host MLA does not support prefix caching or speculative decoding")
+                if (
+                    self.vllm_config.parallel_config.decode_context_parallel_size != 1
+                    or self.vllm_config.parallel_config.prefill_context_parallel_size != 1
+                ):
+                    raise ValueError("310P GLM host MLA requires DCP=1 and PCP=1")
+                for name in host_hot_names:
+                    spec = layer_specs[name]
+                    if spec.dtype != torch.float16 or spec.head_size != 512:
+                        raise ValueError("310P GLM host MLA requires FP16 512-wide latent cache")
+                    hot = raw_caches[name].view(spec.dtype).view(
+                        -1, spec.head_size // NZ_INNER, HOT_BLOCK_SIZE, NZ_INNER
+                    )
+                    kv_caches[name] = [hot, hot]
+                    self._glm_host_kv_layers[name] = GlmHostKVLayer(kv_cache_config.num_blocks, hot, spec.block_size)
         else:
             kv_caches = self._allocate_kv_cache_tensors(kv_cache_config)
+        if self._live_mamba_slots is not None:
+            self._compact_mamba_state_tensors = tuple(
+                state
+                for name, cache in kv_caches.items()
+                if isinstance(layer_specs[name], MambaSpec)
+                for state in cache
+            )
         if self.supports_prefix_mamba_state_tier:
             self._prefix_mamba_tiers = {}
             self._prefix_attention_copy_tensors = tuple(
@@ -1155,6 +1252,9 @@ class NPUModelRunner310(NPUModelRunner):
         from vllm.v1.worker.utils import bind_kv_cache
 
         bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches)
+        for name, host_layer in getattr(self, "_glm_host_kv_layers", {}).items():
+            attention = self.compilation_config.static_forward_context[name]
+            attention.impl.host_kv_layer = host_layer
         for layer_name, index_cache in self._qsa_index_caches.items():
             layer = self.compilation_config.static_forward_context[layer_name]
             layer.qsa_index_cache = index_cache
@@ -1174,7 +1274,6 @@ class NPUModelRunner310(NPUModelRunner):
         # init kv cache tensors
         kv_cache: dict[str, list[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]] = {}
         layer_attention_backends = _get_layer_attention_backends(getattr(self, "attn_groups", ()))
-        self._qsa_index_caches: dict[str, torch.Tensor] = {}
         # get kv cache spec for each layer
         layer_kv_cache_spec: dict[str, KVCacheSpec] = {}
         for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
@@ -1267,10 +1366,9 @@ class NPUModelRunner310(NPUModelRunner):
                     attn_backend = layer_attention_backends[layer_name]
                     assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
                     num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
-                    if not vllm_version_is("0.28.0"):
-                        # vLLM #51718 packs all group layers into one tensor;
-                        # kv_cache_config.num_blocks is the per-layer block count.
-                        num_blocks = kv_cache_config.num_blocks
+                    # vLLM #51718 packs all group layers into one tensor;
+                    # kv_cache_config.num_blocks is the per-layer block count.
+                    num_blocks = kv_cache_config.num_blocks
                     assert num_blocks >= kv_cache_config.num_blocks
                     supported_sizes = [
                         size
@@ -1285,7 +1383,6 @@ class NPUModelRunner310(NPUModelRunner):
                         num_blocks,
                         kv_cache_spec,
                     )
-                    v_shape = k_shape
                     dtype = kv_cache_spec.dtype
                     index_cache_shape = None
                     if getattr(kv_cache_spec, "has_qsa_index_cache", False):
@@ -1298,14 +1395,8 @@ class NPUModelRunner310(NPUModelRunner):
                         )
                     if vllm_version_is("0.28.0"):
                         # v0.28.0 `shared_by` aliases the same physical blocks.
-                        k_cache = _allocate_attention_cache_tensor(
+                        k_cache, v_cache = _allocate_attention_cache_pair(
                             k_shape,
-                            dtype,
-                            self.device,
-                            kv_cache_spec,
-                        )
-                        v_cache = _allocate_attention_cache_tensor(
-                            v_shape,
                             dtype,
                             self.device,
                             kv_cache_spec,
@@ -1325,19 +1416,11 @@ class NPUModelRunner310(NPUModelRunner):
                         # private (k, v) so block indices don't collide across layers.
                         for layer_name_inner in shared_names:
                             if isinstance(layer_kv_cache_spec.get(layer_name_inner), AttentionSpec):
-                                kv_cache[layer_name_inner] = (
-                                    _allocate_attention_cache_tensor(
-                                        k_shape,
-                                        dtype,
-                                        self.device,
-                                        kv_cache_spec,
-                                    ),
-                                    _allocate_attention_cache_tensor(
-                                        v_shape,
-                                        dtype,
-                                        self.device,
-                                        kv_cache_spec,
-                                    ),
+                                kv_cache[layer_name_inner] = _allocate_attention_cache_pair(
+                                    k_shape,
+                                    dtype,
+                                    self.device,
+                                    kv_cache_spec,
                                 )
                                 if index_cache_shape is not None:
                                     self._qsa_index_caches[layer_name_inner] = torch.empty(
@@ -1449,7 +1532,11 @@ class NPUModelRunner310(NPUModelRunner):
             src=draft_token_ids.flatten()[prev_draft_token_indices_tensor],
         )
 
-    def may_reinitialize_input_batch(self, kv_cache_config: KVCacheConfig) -> None:
+    def may_reinitialize_input_batch(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int] | None = None,
+    ) -> None:
         """
         Re-initialize the input batch if the block sizes are different from
         `[self.cache_config.block_size]`. This usually happens when there

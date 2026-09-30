@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from typing import Any
 
 import torch
 from vllm.v1.kv_cache_interface import (
@@ -9,9 +10,10 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
-from vllm_ascend.patch.worker.patch_mamba_utils import _get_mamba_groups
+import vllm_ascend.patch.worker.patch_mamba_utils  # noqa: F401
 
 
 def test_uniform_mamba_groups_are_visible_to_all_mamba_buffers() -> None:

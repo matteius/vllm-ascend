@@ -34,19 +34,62 @@ try:
         var = xf.square().mean(dim=-1, keepdim=True)
         return (xf * _t.rsqrt(var + eps) * weight.float()).to(weight.dtype)
 
-    def _round_to_bf16(x):
-        """Round fp32 -> bf16 (8 mantissa bits) via an int bit-trick.
+    def _round_mhc_state(x, use_fp16: bool = False):
+        """Round mHC state to the reference BF16 or experimental FP16 precision.
 
         The golden runs the mHC residual + hyper-connection mixes in bf16
-        (8 mantissa / 8 exponent); the 310P carries them in fp32 (23 mantissa).
+        (7 stored fraction bits, 8 exponent bits); the 310P carries them in
+        fp32 (23 stored fraction bits).
         fp32 is *more* precise but a *different* rounding, and that drift seeds
-        the residual and compounds across depth. Rounding the fp32 intermediates
-        to bf16 precision (kept in fp32, so bf16's exponent range is preserved)
-        makes the 310P match the golden's bf16 numerics without any bf16 cast.
+        the residual and compounds across depth. The default rounds the fp32
+        intermediates to bf16 precision while keeping their exponent range.
+        The opt-in fp16 round trip tests the faster native 310P conversion; it
+        changes the rounding and narrows the exponent range.
         """
+        if use_fp16:
+            return x.to(_t.float16).to(_t.float32)
         xi = x.to(_t.float32).view(_t.int32)
         xi = (xi + 0x7FFF + ((xi >> 16) & 1)) & -65536  # 0xFFFF0000
         return xi.view(_t.float32)
+
+    def _mhc_pre_torch_sinkhorn_310(
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_mult_value,
+        sinkhorn_repeat,
+    ):
+        """Upstream mHC pre math with its 4x4 Sinkhorn loop in one 310P op."""
+        hc_mult = residual.shape[-2]
+        hidden_size = residual.shape[-1]
+        if hc_mult != 4:
+            raise ValueError("310P fused mHC Sinkhorn requires four residual streams")
+        outer_shape = residual.shape[:-2]
+        residual_flat = residual.view(-1, hc_mult, hidden_size)
+        num_tokens = residual_flat.shape[0]
+        x = residual_flat.view(num_tokens, hc_mult * hidden_size).float()
+        mixes = _t.matmul(x, fn.t())
+        sqrsum = x.square().sum(dim=-1, keepdim=True)
+        mixes = mixes * _t.rsqrt(sqrsum / (hc_mult * hidden_size) + rms_eps)
+
+        pre_logits = mixes[:, :hc_mult] * hc_scale[0] + hc_base[:hc_mult]
+        pre_mix = _t.sigmoid(pre_logits) + hc_pre_eps
+        post_logits = mixes[:, hc_mult : 2 * hc_mult] * hc_scale[1] + hc_base[hc_mult : 2 * hc_mult]
+        post_mix = _t.sigmoid(post_logits) * hc_post_mult_value
+        comb_logits = mixes[:, 2 * hc_mult :].view(num_tokens, hc_mult, hc_mult) * hc_scale[2] + hc_base[
+            2 * hc_mult :
+        ].view(1, hc_mult, hc_mult)
+        comb_mix = _t.ops._C_ascend.mhc_sinkhorn_310(comb_logits.contiguous(), sinkhorn_repeat, hc_sinkhorn_eps)
+        layer_input = _t.sum(pre_mix.unsqueeze(-1) * residual_flat.float(), dim=1).to(residual.dtype)
+        return (
+            post_mix.view(*outer_shape, hc_mult, 1),
+            comb_mix.view(*outer_shape, hc_mult, hc_mult),
+            layer_input.view(*outer_shape, hidden_size),
+        )
 
     def _mhc_pre_npu(
         self,
@@ -63,7 +106,8 @@ try:
         norm_weight=None,
         norm_eps=0.0,
     ):
-        post_mix, comb_mix, layer_input = _mhc_pre_torch(
+        pre_impl = _mhc_pre_torch_sinkhorn_310 if getattr(self, "use_310p_sinkhorn", False) else _mhc_pre_torch
+        post_mix, comb_mix, layer_input = pre_impl(
             residual,
             fn,
             hc_scale,
@@ -74,9 +118,10 @@ try:
             hc_post_mult_value,
             sinkhorn_repeat,
         )
-        post_mix = _round_to_bf16(post_mix)
-        comb_mix = _round_to_bf16(comb_mix)
-        layer_input = _round_to_bf16(layer_input)
+        use_fp16 = getattr(self, "use_310p_fp16_mhc_state", False)
+        post_mix = _round_mhc_state(post_mix, use_fp16)
+        comb_mix = _round_mhc_state(comb_mix, use_fp16)
+        layer_input = _round_mhc_state(layer_input, use_fp16)
         if norm_weight is not None:
             layer_input = _mhc_rms_norm(layer_input, norm_weight, norm_eps)
         return post_mix, comb_mix, layer_input
@@ -101,8 +146,10 @@ try:
         norm_eps=0.0,
     ):
         residual_cur = _mhc_post_torch(x, residual, post_layer_mix, comb_res_mix)
-        residual_cur = _round_to_bf16(residual_cur)
-        post_mix_cur, comb_mix_cur, layer_input_cur = _mhc_pre_torch(
+        use_fp16 = getattr(self, "use_310p_fp16_mhc_state", False)
+        residual_cur = _round_mhc_state(residual_cur, use_fp16)
+        pre_impl = _mhc_pre_torch_sinkhorn_310 if getattr(self, "use_310p_sinkhorn", False) else _mhc_pre_torch
+        post_mix_cur, comb_mix_cur, layer_input_cur = pre_impl(
             residual_cur,
             fn,
             hc_scale,
@@ -113,9 +160,9 @@ try:
             hc_post_mult_value,
             sinkhorn_repeat,
         )
-        post_mix_cur = _round_to_bf16(post_mix_cur)
-        comb_mix_cur = _round_to_bf16(comb_mix_cur)
-        layer_input_cur = _round_to_bf16(layer_input_cur)
+        post_mix_cur = _round_mhc_state(post_mix_cur, use_fp16)
+        comb_mix_cur = _round_mhc_state(comb_mix_cur, use_fp16)
+        layer_input_cur = _round_mhc_state(layer_input_cur, use_fp16)
         if norm_weight is not None:
             layer_input_cur = _mhc_rms_norm(layer_input_cur, norm_weight, norm_eps)
         return residual_cur, post_mix_cur, comb_mix_cur, layer_input_cur

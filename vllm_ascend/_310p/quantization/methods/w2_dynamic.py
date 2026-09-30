@@ -103,6 +103,7 @@ W2_CUBE_MAX_TOKENS = 128
 W2_CUBE_OUTPUT_TILE = 128
 W2_CUBE_INPUT_TILE = 128
 W2_CUBE_MIN_INPUT_DIM = 256
+W2_GROUPED_MAX_ROUTES = 5120
 
 
 def _device_kernel_available() -> bool:
@@ -224,6 +225,20 @@ def _w2_blocked_mm_op():
     return _W2_BLOCKED_MM_OP
 
 
+_W2_GROUPED_MM_OP: Any = None
+
+
+def _w2_grouped_mm_op():
+    """Device-grouped packed W2/W4 Cube projection, resolved lazily."""
+    global _W2_GROUPED_MM_OP
+    if _W2_GROUPED_MM_OP is None:
+        try:
+            _W2_GROUPED_MM_OP = torch.ops._C_ascend.npu_w2_grouped_blocked_dequant_matmul_310
+        except (AttributeError, RuntimeError):
+            _W2_GROUPED_MM_OP = None
+    return _W2_GROUPED_MM_OP
+
+
 def _can_use_w2_cube(
     w2_op: Any,
     packed: torch.Tensor,
@@ -240,6 +255,60 @@ def _can_use_w2_cube(
         and in_features >= W2_CUBE_MIN_INPUT_DIM
         and _infer_bits(packed, in_features) in (2, 4)
         and not is_nvfp4
+    )
+
+
+def _can_use_w2_grouped_cube(grouped_op: Any, experts: Any, num_routes: int) -> bool:
+    """Whether a resident expert bank can stay entirely device-grouped."""
+    if grouped_op is None or not bool(getattr(experts, "grouped_ready", False)):
+        return False
+    if num_routes <= 0 or num_routes > W2_GROUPED_MAX_ROUTES:
+        return False
+    names = (
+        "gate_packed_bank",
+        "gate_scale_bank",
+        "up_packed_bank",
+        "up_scale_bank",
+        "down_packed_bank",
+        "down_scale_bank",
+    )
+    banks = [getattr(experts, name, None) for name in names]
+    if any(bank is None or bank.ndim != 3 for bank in banks):
+        return False
+    gate_codes, gate_scale, up_codes, up_scale, down_codes, down_scale = banks
+    hidden = int(experts[experts.local_expert_offset].hidden)
+    inter = int(experts[experts.local_expert_offset].inter)
+    # Gate/up views of a fused allocation have a larger expert stride than a
+    # standalone bank. The native operator requires a contiguous input bank;
+    # only hand it the full fused allocation in that case.
+    if any(not bank.is_contiguous() for bank in (gate_codes, gate_scale, up_codes, up_scale)):
+        fused_codes = getattr(experts, "gate_up_packed_bank", None)
+        fused_scales = getattr(experts, "gate_up_scale_bank", None)
+        if (
+            fused_codes is None
+            or fused_scales is None
+            or not fused_codes.is_contiguous()
+            or not fused_scales.is_contiguous()
+            or fused_codes.shape[1] != 2 * inter
+            or fused_scales.shape[1] != 2 * gate_scale.shape[1]
+        ):
+            return False
+    return (
+        gate_codes.shape[:2] == up_codes.shape[:2]
+        and gate_scale.shape == up_scale.shape
+        and down_codes.shape[1] == hidden
+        and gate_codes.shape[1] == inter
+        and gate_codes.shape[1] % W2_CUBE_OUTPUT_TILE == 0
+        and down_codes.shape[1] % W2_CUBE_OUTPUT_TILE == 0
+        and hidden % W2_CUBE_INPUT_TILE == 0
+        and inter % W2_CUBE_INPUT_TILE == 0
+        and hidden >= W2_CUBE_MIN_INPUT_DIM
+        and inter >= W2_CUBE_MIN_INPUT_DIM
+        and _infer_bits(gate_codes[0], hidden) in (2, 4)
+        and _infer_bits(up_codes[0], hidden) in (2, 4)
+        and _infer_bits(down_codes[0], inter) in (2, 4)
+        and not _is_nvfp4(gate_scale[0], inter, hidden)
+        and not _is_nvfp4(down_scale[0], hidden, inter)
     )
 
 
@@ -459,6 +528,11 @@ class AscendW2DynamicFusedMoEMethod310(AscendMoEScheme):
         num_tokens = x.shape[0]
         hidden = x.shape[1]
         top_k = topk_ids.shape[1]
+        grouped_op = _w2_grouped_mm_op()
+        if _can_use_w2_grouped_cube(grouped_op, experts, num_tokens * top_k):
+            return self._apply_device_grouped(grouped_op, experts, x, topk_weights, topk_ids, shared_expert)
+        if getattr(experts, "nz_packed_codes", False):
+            raise RuntimeError("NZ-packed GLM experts require the grouped 310P Cube operator")
         pair_expert = topk_ids.reshape(-1)
         pair_weight = topk_weights.reshape(-1, 1).to(torch.float32)
         pair_token = torch.arange(num_tokens, device=x.device).unsqueeze(1).expand(num_tokens, top_k).reshape(-1)
@@ -564,3 +638,58 @@ class AscendW2DynamicFusedMoEMethod310(AscendMoEScheme):
         if shared_expert is not None:
             out = out + shared_expert.forward(x).to(torch.float32)
         return out
+
+    def _apply_device_grouped(
+        self,
+        grouped_op: Any,
+        experts: Any,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_expert: Any | None,
+    ) -> torch.Tensor:  # pragma: no cover - device-only wave
+        """Project a resident local bank with device-only routing metadata."""
+        from vllm_ascend.models.qwen4_exp.grouped_expert_dispatch import build_grouped_expert_dispatch
+
+        num_tokens, hidden = x.shape
+        top_k = topk_ids.shape[1]
+        # Expert parallelism remaps peer-owned ids to the first local expert
+        # and gives those routes exactly zero weight so the eager fallback can
+        # safely index a resident slot. Recover an out-of-range sentinel here:
+        # the device dispatcher then sorts masked peer rows behind every local
+        # group, and the grouped kernel skips their projection entirely.
+        peer_sentinel = experts.local_expert_offset + experts.num_local_experts
+        dispatch_ids = torch.where(
+            topk_weights != 0,
+            topk_ids,
+            torch.full_like(topk_ids, peer_sentinel),
+        )
+        dispatch = build_grouped_expert_dispatch(
+            topk_weights,
+            dispatch_ids,
+            num_local_experts=experts.num_local_experts,
+            expert_offset=experts.local_expert_offset,
+            weight_dtype=torch.float32,
+        )
+        sorted_tokens = dispatch.token_indices.index_select(0, dispatch.order)
+        sorted_x = x.index_select(0, sorted_tokens).to(torch.float16).contiguous()
+        group_ends = dispatch.group_list.to(torch.int64).contiguous()
+        fused_codes = getattr(experts, "gate_up_packed_bank", None)
+        fused_scales = getattr(experts, "gate_up_scale_bank", None)
+        if (
+            fused_codes is not None
+            and fused_scales is not None
+            and fused_codes.shape[1] == 2 * experts.gate_packed_bank.shape[1]
+            and fused_scales.shape[1] == 2 * experts.gate_scale_bank.shape[1]
+        ):
+            gate, up = grouped_op(sorted_x, fused_codes, fused_scales, group_ends).chunk(2, dim=-1)
+        else:
+            gate = grouped_op(sorted_x, experts.gate_packed_bank, experts.gate_scale_bank, group_ends)
+            up = grouped_op(sorted_x, experts.up_packed_bank, experts.up_scale_bank, group_ends)
+        hidden_act = (torch.nn.functional.silu(gate.to(torch.float32)) * up.to(torch.float32)).to(torch.float16)
+        routed = grouped_op(hidden_act, experts.down_packed_bank, experts.down_scale_bank, group_ends).to(torch.float32)
+        routed *= dispatch.route_weights.index_select(0, dispatch.order)
+        output = routed.index_select(0, dispatch.inverse_order).reshape(num_tokens, top_k, hidden).sum(1)
+        if shared_expert is not None:
+            output += shared_expert.forward(x).to(torch.float32)
+        return output

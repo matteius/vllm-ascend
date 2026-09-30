@@ -12,8 +12,9 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState  # noqa: E40
 from vllm_ascend.attention.sfa_kv_offload import (  # noqa: E402
     AscendSFAKVOffloadImpl,
     AscendSFAKVOffloadMetadataBuilder,
+    AscendSFAOffloadMetadata,
 )
-from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder  # noqa: E402
+from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (  # noqa: E402
     FSA_EXTERNAL_PLAN_READY_MARKER,
     FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT,
@@ -45,7 +46,7 @@ def _make_boundary_decode_metadata():
 )
 def test_pd_decode_consumer_is_derived_from_kv_role(kv_transfer_config, expected):
     vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
-    with patch.object(AscendSFAMetadataBuilder, "__init__", return_value=None):
+    with patch.object(AscendSFAMetadataBuilder, "__init__", return_value=None) as init:
         builder = AscendSFAKVOffloadMetadataBuilder(
             kv_cache_spec=None,
             layer_names=[],
@@ -54,6 +55,9 @@ def test_pd_decode_consumer_is_derived_from_kv_role(kv_transfer_config, expected
         )
 
     assert builder.is_pd_decode_consumer is expected
+    assert init.call_args.args[4] is AscendSFAOffloadMetadata
+    assert "copy_sfa_seq_lens" in AscendSFAOffloadMetadata.__dataclass_fields__
+    assert "copy_sfa_seq_lens" not in AscendSFAMetadata.__dataclass_fields__
 
 
 @pytest.mark.parametrize(
@@ -69,6 +73,7 @@ def test_boundary_token_classification_depends_on_pd_decode_role(
     expected_prefills,
 ):
     builder = AscendSFAKVOffloadMetadataBuilder.__new__(AscendSFAKVOffloadMetadataBuilder)
+    builder.use_fused_copy_sfa = False
     builder.decode_threshold = 1
     builder.is_pd_decode_consumer = is_pd_decode_consumer
     metadata = SimpleNamespace(attn_state=AscendAttentionState.DecodeOnly)
@@ -89,6 +94,7 @@ def test_boundary_token_classification_depends_on_pd_decode_role(
 
 def test_pd_decode_consumer_still_rejects_long_prefill_classification():
     builder = AscendSFAKVOffloadMetadataBuilder.__new__(AscendSFAKVOffloadMetadataBuilder)
+    builder.use_fused_copy_sfa = False
     builder.decode_threshold = 1
     builder.is_pd_decode_consumer = True
     metadata = SimpleNamespace()
@@ -361,3 +367,36 @@ def test_fused_overlap_common_inputs_are_reused_only_within_one_forward():
         refreshed.seq_len_thresholds.reshape(-1),
         torch.tensor([5, 6], dtype=torch.int32),
     )
+
+
+@pytest.mark.parametrize("li_c8", [None, False, True])
+def test_fused_offload_c8_guard_uses_indexer_state(li_c8):
+    class ReachedDeviceSetup(Exception):
+        pass
+
+    def init_base(self, *args, **kwargs):
+        self.enable_sparse_sfa_c8 = False
+        self.has_indexer = li_c8 is not None
+        self.indexer = None if li_c8 is None else SimpleNamespace(enable_sparse_li_c8=li_c8)
+        self.vllm_config = SimpleNamespace(
+            cache_config=SimpleNamespace(block_size=128),
+            scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=8192),
+        )
+
+    config = SimpleNamespace(
+        sparse_kv_offload_config=SimpleNamespace(
+            use_fused_overlap=False, use_fused_copy_sfa=True, topk_buffer_size=8192
+        )
+    )
+    module = "vllm_ascend.attention.sfa_kv_offload"
+    expected = NotImplementedError if li_c8 else ReachedDeviceSetup
+    with (
+        patch.object(AscendSFAImpl, "__init__", init_base),
+        patch(f"{module}.enable_dsa_cp", return_value=False),
+        patch(f"{module}.get_ascend_config", return_value=config),
+        patch(f"{module}.torch.device", side_effect=ReachedDeviceSetup),
+        pytest.raises(expected) as exc,
+    ):
+        AscendSFAKVOffloadImpl(1, 128, 1.0, 1, None, None, "auto", None, "decoder", None)
+    if li_c8:
+        assert "does not support sparse LI C8" in str(exc.value)

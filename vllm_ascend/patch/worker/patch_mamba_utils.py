@@ -15,7 +15,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
-from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
+from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
 from vllm_ascend._310p.prefix_mamba_state import get_mamba_postprocess_block_ids
@@ -138,7 +138,8 @@ def _collect_mamba_copy_meta_torch(
     for mamba_group_id in mamba_group_ids:
         block_ids = req_state.block_ids[mamba_group_id]
         dest_block_id = block_ids[dest_block_idx]
-        layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
+        kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
+        layer_names = kv_cache_group.layer_names
         for layer_name in layer_names:
             mamba_spec = mamba_utils._get_mamba_spec_for_layer(
                 kv_cache_config.kv_cache_groups[mamba_group_id], layer_name
@@ -233,7 +234,8 @@ def _postprocess_mamba_align_gpu_cpu_fallback(
         for mamba_group_id in ctx.mamba_group_ids:
             block_ids = get_mamba_postprocess_block_ids(input_batch, mamba_group_id, i)
             dest_block_id = block_ids[dest_block_idx]
-            layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
+            kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
+            layer_names = kv_cache_group.layer_names
             for layer_name in layer_names:
                 mamba_spec = mamba_utils._get_mamba_spec_for_layer(
                     kv_cache_config.kv_cache_groups[mamba_group_id], layer_name
@@ -294,7 +296,8 @@ def _collect_mamba_copy_meta_with_layers(
     for mamba_group_id in mamba_group_ids:
         block_ids = req_state.block_ids[mamba_group_id]
         dest_block_id = block_ids[dest_block_idx]
-        layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
+        kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
+        layer_names = kv_cache_group.layer_names
         for layer_name in layer_names:
             mamba_spec = mamba_utils._get_mamba_spec_for_layer(
                 kv_cache_config.kv_cache_groups[mamba_group_id], layer_name
@@ -400,11 +403,6 @@ else:
     mamba_utils.collect_mamba_copy_meta = _collect_mamba_copy_meta_torch
     mamba_utils.do_mamba_copy_block = _do_mamba_copy_block_torch
     mamba_utils.postprocess_mamba_align_gpu = _postprocess_mamba_align_gpu_cpu_fallback
-
-# Worker KV configs retain UniformTypeKVCacheSpecs so per-layer physical page
-# layouts are available while the scheduler receives unwrapped representative
-# specs. Teach all upstream Mamba buffer/context helpers to see those groups.
-mamba_utils.get_mamba_groups = _get_mamba_groups
 
 # Ascend NPU does not support DT_UINT64 in aclnnInplaceZero.
 # MambaCopyBuffers.create() uses torch.uint64 for src_ptrs/dst_ptrs,

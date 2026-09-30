@@ -16,6 +16,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
+from vllm_ascend import envs
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolStateSpec,
     get_kv_cache_compression_ratio,
@@ -26,6 +27,7 @@ from vllm_ascend.models.glm5next.kv_cache import (
 )
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
+GLM5_NEXT_310P_MLA_KERNEL_BLOCK_SIZE = 32
 INDEXER_KPOOL_MAX_BLOCK_SIZE = 1024
 INDEXER_KPOOL_BLOCK_ALIGNMENT = 16
 
@@ -74,6 +76,7 @@ class AscendIndexerKPoolMetadata:
     compress_ratio: int
     cache_role: str = "indexer"
     cum_query_lens: torch.Tensor | None = None
+    cum_query_lens_cpu: torch.Tensor | None = None
     raw_seq_lens: torch.Tensor | None = None
     num_actual_tokens: int = 0
 
@@ -112,13 +115,18 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         self.logical_block_size = kv_cache_spec.block_size
         self.storage_block_size = get_storage_block_size(kv_cache_spec)
         self.compress_ratio = compress_ratio
-        if self.logical_block_size % GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE:
+        kernel_block_size = (
+            GLM5_NEXT_310P_MLA_KERNEL_BLOCK_SIZE
+            if envs.VLLM_ASCEND_310P_ENABLE_MLA
+            else GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
+        )
+        if self.logical_block_size % kernel_block_size:
             raise ValueError(
-                "GLM-Next logical block size must be divisible by the SFA "
+                "GLM-Next logical block size must be divisible by its MLA "
                 f"kernel block size: logical={self.logical_block_size}, "
-                f"kernel={GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE}."
+                f"kernel={kernel_block_size}."
             )
-        self.kernel_blocks_per_logical_block = self.logical_block_size // GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
+        self.kernel_blocks_per_logical_block = self.logical_block_size // kernel_block_size
         self.indexer_block_size, self.indexer_blocks_per_logical_block = select_indexer_block_size(
             self.storage_block_size
         )
@@ -223,7 +231,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
                 device=self._block_table_buffer.device,
             )
         block_table = self._block_table_buffer[:num_reqs, :expanded_width]
-        # The common full-group table is expanded for the C128 SFA kernel:
+        # The common full-group table is expanded for its MLA kernel:
         # scheduler block N becomes [split*N, ..., split*N+split-1]. The
         # compressed indexer owns one physical page per scheduler block, so it
         # must recover N rather than treating the SFA sub-blocks as pages.
@@ -262,6 +270,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             block_size=self.indexer_block_size,
             compress_ratio=self.compress_ratio,
             cum_query_lens=cum_query_lens,
+            cum_query_lens_cpu=common_attn_metadata.query_start_loc_cpu[: num_reqs + 1],
             raw_seq_lens=raw_seq_lens,
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
         )

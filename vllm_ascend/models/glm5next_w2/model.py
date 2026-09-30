@@ -38,6 +38,7 @@ This module itself contains ZERO ``triton`` references in code.
 from __future__ import annotations
 
 import contextlib
+import gc
 from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -92,6 +93,8 @@ KDA_CONV_KERNEL_CONFIG_KEY = "linear_conv_kernel_dim"
 # W2/W4 tensors are plain attributes rather than nn.Parameters, so upstream's
 # module offloader cannot discover them through ``named_parameters()``.
 PACKED_EXPERTS_OFFLOAD_PARAM = "packed_experts"
+GLM_NZ_OUTPUT_TILE = 16
+GLM_NZ_INPUT_TILE = 128
 
 
 def _with_fp16_recurrent_state_dtype(
@@ -229,6 +232,188 @@ class _PackedW2Expert:
         self.down_scale: torch.Tensor | None = None
 
 
+def _pack_codes_nz(codes: torch.Tensor, in_features: int) -> torch.Tensor:
+    """Repack one canonical expert matrix into 16×128 Cube NZ tiles.
+
+    Each byte combines values from separate contiguous quarters/halves of the
+    final NZ tile. The integer codes and the total byte count are unchanged.
+    """
+    if codes.dtype != torch.uint8 or codes.ndim != 2 or not codes.is_contiguous():
+        raise ValueError("NZ packing requires a contiguous uint8 [N, packedK] matrix")
+    n, packed_k = codes.shape
+    if packed_k == 0 or in_features % packed_k:
+        raise ValueError("packed K must divide input features")
+    codes_per_byte = in_features // packed_k
+    if codes_per_byte not in (2, 4) or n % GLM_NZ_OUTPUT_TILE or in_features % GLM_NZ_INPUT_TILE:
+        raise ValueError("NZ packing requires W2/W4 codes and 16×128 tiles")
+
+    n_tiles = n // GLM_NZ_OUTPUT_TILE
+    k_tiles = in_features // GLM_NZ_INPUT_TILE
+    tile_bytes = GLM_NZ_OUTPUT_TILE * GLM_NZ_INPUT_TILE // codes_per_byte
+    bits = 8 // codes_per_byte
+    rows = codes.view(n_tiles, GLM_NZ_OUTPUT_TILE, k_tiles, GLM_NZ_INPUT_TILE // codes_per_byte)
+    rows = rows.permute(0, 2, 1, 3)
+    fields = torch.stack(
+        [(rows >> (bits * field)) & ((1 << bits) - 1) for field in range(codes_per_byte)],
+        dim=-1,
+    )
+    nz = fields.reshape(n_tiles, k_tiles, GLM_NZ_OUTPUT_TILE, GLM_NZ_INPUT_TILE)
+    nz = nz.permute(0, 1, 3, 2).reshape(n_tiles, k_tiles, codes_per_byte, tile_bytes)
+    packed = nz[:, :, 0, :].clone()
+    for field in range(1, codes_per_byte):
+        packed |= nz[:, :, field, :] << (bits * field)
+    return packed.reshape(n, packed_k).contiguous()
+
+
+class _PackedW2ExpertBank(list[_PackedW2Expert]):
+    """Per-expert views plus contiguous local projection banks.
+
+    The streamed checkpoint names experts globally, so the list retains one
+    lightweight slot per global expert. After loading, resident local tensors
+    are compacted into six contiguous banks. Individual expert attributes then
+    become views of those banks, preserving the established eager fallback
+    while enabling one device-grouped projection with no host routing sync.
+    Host-offloaded layers stay in their pinned per-expert representation so the
+    existing selected-expert staging path remains bounded.
+    """
+
+    def __init__(
+        self,
+        hidden: int,
+        inter: int,
+        num_experts: int,
+        *,
+        local_expert_offset: int,
+        num_local_experts: int,
+        offload_to_cpu: bool,
+        layer_key: str | None = None,
+        nz_packed_codes: bool = False,
+    ) -> None:
+        super().__init__(_PackedW2Expert(hidden, inter, offload_to_cpu=offload_to_cpu) for _ in range(num_experts))
+        self.hidden = int(hidden)
+        self.inter = int(inter)
+        self.local_expert_offset = int(local_expert_offset)
+        self.num_local_experts = int(num_local_experts)
+        self.offload_to_cpu = bool(offload_to_cpu)
+        self.layer_key = layer_key
+        self.grouped_ready = False
+        self.nz_packed_codes = bool(nz_packed_codes and not offload_to_cpu)
+
+    def place_resident_tensor(
+        self,
+        expert_id: int,
+        name: str,
+        tensor: torch.Tensor,
+        *,
+        device: torch.device | str,
+    ) -> None:
+        """Copy one checkpoint tensor directly into grouped storage.
+
+        Overlay checkpoints may stream a stale base projection before the
+        authoritative replacement. Equal-shape replacements overwrite their
+        existing slice. A quantization-width change rebuilds that projection
+        bank and clears its completion markers; finalization then verifies that
+        every local expert received the replacement shape.
+        """
+        local = expert_id - self.local_expert_offset
+        if not 0 <= local < self.num_local_experts:
+            raise IndexError(f"expert {expert_id} is outside the resident expert range")
+
+        if self.nz_packed_codes and name.endswith("_packed"):
+            in_features = self.inter if name == "down_packed" else self.hidden
+            tensor = _pack_codes_nz(tensor.cpu(), in_features).view(torch.int8)
+
+        # Gate and up consume the same activations. Store their rows in one
+        # allocation so the grouped Cube operator can project both in one call.
+        # The per-projection banks remain views for the eager fallback.
+        fused = name.startswith(("gate_", "up_"))
+        kind = name.rsplit("_", 1)[-1]
+        bank_name = f"gate_up_{kind}_bank" if fused else f"{name}_bank"
+        grouped = getattr(self, bank_name, None)
+        expected_shape = (
+            (self.num_local_experts, 2 * tensor.shape[0], *tensor.shape[1:])
+            if fused
+            else (self.num_local_experts, *tensor.shape)
+        )
+        if grouped is None:
+            grouped = torch.empty(
+                expected_shape,
+                dtype=tensor.dtype,
+                device=device,
+            )
+            setattr(self, bank_name, grouped)
+        elif grouped.shape != expected_shape or grouped.dtype != tensor.dtype:
+            old_device_type = grouped.device.type
+            affected = (f"gate_{kind}", f"up_{kind}") if fused else (name,)
+            for resident_expert in self[self.local_expert_offset : self.local_expert_offset + self.num_local_experts]:
+                for projection in affected:
+                    setattr(resident_expert, projection, None)
+            for projection in affected:
+                projection_bank = f"{projection}_bank"
+                if projection_bank != bank_name and hasattr(self, projection_bank):
+                    delattr(self, projection_bank)
+            delattr(self, bank_name)
+            del grouped
+            gc.collect()
+            if old_device_type == "npu":
+                torch.npu.empty_cache()
+            grouped = torch.empty(
+                expected_shape,
+                dtype=tensor.dtype,
+                device=device,
+            )
+            setattr(self, bank_name, grouped)
+
+        if fused:
+            rows = tensor.shape[0]
+            setattr(self, f"gate_{kind}_bank", grouped[:, :rows])
+            setattr(self, f"up_{kind}_bank", grouped[:, rows:])
+        expert = self[expert_id]
+        destination = getattr(self, f"{name}_bank")[local] if fused else grouped[local]
+        destination.copy_(tensor)
+        setattr(expert, name, destination)
+
+    def finalize_grouped_storage(self) -> None:
+        """Compact resident local tensors without changing expert views."""
+        if self.offload_to_cpu:
+            return
+        start = self.local_expert_offset
+        stop = start + self.num_local_experts
+        local_experts = self[start:stop]
+        for name in _SLOT_KIND_TO_ATTR.values():
+            tensors = [getattr(expert, name) for expert in local_experts]
+            if any(tensor is None for tensor in tensors):
+                raise ValueError(f"packed expert bank is incomplete: missing {name}")
+            bank_name = f"{name}_bank"
+            grouped = getattr(self, bank_name, None)
+            if grouped is None:
+                # Compatibility for callers that populate the lightweight
+                # expert holders directly. The model loader uses
+                # ``place_resident_tensor`` and never takes this allocating
+                # fallback on NPU.
+                grouped = torch.stack(tensors).contiguous()
+                setattr(self, bank_name, grouped)
+                for local, expert in enumerate(local_experts):
+                    setattr(expert, name, grouped[local])
+        self.grouped_ready = True
+
+
+def _release_grouped_compaction_cache(banks: Iterable[_PackedW2ExpertBank]) -> None:
+    """Return superseded expert allocations before HCCL initializes.
+
+    ``finalize_grouped_storage`` replaces six independently loaded tensors per
+    expert with views into contiguous projection banks.  The old allocations
+    are dead, but the NPU caching allocator otherwise retains them through the
+    subsequent lazy HCCL initialization.  Reclaim the cache once, after all
+    model weights have loaded.  Host-only tests and offloaded banks do not need
+    an accelerator cache operation.
+    """
+    has_resident_npu_bank = any(bank.grouped_ready and bank.gate_packed_bank.device.type == "npu" for bank in banks)
+    if has_resident_npu_bank:
+        gc.collect()
+        torch.npu.empty_cache()
+
+
 # (slot, kind) from the G6 weight map -> the packed-expert attribute it fills.
 _SLOT_KIND_TO_ATTR = {
     ("w1", "codes"): "gate_packed",
@@ -258,11 +443,26 @@ def _new_packed_expert_bank(
     geometry: dict[str, int],
     *,
     offload_to_cpu: bool = False,
-) -> list[_PackedW2Expert]:
+    layer_key: str | None = None,
+) -> _PackedW2ExpertBank:
     """A fresh (unfilled) per-expert packed bank for one MoE layer."""
     hidden = geometry["hidden_size"]
     inter = geometry["moe_intermediate_size"]
-    return [_PackedW2Expert(hidden, inter, offload_to_cpu=offload_to_cpu) for _ in range(geometry["n_routed_experts"])]
+    from .moe import _ep_rank_size, ep_expert_range
+
+    num_experts = geometry["n_routed_experts"]
+    ep_rank, ep_size = _ep_rank_size()
+    lo, hi = ep_expert_range(ep_rank, ep_size, num_experts)
+    return _PackedW2ExpertBank(
+        hidden,
+        inter,
+        num_experts,
+        local_expert_offset=lo,
+        num_local_experts=hi - lo,
+        offload_to_cpu=offload_to_cpu,
+        layer_key=layer_key,
+        nz_packed_codes=bool(geometry.get("nz_packed_codes", 0)),
+    )
 
 
 def _should_offload_packed_experts(offload_config: Any | None, layer_idx: int) -> bool:
@@ -288,7 +488,7 @@ def _should_offload_packed_experts(offload_config: Any | None, layer_idx: int) -
 
 
 def _place_streamed_expert(
-    layer_banks: dict[str, list[_PackedW2Expert]],
+    layer_banks: dict[str, _PackedW2ExpertBank],
     name: str,
     tensor: torch.Tensor,
     geometry: dict[str, int],
@@ -338,8 +538,18 @@ def _place_streamed_expert(
 
         if should_pin_memory() and not tensor.is_pinned():
             tensor = tensor.pin_memory()
-    elif tensor.device.type != "npu":
-        tensor = tensor.to("npu")
+    else:
+        # Populate the final contiguous allocation immediately. Moving each
+        # expert to NPU first and stacking it after the checkpoint load leaves
+        # both copies live at the compaction peak, exactly when a full-capacity
+        # model has the least HBM headroom.
+        bank.place_resident_tensor(
+            mapping.expert_id,
+            attr,
+            tensor,
+            device="npu",
+        )
+        return mapping.block
     setattr(expert, attr, tensor)
     return mapping.block
 
@@ -384,6 +594,7 @@ def _install_w2_moe(
     config: Any,
     dtype_policy: Glm5NextW2DtypePolicy,
     offload_config: Any | None = None,
+    nz_packed_codes: bool = False,
 ) -> int:
     """G6: attach a ``Glm5NextW2MoE`` seam to every MoE layer + bind its forward.
 
@@ -397,6 +608,7 @@ def _install_w2_moe(
     from .moe import Glm5NextW2MoE
 
     geometry = _expert_geometry_from_config(config)
+    geometry["nz_packed_codes"] = int(nz_packed_codes)
     count = 0
     for layer in layers:
         if not _layer_is_moe(layer):
@@ -417,6 +629,7 @@ def _install_w2_moe(
         w2_moe.w2_experts = _new_packed_expert_bank(
             geometry,
             offload_to_cpu=_should_offload_packed_experts(offload_config, layer_idx),
+            layer_key=f"layers.{layer_idx}",
         )
         layer.mlp_w2 = w2_moe
         experts = getattr(mlp, "experts", None)
@@ -770,35 +983,17 @@ def _install_310p_kda(layers: Iterable[Any], config: Any, dtype_policy: Glm5Next
 
 
 def _install_dsa_indexer(layers: Iterable[Any], config: Any, dtype_policy: Glm5NextW2DtypePolicy) -> int:
-    """G5: route every full-attn (DSA) layer's forward through the eager DSA core.
-
-    For each of the 11 ``FULL_ATTN_LAYERS`` (``layer_kind == 'mla'``) this (1)
-    attaches ``layer.dsa_w2`` (an
-    :class:`~vllm_ascend.models.glm5next_w2.dsa.AscendGlm5NextW2DSA`) and (2) --
-    when the shipped ``Glm5NextMLAAttention`` is present -- overrides its
-    ``forward`` so the layer runs the eager kpool-indexer + NoPE MLA-latent
-    attention instead of the device MLA kernels / CUDA-only sparse indexer. See
-    :func:`_bind_eager_dsa_forward` for the prefill vs. decode-KV contract.
-    """
-    from .dsa import AscendGlm5NextW2DSA
-
-    io_dtype = dtype_policy.cast_site("dsa")
+    """Verify every DSA layer retained native paged MLA and kpool indexing."""
+    del config, dtype_policy
     count = 0
     for layer in layers:
         if not _is_dsa_layer(layer):
             continue
-        dsa_core = AscendGlm5NextW2DSA.from_config(config, dtype_policy=dtype_policy)
-        layer.dsa_w2 = dsa_core
         self_attn = getattr(layer, "self_attn", None)
-        if self_attn is not None and hasattr(self_attn, "kv_b_proj"):
-            # Alias the eager DSA params to the shipped MLA storage now, before
-            # checkpoint loading and memory profiling. The loader subsequently
-            # fills the shipped parameters in-place, so the aliases see the real
-            # weights while releasing ~82 MiB of duplicate storage per DSA
-            # layer. The forward binding repeats this once after loading as a
-            # mixed-dtype fallback (where storage sharing is not possible).
-            _bind_shipped_mla_weights(self_attn, dsa_core)
-            _bind_eager_dsa_forward(self_attn, dsa_core, io_dtype)
+        if self_attn is not None and not hasattr(self_attn, "mla_attn"):
+            raise RuntimeError("GLM W2 DSA layer requires the native Ascend MLA wrapper")
+        if self_attn is not None and getattr(self_attn, "indexer", None) is None:
+            raise RuntimeError("GLM W2 DSA layer requires its checkpoint-declared kpool indexer")
         count += 1
     return count
 
@@ -937,6 +1132,14 @@ def _build_causal_lm_cls() -> type:
             # Config plumbing: expose the flattened GLM text config so the
             # shipped constructor sees 45L / 288-expert / KDA+DSA / MTP-1.
             self._glm_text_config = _resolve_glm_text_config(vllm_config)
+            hf_config = getattr(getattr(vllm_config, "model_config", None), "hf_config", None)
+            self._nz_packed_codes = bool(getattr(hf_config, "ascend_glm_nz_packed_codes", False))
+            self._glm_text_config.ascend_glm_fused_sinkhorn = bool(
+                getattr(hf_config, "ascend_glm_fused_sinkhorn", False)
+            )
+            self._glm_text_config.ascend_glm_mhc_fp16_state = bool(
+                getattr(hf_config, "ascend_glm_mhc_fp16_state", False)
+            )
             # FP16-in-checkpoint fix: the dense-MLP and shared-expert projections
             # ship as fp16 (no weight_scale_inv) but are absent from the
             # checkpoint's modules_to_not_convert. Mark them so they load through
@@ -950,6 +1153,9 @@ def _build_causal_lm_cls() -> type:
             # runs). See ``_suppress_fp8_expert_allocation`` above.
             from vllm_ascend.models.glm5next import model as _shipped_glm
 
+            # Keep GLM's checkpoint-declared index_topk during construction so
+            # its kpool projection weights and paged caches are instantiated.
+            self._native_dense_dsa = False
             with _suppress_fp8_expert_allocation(_shipped_glm):
                 super().__init__(vllm_config=vllm_config, prefix=prefix)
             # 310P W2 delta hooks: KDA->AscendC (G4), DSA indexer (G5), MoE->W2 (G6).
@@ -982,14 +1188,7 @@ def _build_causal_lm_cls() -> type:
             self._kda_swapped = _install_310p_kda(_iter_model_layers(self), self._glm_text_config, self.dtype_policy)
 
         def _override_dsa_indexer(self) -> None:
-            """G5: route every full-attn (DSA) layer's forward through the eager core.
-
-            Delegates to :func:`_install_dsa_indexer`, which attaches ``layer.dsa_w2``
-            AND overrides the shipped ``Glm5NextMLAAttention.forward`` on the 11
-            ``FULL_ATTN_LAYERS`` so the device MLA kernels + CUDA-only sparse indexer
-            are never entered. Component wired: ``glm5next_w2.dsa`` (G5, reusing the
-            deepseek_v41 indexer selection).
-            """
+            """G5: keep native paged MLA and its sparse kpool indexer."""
             self._dsa_overridden = _install_dsa_indexer(
                 _iter_model_layers(self), self._glm_text_config, self.dtype_policy
             )
@@ -1011,6 +1210,7 @@ def _build_causal_lm_cls() -> type:
                 self._glm_text_config,
                 self.dtype_policy,
                 self._w2_offload_config,
+                self._nz_packed_codes,
             )
 
         # -- KV-cache report (hybrid KDA + DSA) ----------------------------
@@ -1042,7 +1242,9 @@ def _build_causal_lm_cls() -> type:
 
         def _expert_geometry(self) -> dict:
             """Frozen W2 expert geometry from the GLM text config."""
-            return _expert_geometry_from_config(self._glm_text_config)
+            geometry = _expert_geometry_from_config(self._glm_text_config)
+            geometry["nz_packed_codes"] = int(self._nz_packed_codes)
+            return geometry
 
         def load_weights(self, weights: Iterable[tuple[Any, ...]]) -> set[str]:
             """Stream the checkpoint, routing packed W2 experts into the W2 banks.
@@ -1059,12 +1261,23 @@ def _build_causal_lm_cls() -> type:
             from .weight_mapping import WeightClass, classify_tensor
 
             geometry = self._expert_geometry()
-            layer_banks: dict[str, list[_PackedW2Expert]] = {}
+            layer_banks: dict[str, _PackedW2ExpertBank] = {}
+            bank_ids: set[int] = set()
             for layer in _iter_model_layers(self):
                 w2_moe = getattr(layer, "mlp_w2", None)
                 bank = getattr(w2_moe, "w2_experts", None) if w2_moe is not None else None
                 if bank is not None:
-                    layer_banks[f"layers.{getattr(layer, 'layer_idx', len(layer_banks))}"] = bank
+                    layer_key = f"layers.{getattr(layer, 'layer_idx', len(layer_banks))}"
+                    if layer_key in layer_banks:
+                        raise ValueError(f"duplicate packed expert layer key: {layer_key}")
+                    if id(bank) in bank_ids:
+                        raise ValueError(f"packed expert bank is shared by multiple layers: {layer_key}")
+                    if bank.layer_key != layer_key:
+                        raise ValueError(
+                            f"packed expert bank layer mismatch: attached as {layer_key}, created for {bank.layer_key}"
+                        )
+                    layer_banks[layer_key] = bank
+                    bank_ids.add(id(bank))
 
             loaded: set[str] = set()
             passthrough: list[tuple[Any, ...]] = []
@@ -1078,6 +1291,11 @@ def _build_causal_lm_cls() -> type:
                 name = args[0]
                 if _mtp_markers and any(mk in name for mk in _mtp_markers):
                     loaded.add(name)
+                    continue
+                if self._native_dense_dsa and ".indexer." in name:
+                    # Native dense MLA has no sparse-indexer parameters. Keep
+                    # those tensors in the checkpoint artifact, but do not
+                    # hand nonexistent module names to the base loader.
                     continue
                 cls = classify_tensor(name)
                 if cls is WeightClass.EXCLUDE:
@@ -1093,7 +1311,11 @@ def _build_causal_lm_cls() -> type:
                 # the G6 weight map).
                 remapped = name.replace("model.language_model.", "model.", 1)
                 passthrough.append((remapped, *tuple(args[1:])))
+            banks = list(layer_banks.values())
+            for bank in banks:
+                bank.finalize_grouped_storage()
             loaded |= super().load_weights(passthrough)
+            _release_grouped_compaction_cache(banks)
             return loaded
 
     AscendGlm5NextW2ForCausalLM.__module__ = __name__

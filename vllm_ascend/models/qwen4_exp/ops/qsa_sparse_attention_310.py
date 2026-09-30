@@ -6,7 +6,10 @@ The native operator consumes the compact learned-indexer result directly.  A
 selected index denotes a four-token compression group; the kernel expands that
 group while reading the existing 128-token paged K/V cache in its native NZ
 layout.  No dense token-index expansion, K/V gather, or second main cache is
-materialized.
+materialized.  A negative group count encodes sequential groups. A negative
+tail count encodes a still cheaper dense-token prefix whose length is carried
+in ``group_counts``; this lets dense MLA reuse the same paged kernel with
+O(batch) selection metadata and no derived metadata kernels.
 
 The torch reference in this module is intentionally host-safe.  It defines the
 operator's address mapping and numerical contract for unit tests; serving calls
@@ -151,10 +154,17 @@ def qsa_sparse_attention_310_reference(
     for row in range(num_tokens):
         request = next(request for request in range(len(boundaries) - 1) if row < boundaries[request + 1])
         count = int(selection.group_counts[row])
-        groups = selection.group_indices[row, :count].to(device="cpu", dtype=torch.int64).tolist()
-        token_ids = [group * compress_ratio + offset for group in groups for offset in range(compress_ratio)]
-        tail_start = int(selection.tail_starts[row])
-        token_ids.extend(tail_start + offset for offset in range(int(selection.tail_counts[row])))
+        tail_count = int(selection.tail_counts[row])
+        if tail_count < 0:
+            token_ids = list(range(count))
+        else:
+            if count < 0:
+                groups = list(range(-count))
+            else:
+                groups = selection.group_indices[row, :count].to(device="cpu", dtype=torch.int64).tolist()
+            token_ids = [group * compress_ratio + offset for group in groups for offset in range(compress_ratio)]
+            tail_start = int(selection.tail_starts[row])
+            token_ids.extend(tail_start + offset for offset in range(tail_count))
 
         for query_head in range(num_query_heads):
             kv_head = query_head // query_heads_per_kv_head

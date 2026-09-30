@@ -68,6 +68,55 @@ def test_reference_reads_permuted_nz_pages_and_maps_gqa_heads() -> None:
     torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
 
 
+@pytest.mark.parametrize(
+    "group_count,tail_start,tail_count",
+    [(-2, 8, 3), (11, 0, -1)],
+)
+def test_reference_dense_prefix_encodings(
+    group_count: int,
+    tail_start: int,
+    tail_count: int,
+) -> None:
+    torch.manual_seed(18)
+    query = torch.randn(1, 2, 16, dtype=torch.float16)
+    dense_key = torch.randn(1, 11, 1, 16, dtype=torch.float16)
+    dense_value = torch.randn_like(dense_key)
+    block_table = torch.tensor([[1, 0, 2]], dtype=torch.int32)
+    key_cache = _pack_nz(dense_key, block_table, block_size=4)
+    value_cache = _pack_nz(dense_value, block_table, block_size=4)
+    selection = QSAGroupSelection(
+        group_indices=torch.zeros((1, 1), dtype=torch.int32),
+        group_counts=torch.tensor([group_count], dtype=torch.int32),
+        tail_starts=torch.tensor([tail_start], dtype=torch.int32),
+        tail_counts=torch.tensor([tail_count], dtype=torch.int32),
+    )
+
+    actual = qsa_sparse_attention_310_reference(
+        query,
+        key_cache,
+        value_cache,
+        selection,
+        block_table,
+        torch.tensor([0, 1], dtype=torch.int32),
+        scale=0.25,
+    )
+
+    logits = (
+        torch.einsum(
+            "hd,shd->hs",
+            query[0].float(),
+            dense_key[0].expand(-1, 2, -1).float(),
+        )
+        * 0.25
+    )
+    expected = torch.einsum(
+        "hs,shd->hd",
+        torch.softmax(logits, dim=-1),
+        dense_value[0].expand(-1, 2, -1).float(),
+    ).half()
+    torch.testing.assert_close(actual[0], expected, rtol=2e-3, atol=2e-3)
+
+
 def test_native_entry_point_rejects_cpu_instead_of_silently_falling_back() -> None:
     query = torch.zeros((1, 2, 16), dtype=torch.float16)
     cache = torch.zeros((1, 2, 4, 16), dtype=torch.float16)

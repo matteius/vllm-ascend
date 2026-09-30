@@ -23,7 +23,7 @@ from vllm_ascend.models.qwen4_exp.ops.qsa_sparse_attention_310 import (
     qsa_sparse_attention_310,
     qsa_sparse_attention_310_reference,
 )
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, enable_custom_op
 
 
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
@@ -231,8 +231,8 @@ def test_batched_prefill_score_scale_matches_reference(scale: float) -> None:
     )
     actual = qsa_batched_prefill_310(
         query.to(device),
-        torch_npu.npu_format_cast(key_cache.to(device), 29),
-        torch_npu.npu_format_cast(value_cache.to(device), 29),
+        torch_npu.npu_format_cast(key_cache.to(device), ACL_FORMAT_FRACTAL_NZ),
+        torch_npu.npu_format_cast(value_cache.to(device), ACL_FORMAT_FRACTAL_NZ),
         selection_npu,
         block_table.to(device),
         query_start_loc.to(device),
@@ -283,8 +283,8 @@ def test_native_reduces_all_128_score_dimensions() -> None:
     )
     actual = qsa_sparse_attention_310(
         query.to(device),
-        torch_npu.npu_format_cast(key_cache.to(device), 29),
-        torch_npu.npu_format_cast(value_cache.to(device), 29),
+        torch_npu.npu_format_cast(key_cache.to(device), ACL_FORMAT_FRACTAL_NZ),
+        torch_npu.npu_format_cast(value_cache.to(device), ACL_FORMAT_FRACTAL_NZ),
         selection_npu,
         block_table.to(device),
         query_start_loc.to(device),
@@ -331,6 +331,62 @@ def test_native_online_softmax_with_changing_maximum() -> None:
         query_start_loc.to(device),
     ).cpu()
     torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize("cache_format", ["fractal_nz", "explicit_nd_nz"])
+def test_native_dense_latent_mqa_matches_reference_at_glm_width(cache_format: str) -> None:
+    """Cover GLM NoPE's 64:1 heads and 512-wide latent cache geometry."""
+    if not torch_npu.npu.is_available() or "310" not in torch_npu.npu.get_device_name(0):
+        pytest.skip("requires an Ascend 310P NPU")
+
+    enable_custom_op()
+    torch.manual_seed(311)
+    device = "npu:0"
+    block_size = 32
+    head_dim = 512
+    sequence_length = 35
+    query = torch.randn((1, 64, head_dim), dtype=torch.float16) * 0.1
+    key_cache = torch.randn((2, head_dim // 16, block_size, 16), dtype=torch.float16) * 0.1
+    # Native NoPE MLA aliases one latent cache as both K and V. This also
+    # exercises QSA's single-load path for the exact GLM serving contract.
+    value_cache = key_cache
+    selection = QSAGroupSelection(
+        group_indices=torch.zeros((1, 1), dtype=torch.int32),
+        group_counts=torch.tensor([sequence_length], dtype=torch.int32),
+        tail_starts=torch.zeros(1, dtype=torch.int32),
+        tail_counts=torch.full((1,), -1, dtype=torch.int32),
+    )
+    block_table = torch.tensor([[1, 0]], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
+    scale = 256**-0.5
+    expected = qsa_sparse_attention_310_reference(
+        query,
+        key_cache,
+        value_cache,
+        selection,
+        block_table,
+        query_start_loc,
+        scale=scale,
+    )
+    selection_npu = QSAGroupSelection(
+        *(getattr(selection, field).to(device) for field in selection.__dataclass_fields__)
+    )
+    latent_cache_npu = key_cache.to(device)
+    if cache_format == "fractal_nz":
+        latent_cache_npu = torch_npu.npu_format_cast(
+            latent_cache_npu,
+            ACL_FORMAT_FRACTAL_NZ,
+        )
+    actual = qsa_sparse_attention_310(
+        query.to(device),
+        latent_cache_npu,
+        latent_cache_npu,
+        selection_npu,
+        block_table.to(device),
+        query_start_loc.to(device),
+        scale=scale,
+    ).cpu()
+    torch.testing.assert_close(actual, expected, rtol=5e-3, atol=3e-3)
 
 
 @pytest.mark.parametrize("num_tokens", [1, 2])

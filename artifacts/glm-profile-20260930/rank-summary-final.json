@@ -1,0 +1,581 @@
+{
+  "warning": "Profiled task sums are work attribution, not end to end latency.",
+  "arrival_skew": {
+    "single": {
+      "ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "common_collectives": 1472,
+      "latest_rank_counts": {
+        "0": 403,
+        "1": 315,
+        "2": 377,
+        "3": 377
+      },
+      "summed_skew_ms": 16119.15375,
+      "median_skew_us": 3306.5,
+      "p90_skew_us": 26284.5,
+      "max_skew_us": 116334.25
+    },
+    "parallel4": {
+      "ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "common_collectives": 1472,
+      "latest_rank_counts": {
+        "0": 422,
+        "1": 296,
+        "2": 356,
+        "3": 398
+      },
+      "summed_skew_ms": 21916.43025,
+      "median_skew_us": 3038.375,
+      "p90_skew_us": 38795.75,
+      "max_skew_us": 102887.25
+    }
+  },
+  "traces": [
+    {
+      "run": "single",
+      "rank": 0,
+      "task_span_ms": 29829.486675,
+      "task_union_ms": 27385.888177,
+      "categories": {
+        "cast_layout_or_copy": {
+          "count": 68561,
+          "summed_task_ms": 867.243662
+        },
+        "collective": {
+          "count": 1472,
+          "summed_task_ms": 8896.249774
+        },
+        "named_attention_or_recurrence": {
+          "count": 1967,
+          "summed_task_ms": 374.986263
+        },
+        "other": {
+          "count": 347790,
+          "summed_task_ms": 2088.824594
+        },
+        "other_matrix_multiply": {
+          "count": 13689,
+          "summed_task_ms": 15160.415889
+        }
+      },
+      "grouped_by_activation_shape": {
+        "200,2048": {
+          "count": 42,
+          "summed_task_ms": 2136.768978,
+          "median_task_us": 49412.510500000004
+        },
+        "200,4096": {
+          "count": 84,
+          "summed_task_ms": 4272.969878,
+          "median_task_us": 49388.526
+        },
+        "8,2048": {
+          "count": 630,
+          "summed_task_ms": 2769.546371,
+          "median_task_us": 4302.187
+        },
+        "8,4096": {
+          "count": 1260,
+          "summed_task_ms": 5539.381198,
+          "median_task_us": 4305.728999999999
+        }
+      },
+      "communication": {
+        "count": 1472,
+        "elapsed_ms": 8896.250526245605,
+        "transit_ms": 17.985051154785157,
+        "wait_ms": 8730.94220151953,
+        "synchronization_ms": 4620.902806216309
+      }
+    },
+    {
+      "run": "parallel4",
+      "rank": 0,
+      "task_span_ms": 49584.672547,
+      "task_union_ms": 47329.606257,
+      "categories": {
+        "cast_layout_or_copy": {
+          "count": 68193,
+          "summed_task_ms": 1010.199146
+        },
+        "collective": {
+          "count": 1472,
+          "summed_task_ms": 11522.431818
+        },
+        "named_attention_or_recurrence": {
+          "count": 2715,
+          "summed_task_ms": 1456.129594
+        },
+        "other": {
+          "count": 356236,
+          "summed_task_ms": 3405.308376
+        },
+        "other_matrix_multiply": {
+          "count": 14663,
+          "summed_task_ms": 29940.790227
+        }
+      },
+      "grouped_by_activation_shape": {
+        "200,2048": {
+          "count": 42,
+          "summed_task_ms": 2145.163379,
+          "median_task_us": 49425.1275
+        },
+        "200,4096": {
+          "count": 84,
+          "summed_task_ms": 4289.901075,
+          "median_task_us": 49410.2575
+        },
+        "32,2048": {
+          "count": 546,
+          "summed_task_ms": 4973.812417,
+          "median_task_us": 8610.4295
+        },
+        "32,4096": {
+          "count": 1092,
+          "summed_task_ms": 9943.927485,
+          "median_task_us": 8607.526
+        },
+        "608,2048": {
+          "count": 42,
+          "summed_task_ms": 2499.726327,
+          "median_task_us": 58477.289000000004
+        },
+        "608,4096": {
+          "count": 84,
+          "summed_task_ms": 5008.273539,
+          "median_task_us": 58627.9135
+        },
+        "8,2048": {
+          "count": 42,
+          "summed_task_ms": 198.30837599999998,
+          "median_task_us": 4414.2055
+        },
+        "8,4096": {
+          "count": 84,
+          "summed_task_ms": 396.621124,
+          "median_task_us": 4416.1195
+        }
+      },
+      "communication": {
+        "count": 1472,
+        "elapsed_ms": 11522.432576958985,
+        "transit_ms": 45.538747624023436,
+        "wait_ms": 11323.520165435548,
+        "synchronization_ms": 6278.493865697754
+      }
+    },
+    {
+      "run": "single",
+      "rank": 1,
+      "task_span_ms": 29829.363811,
+      "task_union_ms": 27634.679291,
+      "categories": {
+        "cast_layout_or_copy": {
+          "count": 68561,
+          "summed_task_ms": 857.699392
+        },
+        "collective": {
+          "count": 1472,
+          "summed_task_ms": 9588.028584
+        },
+        "named_attention_or_recurrence": {
+          "count": 1967,
+          "summed_task_ms": 373.536823
+        },
+        "other": {
+          "count": 347790,
+          "summed_task_ms": 2150.367341
+        },
+        "other_matrix_multiply": {
+          "count": 13689,
+          "summed_task_ms": 14666.633493
+        }
+      },
+      "grouped_by_activation_shape": {
+        "200,2048": {
+          "count": 42,
+          "summed_task_ms": 2086.815619,
+          "median_task_us": 48465.023499999996
+        },
+        "200,4096": {
+          "count": 84,
+          "summed_task_ms": 4181.9711609999995,
+          "median_task_us": 48572.4975
+        },
+        "8,2048": {
+          "count": 630,
+          "summed_task_ms": 2651.6470809999996,
+          "median_task_us": 4301.784
+        },
+        "8,4096": {
+          "count": 1260,
+          "summed_task_ms": 5303.877358,
+          "median_task_us": 4304.883
+        }
+      },
+      "communication": {
+        "count": 1472,
+        "elapsed_ms": 9588.029318340821,
+        "transit_ms": 21.391327013183595,
+        "wait_ms": 9429.170576601562,
+        "synchronization_ms": 4931.185211922363
+      }
+    },
+    {
+      "run": "parallel4",
+      "rank": 1,
+      "task_span_ms": 49584.73937,
+      "task_union_ms": 47583.635259,
+      "categories": {
+        "cast_layout_or_copy": {
+          "count": 68193,
+          "summed_task_ms": 992.146698
+        },
+        "collective": {
+          "count": 1472,
+          "summed_task_ms": 12793.16691
+        },
+        "named_attention_or_recurrence": {
+          "count": 2715,
+          "summed_task_ms": 1453.619848
+        },
+        "other": {
+          "count": 356236,
+          "summed_task_ms": 3458.052932
+        },
+        "other_matrix_multiply": {
+          "count": 14663,
+          "summed_task_ms": 28891.210665
+        }
+      },
+      "grouped_by_activation_shape": {
+        "200,2048": {
+          "count": 42,
+          "summed_task_ms": 2091.1651810000003,
+          "median_task_us": 49752.029
+        },
+        "200,4096": {
+          "count": 84,
+          "summed_task_ms": 4190.841546,
+          "median_task_us": 49851.612
+        },
+        "32,2048": {
+          "count": 546,
+          "summed_task_ms": 4746.2342180000005,
+          "median_task_us": 8602.4995
+        },
+        "32,4096": {
+          "count": 1092,
+          "summed_task_ms": 9488.90818,
+          "median_task_us": 8599.439999999999
+        },
+        "608,2048": {
+          "count": 42,
+          "summed_task_ms": 2466.146095,
+          "median_task_us": 60209.254499999995
+        },
+        "608,4096": {
+          "count": 84,
+          "summed_task_ms": 4938.491440999999,
+          "median_task_us": 60281.872
+        },
+        "8,2048": {
+          "count": 42,
+          "summed_task_ms": 161.34814300000002,
+          "median_task_us": 4301.1455000000005
+        },
+        "8,4096": {
+          "count": 84,
+          "summed_task_ms": 322.73706500000003,
+          "median_task_us": 4298.802
+        }
+      },
+      "communication": {
+        "count": 1472,
+        "elapsed_ms": 12793.16764097119,
+        "transit_ms": 51.35169003857422,
+        "wait_ms": 12599.591557294922,
+        "synchronization_ms": 7217.921108437012
+      }
+    },
+    {
+      "run": "single",
+      "rank": 2,
+      "task_span_ms": 29829.253135,
+      "task_union_ms": 27506.19646,
+      "categories": {
+        "cast_layout_or_copy": {
+          "count": 68561,
+          "summed_task_ms": 869.9634
+        },
+        "collective": {
+          "count": 1472,
+          "summed_task_ms": 9073.529165
+        },
+        "named_attention_or_recurrence": {
+          "count": 1967,
+          "summed_task_ms": 372.631189
+        },
+        "other": {
+          "count": 347790,
+          "summed_task_ms": 2206.794061
+        },
+        "other_matrix_multiply": {
+          "count": 13689,
+          "summed_task_ms": 14985.093324
+        }
+      },
+      "grouped_by_activation_shape": {
+        "200,2048": {
+          "count": 42,
+          "summed_task_ms": 2119.7091349999996,
+          "median_task_us": 48460.987
+        },
+        "200,4096": {
+          "count": 84,
+          "summed_task_ms": 4245.1316050000005,
+          "median_task_us": 48537.263000000006
+        },
+        "8,2048": {
+          "count": 630,
+          "summed_task_ms": 2726.115171,
+          "median_task_us": 4302.083
+        },
+        "8,4096": {
+          "count": 1260,
+          "summed_task_ms": 5450.303918,
+          "median_task_us": 4303.0470000000005
+        }
+      },
+      "communication": {
+        "count": 1472,
+        "elapsed_ms": 9073.52991803955,
+        "transit_ms": 18.80955630761719,
+        "wait_ms": 8911.983103519531,
+        "synchronization_ms": 4920.970759321289
+      }
+    },
+    {
+      "run": "parallel4",
+      "rank": 2,
+      "task_span_ms": 49584.382704,
+      "task_union_ms": 47404.995036,
+      "categories": {
+        "cast_layout_or_copy": {
+          "count": 68193,
+          "summed_task_ms": 1007.494449
+        },
+        "collective": {
+          "count": 1472,
+          "summed_task_ms": 11685.062558
+        },
+        "named_attention_or_recurrence": {
+          "count": 2715,
+          "summed_task_ms": 1447.909234
+        },
+        "other": {
+          "count": 356236,
+          "summed_task_ms": 3527.531778
+        },
+        "other_matrix_multiply": {
+          "count": 14663,
+          "summed_task_ms": 29742.188134
+        }
+      },
+      "grouped_by_activation_shape": {
+        "200,2048": {
+          "count": 42,
+          "summed_task_ms": 2113.801192,
+          "median_task_us": 51560.426999999996
+        },
+        "200,4096": {
+          "count": 84,
+          "summed_task_ms": 4233.352070999999,
+          "median_task_us": 51707.367
+        },
+        "32,2048": {
+          "count": 546,
+          "summed_task_ms": 4926.882364,
+          "median_task_us": 8604.83
+        },
+        "32,4096": {
+          "count": 1092,
+          "summed_task_ms": 9848.562109999999,
+          "median_task_us": 8601.405999999999
+        },
+        "608,2048": {
+          "count": 42,
+          "summed_task_ms": 2507.748593,
+          "median_task_us": 60197.9525
+        },
+        "608,4096": {
+          "count": 84,
+          "summed_task_ms": 5016.305367,
+          "median_task_us": 60178.317500000005
+        },
+        "8,2048": {
+          "count": 42,
+          "summed_task_ms": 203.246085,
+          "median_task_us": 4524.427
+        },
+        "8,4096": {
+          "count": 84,
+          "summed_task_ms": 406.362928,
+          "median_task_us": 4521.614
+        }
+      },
+      "communication": {
+        "count": 1472,
+        "elapsed_ms": 11685.063297659668,
+        "transit_ms": 45.51015386132813,
+        "wait_ms": 11495.964062687011,
+        "synchronization_ms": 6618.374446960937
+      }
+    },
+    {
+      "run": "single",
+      "rank": 3,
+      "task_span_ms": 29828.895842,
+      "task_union_ms": 27452.970558,
+      "categories": {
+        "cast_layout_or_copy": {
+          "count": 68561,
+          "summed_task_ms": 875.278171
+        },
+        "collective": {
+          "count": 1472,
+          "summed_task_ms": 8299.907777
+        },
+        "named_attention_or_recurrence": {
+          "count": 1967,
+          "summed_task_ms": 372.684016
+        },
+        "other": {
+          "count": 347790,
+          "summed_task_ms": 2096.514801
+        },
+        "other_matrix_multiply": {
+          "count": 13689,
+          "summed_task_ms": 15810.313291
+        }
+      },
+      "grouped_by_activation_shape": {
+        "200,2048": {
+          "count": 42,
+          "summed_task_ms": 2265.0524360000004,
+          "median_task_us": 53992.1455
+        },
+        "200,4096": {
+          "count": 84,
+          "summed_task_ms": 4537.764394999999,
+          "median_task_us": 54172.2235
+        },
+        "8,2048": {
+          "count": 630,
+          "summed_task_ms": 2855.3210839999997,
+          "median_task_us": 4303.008
+        },
+        "8,4096": {
+          "count": 1260,
+          "summed_task_ms": 5708.514424,
+          "median_task_us": 4303.646
+        }
+      },
+      "communication": {
+        "count": 1472,
+        "elapsed_ms": 8299.908526041016,
+        "transit_ms": 21.57770723095703,
+        "wait_ms": 8131.004342136231,
+        "synchronization_ms": 4151.395200456054
+      }
+    },
+    {
+      "run": "parallel4",
+      "rank": 3,
+      "task_span_ms": 49584.12424,
+      "task_union_ms": 47284.613049,
+      "categories": {
+        "cast_layout_or_copy": {
+          "count": 68193,
+          "summed_task_ms": 1017.383735
+        },
+        "collective": {
+          "count": 1472,
+          "summed_task_ms": 11051.247594
+        },
+        "named_attention_or_recurrence": {
+          "count": 2715,
+          "summed_task_ms": 1450.493199
+        },
+        "other": {
+          "count": 356236,
+          "summed_task_ms": 3395.618998
+        },
+        "other_matrix_multiply": {
+          "count": 14663,
+          "summed_task_ms": 30374.604914
+        }
+      },
+      "grouped_by_activation_shape": {
+        "200,2048": {
+          "count": 42,
+          "summed_task_ms": 2174.722882,
+          "median_task_us": 52646.702999999994
+        },
+        "200,4096": {
+          "count": 84,
+          "summed_task_ms": 4355.805035,
+          "median_task_us": 52716.3125
+        },
+        "32,2048": {
+          "count": 546,
+          "summed_task_ms": 5066.498922000001,
+          "median_task_us": 8605.298999999999
+        },
+        "32,4096": {
+          "count": 1092,
+          "summed_task_ms": 10127.121905,
+          "median_task_us": 8601.743999999999
+        },
+        "608,2048": {
+          "count": 42,
+          "summed_task_ms": 2549.5884840000003,
+          "median_task_us": 62905.413
+        },
+        "608,4096": {
+          "count": 84,
+          "summed_task_ms": 5105.05101,
+          "median_task_us": 62942.457500000004
+        },
+        "8,2048": {
+          "count": 42,
+          "summed_task_ms": 170.624782,
+          "median_task_us": 4301.549
+        },
+        "8,4096": {
+          "count": 84,
+          "summed_task_ms": 341.119593,
+          "median_task_us": 4297.5645
+        }
+      },
+      "communication": {
+        "count": 1472,
+        "elapsed_ms": 11051.248330671388,
+        "transit_ms": 51.36195045703125,
+        "wait_ms": 10844.573002916015,
+        "synchronization_ms": 6047.728721480469
+      }
+    }
+  ]
+}
