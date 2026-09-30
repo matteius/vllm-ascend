@@ -129,3 +129,25 @@ def test_grouped_nz_packed_projection_matches_canonical(bits: int, n: int, k: in
     baseline = op(inputs, canonical.npu(), scales, group_ends)
     candidate = op(inputs, nz_codes.view(torch.int8).npu(), scales, group_ends)
     torch.testing.assert_close(candidate.cpu(), baseline.cpu(), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("bits", [2, 4])
+@pytest.mark.parametrize("nz_packed", [False, True])
+def test_grouped_scale_applies_to_both_nz_fragments(bits: int, nz_packed: bool):
+    """A distinct scale per 32 input columns must cover both 16-wide NZ fragments."""
+    n, k = 128, 256
+    codes_per_byte = 8 // bits
+    packed_one = sum(1 << (bits * field) for field in range(codes_per_byte))
+    canonical = torch.full((n, k // codes_per_byte), packed_one, dtype=torch.uint8)
+    codes = _pack_codes_nz(canonical, k).view(torch.int8) if nz_packed else canonical
+    scales = torch.arange(1, 1 + (n // 32) * (k // 32), dtype=torch.float32).reshape(1, n // 32, k // 32) / 1024
+    inputs = torch.zeros(k // 32, k, dtype=torch.float16)
+    positions = torch.arange(k // 32) * 32 + 8
+    inputs[torch.arange(k // 32), positions] = 1
+    ends = torch.tensor([inputs.shape[0]], dtype=torch.int64, device="npu")
+
+    actual = torch.ops._C_ascend.npu_w2_grouped_blocked_dequant_matmul_310(
+        inputs.npu(), codes.unsqueeze(0).npu(), scales.npu(), ends
+    ).cpu()
+    expected = scales[0, :, torch.arange(k // 32)].T.repeat_interleave(32, dim=1).to(torch.float16)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=1e-4)

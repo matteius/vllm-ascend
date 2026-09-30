@@ -53,6 +53,7 @@ constexpr uint32_t W2_TILE_M = 128;
 constexpr uint32_t W2_TILE_N = 128;
 constexpr uint32_t W2_TILE_K = 128;
 constexpr uint32_t W2_K_FRACTALS_PER_TILE = W2_TILE_K / W2_FRACTAL_SIZE;
+static_assert(W2_BLOCK_SIZE == 2 * W2_FRACTAL_SIZE);
 // The unified-core CATLASS epilogue uses UB [0, 96 KiB) for a maximum-size
 // 128x128 FP32 accumulator followed by its FP16 output.  Keep dequant scratch
 // and, critically, the reusable masks/gather table above that region so a
@@ -295,25 +296,30 @@ private:
                         : (static_cast<int64_t>(n0) + rowBase) * packedK_ + k0 / codesPerByte_;
                     DecodeTile(codeOffset);
 
-                    // W is [N,K], while Cube consumes B=W^T [K,N]. Transpose each
-                    // 16x16 fragment, then apply its [32,32] scale once to all 256
-                    // values before the already-NZ GM store.
+                    // W is [N,K], while Cube consumes B=W^T [K,N]. Transpose
+                    // each 16x16 fragment into NZ order first.
                     const int64_t nFractal = rowBase / W2_FRACTAL_SIZE;
                     const int64_t nzColumnBlockStride = K_ * W2_FRACTAL_SIZE;
                     const int64_t nzBase = coreNzBase_ + nFractal * nzColumnBlockStride;
-                    for (int64_t kFractal = 0; kFractal < W2_K_FRACTALS_PER_TILE; ++kFractal) {
+                    if (!nzPacked_) {
+                        for (int64_t kFractal = 0; kFractal < W2_K_FRACTALS_PER_TILE; ++kFractal) {
+                            const int64_t offset = kFractal * W2_FRACTAL_SIZE * W2_FRACTAL_SIZE;
+                            AscendC::Transpose(nzTileUB_[offset], fractalRowsUB_[offset]);
+                            PipeBarrier<PIPE_V>();
+                        }
+                    }
+                    // One [32,32] block scale covers two adjacent 16x16 NZ
+                    // fragments. Multiplying both at once halves vector Muls
+                    // and its barriers without changing any FP16 products.
+                    for (int64_t kFractal = 0; kFractal < W2_K_FRACTALS_PER_TILE; kFractal += 2) {
                         const int64_t localFractalOffset =
                             kFractal * W2_FRACTAL_SIZE * W2_FRACTAL_SIZE;
                         const int64_t scaleIndex = k0 / W2_BLOCK_SIZE + kFractal / 2;
                         const half scale = static_cast<half>(scaleUB_.GetValue(scaleIndex));
                         auto nzFractal = nzPacked_ ? signedHalfUB_[localFractalOffset]
                                                    : nzTileUB_[localFractalOffset];
-                        if (!nzPacked_) {
-                            AscendC::Transpose(nzFractal, fractalRowsUB_[localFractalOffset]);
-                            PipeBarrier<PIPE_V>();
-                        }
                         Muls(nzFractal, nzFractal, scale,
-                             W2_FRACTAL_SIZE * W2_FRACTAL_SIZE);
+                             2 * W2_FRACTAL_SIZE * W2_FRACTAL_SIZE);
                         PipeBarrier<PIPE_V>();
                     }
                     SetFlag<HardEvent::V_MTE3>(EVENT_ID2);
