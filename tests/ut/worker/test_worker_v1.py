@@ -322,6 +322,22 @@ class TestNPUWorker(TestBase):
         with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
             self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(physical_budget), planner_budget)
 
+        # Four uncached live requests keep only three MTP state slots each.
+        # The planner must reserve those slots, then charge physical attention
+        # pages rather than the Mamba-padded virtual page size.
+        cache_config.enable_prefix_caching = False
+        worker.model_runner.supports_prefix_mamba_state_tier = False
+        worker.model_runner._live_mamba_slots = object()
+        worker.model_runner.num_compact_mamba_blocks = 3
+        worker.model_runner.max_num_reqs = 4
+        fixed_bytes = 4 * 3 * large_mamba_spec.page_size_bytes
+        expected_blocks = (physical_budget - fixed_bytes) // padded_attn_spec.real_page_size_bytes
+        with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
+            self.assertEqual(
+                worker._scale_kv_cache_memory_for_multi_group(physical_budget),
+                expected_blocks * large_mamba_spec.page_size_bytes,
+            )
+
     @unittest.skipIf(vllm_version_is("0.28.0"), "vLLM #51718 only changed the main planner")
     def test_compact_prefix_budget_includes_qsa_index_side_cache(self):
         from vllm_ascend.models.qwen4_exp.kv_cache import AscendQSAFullAttentionSpec

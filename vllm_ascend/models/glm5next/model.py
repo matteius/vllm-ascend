@@ -377,6 +377,12 @@ class Glm5NextDecoderLayer(nn.Module):
             self.mhc_pre_op = MHCPreOp()
             self.mhc_post_op = MHCPostOp()
             self.mhc_fused_post_pre_op = MHCFusedPostPreOp()
+            use_310p_sinkhorn = bool(getattr(config, "ascend_glm_fused_sinkhorn", False))
+            self.mhc_pre_op.use_310p_sinkhorn = use_310p_sinkhorn
+            self.mhc_fused_post_pre_op.use_310p_sinkhorn = use_310p_sinkhorn
+            use_310p_fp16_mhc_state = bool(getattr(config, "ascend_glm_mhc_fp16_state", False))
+            self.mhc_pre_op.use_310p_fp16_mhc_state = use_310p_fp16_mhc_state
+            self.mhc_fused_post_pre_op.use_310p_fp16_mhc_state = use_310p_fp16_mhc_state
 
     def forward(
         self,

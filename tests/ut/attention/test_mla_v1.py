@@ -2460,6 +2460,43 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
 
+    def test_nope_kv_uses_native_latent_scatter_when_rope_is_disabled(self):
+        self.impl.use_mla_rope = False
+        self.impl.pcp_enabled = False
+        self.impl.num_kv_heads = 1
+        self.impl.kv_lora_rank = 2
+        self.impl.qk_rope_head_dim = 0
+        prefill_result = (torch.empty(2, 1, 1, 0), torch.randn(2, 1, 1, 2))
+        decode_result = (torch.empty(4, 1, 1, 0), torch.randn(4, 1, 1, 2))
+        self.impl._exec_kv_mla_nope = MagicMock(side_effect=[prefill_result, decode_result])
+        self.impl._exec_kv_no_rope = MagicMock()
+        kv = torch.randn(2, 1, 2)
+        kv_cache = (torch.empty(4, 1, 1, 2), torch.empty(4, 1, 1, 0))
+        slots = torch.tensor([0, 1])
+
+        actual_prefill = self.impl.exec_kv_prefill(
+            kv,
+            torch.empty(2, 0),
+            torch.empty(2, 0),
+            kv_cache,
+            slots,
+        )
+        actual_decode = self.impl.exec_kv_decode(
+            kv,
+            torch.empty(2, 0),
+            torch.empty(2, 0),
+            kv_cache,
+            slots,
+        )
+
+        assert actual_prefill is prefill_result
+        assert actual_decode is decode_result
+        assert self.impl._exec_kv_mla_nope.call_args_list[0].kwargs == {"is_prefill": True}
+        assert self.impl._exec_kv_mla_nope.call_args_list[1].kwargs == {"is_prefill": False}
+        assert self.impl._exec_kv_mla_nope.call_args_list[0].args[0].shape == (2, 1, 1, 2)
+        assert self.impl._exec_kv_mla_nope.call_args_list[1].args[0].shape == (2, 1, 1, 2)
+        self.impl._exec_kv_no_rope.assert_not_called()
+
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("torch_npu.npu_fused_infer_attention_score_v2")
     def test_forward_decode(self, mock_npu_fused_infer_attention_score_v2, mock_get_forward_context):

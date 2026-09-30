@@ -27,6 +27,7 @@ from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
 from tests.ut.base import TestBase
 from vllm_ascend._310p.model_runner_310p import (
     NPUModelRunner310,
+    _allocate_attention_cache_pair,
     _allocate_attention_cache_tensor,
     _get_attention_cache_tensor_shape,
     _get_layer_attention_backends,
@@ -34,6 +35,8 @@ from vllm_ascend._310p.model_runner_310p import (
 )
 from vllm_ascend._310p.prefix_mamba_state import PrefixMambaStateTier
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -154,7 +157,6 @@ def test_glm5_next_cache_initialization_uses_shared_slot_allocator() -> None:
     runner.shared_kv_cache_layers = {}
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.kv_caches = []
-    runner._qsa_index_caches = {}
 
     layer_name = "model.layers.3.self_attn"
     spec = SimpleNamespace(model_version="glm5_next")
@@ -185,6 +187,7 @@ def test_glm5_next_cache_initialization_uses_shared_slot_allocator() -> None:
         result = runner.initialize_kv_cache_tensors(cache_config)
 
     assert result is reshaped_caches
+    assert runner._qsa_index_caches == {}
     allocate.assert_called_once_with(runner, cache_config)
     reshape.assert_called_once_with(runner, cache_config, raw_caches)
     bind_kv_cache.assert_called_once_with(
@@ -290,6 +293,67 @@ def test_mla_cache_allocation_keeps_nd_layout() -> None:
     assert cache.shape == (4, 16, 1, 8)
     assert cache.is_contiguous()
     empty_nz.assert_not_called()
+
+
+def test_native_310p_mla_cache_allocation_uses_nz_layout() -> None:
+    cache_spec = AscendMLAAttentionSpec(
+        block_size=32,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.float16,
+        use_nz_cache=True,
+    )
+    expected = torch.empty(4, 32, 32, 16)
+
+    with patch(
+        "vllm_ascend._310p.model_runner_310p.torch_npu.empty_with_format",
+        return_value=expected,
+    ) as empty_nz:
+        cache = _allocate_attention_cache_tensor(
+            (4, 32, 32, 16),
+            torch.float16,
+            torch.device("cpu"),
+            cache_spec,
+        )
+
+    assert cache is expected
+    empty_nz.assert_called_once_with(
+        size=(4, 32, 32, 16),
+        dtype=torch.float16,
+        device=torch.device("cpu"),
+        acl_format=ACL_FORMAT_FRACTAL_NZ,
+    )
+
+
+def test_native_310p_nope_mla_aliases_one_latent_cache_for_key_and_value() -> None:
+    cache_spec = AscendMLAAttentionSpec(
+        block_size=32,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.float16,
+        use_nz_cache=True,
+    )
+    expected = torch.empty(4, 32, 32, 16)
+
+    with patch(
+        "vllm_ascend._310p.model_runner_310p._allocate_attention_cache_tensor",
+        return_value=expected,
+    ) as allocate:
+        key_cache, value_cache = _allocate_attention_cache_pair(
+            expected.shape,
+            torch.float16,
+            torch.device("cpu"),
+            cache_spec,
+        )
+
+    assert key_cache is expected
+    assert value_cache is expected
+    allocate.assert_called_once_with(
+        expected.shape,
+        torch.float16,
+        torch.device("cpu"),
+        cache_spec,
+    )
 
 
 def test_nested_hybrid_cache_copy_uses_scheduler_block_geometry() -> None:

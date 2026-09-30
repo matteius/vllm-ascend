@@ -57,6 +57,18 @@ class _StateBackend:
         return num_blocks, block_size, head_size
 
 
+class _NativeMLABackend:
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        **_kwargs,
+    ):
+        return num_blocks, num_kv_heads * head_size // 16, block_size, 16
+
+
 def _make_config():
     return SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=64),
@@ -239,6 +251,24 @@ def test_glm5_next_runner_splits_main_mla_components_within_each_page():
     assert kv_c_cache.stride(0) * kv_c_cache.element_size() == page_size
     assert k_pe_cache.stride(0) * k_pe_cache.element_size() == page_size
     assert k_pe_cache.data_ptr() - raw_caches[MAIN].data_ptr() == kv_c_cache[0].numel() * kv_c_cache.element_size()
+
+
+def test_glm5_next_native_mla_aliases_one_nz_latent_page_as_key_and_value():
+    config, _, plan = _make_plan(main_head_size=32)
+    runner = _make_runner(config, main_cache_dims=(32, 0))
+    layer_specs = runner._get_layer_kv_cache_specs(plan)
+    object.__setattr__(layer_specs[MAIN], "use_nz_cache", True)
+    attn_groups = list(runner._kv_cache_spec_attn_group_iterator())
+    attn_groups[0].backend = _NativeMLABackend
+    runner._kv_cache_spec_attn_group_iterator = lambda: iter(attn_groups)
+
+    raw_caches = runner._allocate_kv_cache_tensors(plan)
+    key_cache, value_cache = runner._reshape_kv_cache_tensors(plan, raw_caches)[MAIN]
+
+    assert key_cache is value_cache
+    assert key_cache.shape == (3, 2, 8, 16)
+    assert key_cache.data_ptr() == raw_caches[MAIN].data_ptr()
+    assert key_cache.stride(0) * key_cache.element_size() == layer_specs[MAIN].page_size_bytes
 
 
 def test_standalone_mtp_uses_existing_compressed_cache_allocator():

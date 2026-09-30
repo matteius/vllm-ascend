@@ -38,6 +38,14 @@ from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import (
 )
 
 
+def _publish_glm5_next_cache_contract(mla_cache_layer, is_sparse: bool) -> None:
+    """Tag only the three-cache sparse layout for GLM-specific grouping."""
+    if not is_sparse:
+        return
+    mla_cache_layer.model_version = "glm5_next"
+    mla_cache_layer.indexes_kv_by_block_stride = True
+
+
 class Indexer(nn.Module):
     def __init__(
         self,
@@ -106,10 +114,11 @@ class Indexer(nn.Module):
         self._wk_weight_f32: torch.Tensor | None = None
         self._gate_weight_f32: torch.Tensor | None = None
 
-        # Completed pools store BF16 vectors without quantization scales.
+        # 310P index-copy does not support BF16 at serving batch sizes. Store
+        # the compressed keys in FP16; scoring promotes them to FP32.
         self.k_cache = Glm5NextIndexerCache(
             head_dim=self.head_dim,
-            dtype=torch.bfloat16,
+            dtype=torch.float16,
             cache_role="indexer",
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,
@@ -160,7 +169,9 @@ class Indexer(nn.Module):
             self._wk_weight_f32 = self.wk_weights_proj.weight.detach().float()
             self._gate_weight_f32 = self.index_kpool_compress_gate.detach().float()
         kw = torch.mm(hidden_f32, self._wk_weight_f32.t())
-        weights = kw[:, self.head_dim :].to(torch.bfloat16)
+        # 310P's scalar multiply has no BF16 overload. Keep the small head
+        # weight tensor in FP32 for scaling and the subsequent score reduction.
+        weights = kw[:, self.head_dim :]
         k = self.k_norm(kw[:, : self.head_dim])
 
         if self.rope_dim > 0:
@@ -328,11 +339,15 @@ class Glm5NextMLAAttention(nn.Module):
         self.is_v32 = config.index_topk is not None
 
         if self.is_v32:
-            self.indexer_rope_emb: RotaryEmbedding | None = get_rope(
-                qk_rope_head_dim,
-                max_position=max_position_embeddings,
-                rope_parameters=config.rope_parameters,
-                is_neox_style=not config.indexer_rope_interleave,
+            self.indexer_rope_emb: RotaryEmbedding | None = (
+                get_rope(
+                    qk_rope_head_dim,
+                    max_position=max_position_embeddings,
+                    rope_parameters=config.rope_parameters,
+                    is_neox_style=not config.indexer_rope_interleave,
+                )
+                if qk_rope_head_dim > 0
+                else None
             )
             # The sparse indexer projects from the MLA q-lora rank, which is
             # always set for v32 MLA configs; narrow away the `int | None`.
@@ -388,9 +403,7 @@ class Glm5NextMLAAttention(nn.Module):
         # the static forward context. Publish GLM-Next's cache contract on that
         # layer, matching the dedicated cache layer used by the source branch,
         # so the model runner can remain model agnostic.
-        mla_cache_layer = self.mla_attn.mla_attn
-        mla_cache_layer.model_version = "glm5_next"
-        mla_cache_layer.indexes_kv_by_block_stride = True
+        _publish_glm5_next_cache_contract(self.mla_attn.mla_attn, self.is_v32)
 
     def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         # The wrapper also runs the sparse indexer before MLA attention.

@@ -11,6 +11,7 @@ from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from vllm_ascend import envs
 from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolBackend,
     AscendIndexerKPoolMetadataBuilder,
@@ -24,6 +25,9 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     register_ascend_kv_cache_specs,
 )
+from vllm_ascend.models.glm5next.attention import (
+    _publish_glm5_next_cache_contract,
+)
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
     Glm5NextStateCache,
@@ -34,6 +38,18 @@ from vllm_ascend.utils import vllm_version_is
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
     return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
+
+
+def test_dense_mla_does_not_publish_sparse_three_cache_contract():
+    dense = SimpleNamespace()
+    sparse = SimpleNamespace()
+
+    _publish_glm5_next_cache_contract(dense, False)
+    _publish_glm5_next_cache_contract(sparse, True)
+
+    assert not hasattr(dense, "model_version")
+    assert sparse.model_version == "glm5_next"
+    assert sparse.indexes_kv_by_block_stride is True
 
 
 def test_state_uses_sliding_pages_and_full_precision():
@@ -193,3 +209,41 @@ def test_indexer_metadata_preserves_raw_request_boundaries():
     assert metadata.raw_seq_lens.tolist() == [18, 35]
     assert metadata.seq_lens.tolist() == [1, 2]
     assert metadata.num_actual_tokens == 5
+
+
+def test_310p_indexer_recovers_scheduler_pages_from_c32_mla_table():
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8, max_num_seqs=1),
+        model_config=SimpleNamespace(max_model_len=128),
+    )
+    spec = AscendMLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        model_version="glm5_next",
+        **_ratio_kwargs(4),
+    )
+    common = AscendCommonAttentionMetadata(
+        query_start_loc=torch.tensor([0, 4], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 4], dtype=torch.int32),
+        seq_lens=torch.tensor([4], dtype=torch.int32),
+        _seq_lens_cpu=torch.tensor([4], dtype=torch.int32),
+        num_reqs=1,
+        num_actual_tokens=4,
+        max_query_len=4,
+        num_input_tokens=4,
+        max_seq_len=4,
+        block_table_tensor=torch.tensor([[20, 21, 22, 23]], dtype=torch.int32),
+        slot_mapping=torch.tensor([640, 641, 642, 643], dtype=torch.int32),
+        positions=torch.arange(4),
+    )
+    with patch.object(envs, "VLLM_ASCEND_310P_ENABLE_MLA", 1):
+        builder = AscendIndexerKPoolMetadataBuilder(
+            spec, ["model.layers.0.indexer.k_cache"], config, torch.device("cpu")
+        )
+        metadata = builder.build(0, common)
+    assert metadata.block_size == 32
+    assert metadata.block_table.tolist() == [[5]]
+    assert metadata.slot_mapping.tolist() == [-1, -1, -1, 160]
+    assert metadata.cum_query_lens_cpu.tolist() == [0, 4]

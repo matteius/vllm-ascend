@@ -728,9 +728,11 @@ class NPUWorker(WorkerBase):
                 or getattr(model_runner, "supports_prefix_mamba_state_tier", False)
             )
         )
+        compact_live_state = bool(getattr(model_runner, "_live_mamba_slots", None))
         bytes_per_block = 0
         sum_pages = 0
         compact_prefix_bytes = 0
+        compact_live_bytes = 0
         for group in kv_cache_groups:
             group_pages = 0
             for layer_name in group.layer_names:
@@ -743,7 +745,7 @@ class NPUWorker(WorkerBase):
                 if not (compact_mamba_state and isinstance(layer_spec, MambaSpec)):
                     if (
                         compact_mamba_state
-                        and getattr(model_runner, "supports_prefix_mamba_state_tier", False)
+                        and (getattr(model_runner, "supports_prefix_mamba_state_tier", False) or compact_live_state)
                         and isinstance(layer_spec, AttentionSpec)
                     ):
                         # The compact 310P runner allocates K/V (and QSA's
@@ -759,10 +761,15 @@ class NPUWorker(WorkerBase):
                     # blocks, but their one shared resident pool still costs
                     # device memory. Reserve it before planning attention KV.
                     compact_prefix_bytes += model_runner.num_compact_mamba_blocks * layer_spec.page_size_bytes
+                elif compact_live_state:
+                    compact_live_bytes += (
+                        model_runner.max_num_reqs * model_runner.num_compact_mamba_blocks * layer_spec.page_size_bytes
+                    )
             bytes_per_block = max(bytes_per_block, group_pages)
-        if compact_prefix_bytes:
-            available_memory = max(0, available_memory - compact_prefix_bytes)
-            logger.info("Reserved %d bytes for the shared compact Mamba prefix-state pool.", compact_prefix_bytes)
+        compact_state_bytes = compact_prefix_bytes + compact_live_bytes
+        if compact_state_bytes:
+            available_memory = max(0, available_memory - compact_state_bytes)
+            logger.info("Reserved %d bytes for the compact Mamba state pool.", compact_state_bytes)
             if bytes_per_block > 0 and sum_pages > 0:
                 # The scheduler still addresses virtual Mamba blocks, but the
                 # 310P allocator materializes only the fixed pool above. Convert

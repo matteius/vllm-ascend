@@ -169,7 +169,11 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         hf_config = get_current_vllm_config().model_config.hf_text_config
         self.tp_size = get_tensor_model_parallel_world_size()
         self.layers = hf_config.num_hidden_layers
-        if mla_modules.indexer is not None:
+        if mla_modules.indexer is not None and getattr(mla_modules.indexer, "index_kpool", 1) > 1:
+            # GLM's indexer owns a gate, APE, and a sliding compressor cache.
+            # The DeepSeek SFA wrapper has none of those checkpoint parameters.
+            ascend_indexer = mla_modules.indexer
+        elif mla_modules.indexer is not None:
             ascend_indexer = IndexerWrapper(mla_modules.indexer, self.qk_rope_head_dim)
         else:
             ascend_indexer = None

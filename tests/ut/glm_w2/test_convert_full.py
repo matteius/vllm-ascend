@@ -319,7 +319,8 @@ def test_non_aligned_routed_expert_padded(synthetic_source, tmp_path):
     assert scale.shape == (64 // 32, 64 // 32)
 
 
-def test_w2_reconstruction_within_half_step(synthetic_source, tmp_path):
+def test_w2_minmax_reconstruction_within_half_step(synthetic_source, tmp_path, monkeypatch):
+    monkeypatch.setenv("GLM_W2_SCALE_METHOD", "minmax")
     out_dir = tmp_path / "out"
     convert_full.run(synthetic_source, out_dir, shard_target_bytes=1 << 20, chunk_rows=256)
     index = json.loads((out_dir / "model.safetensors.index.json").read_text())
@@ -420,7 +421,8 @@ def test_bounded_working_set(synthetic_source, tmp_path):
 # A FEW real routed experts (skipped if the 306 GB source is absent)
 # ===========================================================================
 @pytest.mark.skipif(not _have_source(), reason="source checkpoint not present")
-def test_real_experts_w2_roundtrip_and_bounded_rss():
+def test_real_experts_w2_minmax_roundtrip_and_bounded_rss(monkeypatch):
+    monkeypatch.setenv("GLM_W2_SCALE_METHOD", "minmax")
     weight_map = json.loads((_SOURCE_DIR / "model.safetensors.index.json").read_text())["weight_map"]
     chunk_rows = 256
     rss_samples = []

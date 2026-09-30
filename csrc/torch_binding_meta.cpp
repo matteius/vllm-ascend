@@ -656,6 +656,18 @@ at::Tensor npu_w2_blocked_dequant_matmul_310_meta(
     return output;
 }
 
+at::Tensor npu_w2_grouped_blocked_dequant_matmul_310_meta(
+    const at::Tensor& x,
+    const at::Tensor& codes,
+    const at::Tensor& block_scale,
+    const at::Tensor& group_ends)
+{
+    (void)block_scale;
+    (void)group_ends;
+    at::Tensor output = at::empty_symint(c10::SymDimVector{x.sym_size(0), codes.sym_size(1)}, x.options());
+    return output;
+}
+
 at::Tensor npu_qwen_w4_group_matmul_310_meta(
     const at::Tensor& x,
     const at::Tensor& codes,
@@ -801,6 +813,24 @@ void qsa_index_cache_update_310_meta(
     (void)compress_ratio;
     (void)rotary_dim;
     (void)norm_eps;
+}
+
+void mla_cache_write_310_meta(
+    at::Tensor &cache,
+    const at::Tensor &rows,
+    const at::Tensor &slot_mapping)
+{
+    (void)cache;
+    (void)rows;
+    (void)slot_mapping;
+}
+
+at::Tensor mhc_sinkhorn_310_meta(
+    const at::Tensor &logits, int64_t iterations, double epsilon)
+{
+    (void)iterations;
+    (void)epsilon;
+    return at::empty_like(logits);
 }
 
 at::Tensor npu_recurrent_gated_delta_rule_meta(
@@ -2215,6 +2245,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_causal_conv1d_310", &vllm_ascend::meta::npu_causal_conv1d_310_meta);
     // npu_w2_blocked_dequant_matmul_310
     ops.impl("npu_w2_blocked_dequant_matmul_310", &vllm_ascend::meta::npu_w2_blocked_dequant_matmul_310_meta);
+    ops.impl("npu_w2_grouped_blocked_dequant_matmul_310",
+             &vllm_ascend::meta::npu_w2_grouped_blocked_dequant_matmul_310_meta);
     ops.impl("npu_qwen_w4_group_matmul_310", &vllm_ascend::meta::npu_qwen_w4_group_matmul_310_meta);
     ops.impl("npu_qwen_w4_routed_matmul_310", &vllm_ascend::meta::npu_qwen_w4_routed_matmul_310_meta);
     ops.impl("npu_qwen_w4_grouped_matmul_310", &vllm_ascend::meta::npu_qwen_w4_routed_matmul_310_meta);
@@ -2231,6 +2263,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_qsa_indexer_score_310", &vllm_ascend::meta::npu_qsa_indexer_score_310_meta);
     // qsa_index_cache_update_310
     ops.impl("qsa_index_cache_update_310", &vllm_ascend::meta::qsa_index_cache_update_310_meta);
+    // mla_cache_write_310
+    ops.impl("mla_cache_write_310", &vllm_ascend::meta::mla_cache_write_310_meta);
+    ops.impl("mhc_sinkhorn_310", &vllm_ascend::meta::mhc_sinkhorn_310_meta);
     // chunk_gated_delta_rule_fwd_h
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o

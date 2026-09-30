@@ -415,7 +415,7 @@ def test_shipped_dsa_binding_shares_all_matching_storage():
     assert dsa_core.w_dkv.data_ptr() == self_attn.fused_qkv_a_proj.weight[3:5].data_ptr()
 
 
-def test_dsa_install_releases_mirror_storage_before_first_forward():
+def test_dsa_install_keeps_native_mla_and_does_not_attach_eager_mirror():
     from types import SimpleNamespace
 
     from vllm_ascend.models.glm5next_w2.dtype_policy import (
@@ -423,44 +423,14 @@ def test_dsa_install_releases_mirror_storage_before_first_forward():
     )
     from vllm_ascend.models.glm5next_w2.model import _install_dsa_indexer
 
-    def linear(rows, cols):
-        return SimpleNamespace(weight=torch.nn.Parameter(torch.randn(rows, cols, dtype=torch.float16)))
-
-    hidden, heads, q_rank, kv_rank, q_dim, v_dim = 6, 2, 3, 2, 2, 2
-    index_heads, index_dim, index_pool = 2, 4, 2
     self_attn = SimpleNamespace(
-        q_a_layernorm=SimpleNamespace(weight=torch.nn.Parameter(torch.randn(q_rank, dtype=torch.float16))),
-        kv_a_layernorm=SimpleNamespace(weight=torch.nn.Parameter(torch.randn(kv_rank, dtype=torch.float16))),
-        q_b_proj=linear(heads * q_dim, q_rank),
-        kv_b_proj=linear(heads * (q_dim + v_dim), kv_rank),
-        o_proj=linear(hidden, heads * v_dim),
-        fused_qkv_a_proj=linear(q_rank + kv_rank, hidden),
-        indexer=SimpleNamespace(
-            wq_b=linear(index_heads * index_dim, q_rank),
-            wk_weights_proj=linear(index_dim + index_heads, hidden),
-            k_norm=SimpleNamespace(
-                weight=torch.nn.Parameter(torch.randn(index_dim, dtype=torch.float16)),
-                bias=torch.nn.Parameter(torch.randn(index_dim, dtype=torch.float16)),
-            ),
-            index_kpool_compress_ape=torch.nn.Parameter(torch.randn(index_pool, index_dim, dtype=torch.float16)),
-            index_kpool_compress_gate=torch.nn.Parameter(torch.randn(index_dim, hidden, dtype=torch.float16)),
-        ),
+        mla_attn=object(),
+        indexer=object(),
+        forward=object(),
     )
     layer = SimpleNamespace(layer_kind="mla", self_attn=self_attn)
-    config = SimpleNamespace(
-        hidden_size=hidden,
-        num_attention_heads=heads,
-        q_lora_rank=q_rank,
-        kv_lora_rank=kv_rank,
-        qk_nope_head_dim=q_dim,
-        v_head_dim=v_dim,
-        index_n_heads=index_heads,
-        index_head_dim=index_dim,
-        index_topk=4,
-        index_kpool=index_pool,
-        rms_norm_eps=1e-5,
-    )
+    original_forward = self_attn.forward
 
-    assert _install_dsa_indexer([layer], config, ASCEND_GLM5NEXT_W2_DTYPE_POLICY) == 1
-    assert layer.dsa_w2.w_uq.data_ptr() == self_attn.q_b_proj.weight.data_ptr()
-    assert layer.dsa_w2.w_dq.data_ptr() == self_attn.fused_qkv_a_proj.weight[:q_rank].data_ptr()
+    assert _install_dsa_indexer([layer], SimpleNamespace(), ASCEND_GLM5NEXT_W2_DTYPE_POLICY) == 1
+    assert self_attn.forward is original_forward
+    assert not hasattr(layer, "dsa_w2")

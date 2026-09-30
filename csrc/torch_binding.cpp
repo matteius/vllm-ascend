@@ -47,6 +47,7 @@
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "moe/gdn_gating_v310/gdn_gating_310_torch_adpt.h"
 #include "gmm/w2_blocked_dequant_matmul_v310/w2_blocked_dequant_matmul_310_torch_adpt.h"
+#include "gmm/w2_grouped_blocked_dequant_matmul_v310/w2_grouped_blocked_dequant_matmul_310_torch_adpt.h"
 #include "gmm/qwen_w4_group_matmul_v310/qwen_w4_group_matmul_310_torch_adpt.h"
 #include "gmm/qwen_w4_routed_matmul_v310/qwen_w4_routed_matmul_310_torch_adpt.h"
 #include "gmm/qwen_w4_grouped_matmul_v310/qwen_w4_grouped_matmul_310_torch_adpt.h"
@@ -64,6 +65,8 @@
 #include "attention/qsa_gather_value_nz_v310/qsa_gather_value_nz_310_torch_adpt.h"
 #include "attention/qsa_indexer_score_v310/qsa_indexer_score_310_torch_adpt.h"
 #include "attention/qsa_index_cache_update_v310/qsa_index_cache_update_310_torch_adpt.h"
+#include "attention/mla_cache_write_v310/mla_cache_write_310_torch_adpt.h"
+#include "attention/mhc_sinkhorn_v310/mhc_sinkhorn_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/msa_index_score/msa_index_score_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
@@ -2823,6 +2826,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
         "npu_w2_blocked_dequant_matmul_310(Tensor x, Tensor codes, Tensor block_scale) -> Tensor");
     ops.impl("npu_w2_blocked_dequant_matmul_310", torch::kPrivateUse1, &vllm_ascend::npu_w2_blocked_dequant_matmul_310);
+    ops.def(
+        "npu_w2_grouped_blocked_dequant_matmul_310(Tensor x, Tensor codes, Tensor block_scale, Tensor group_ends) -> Tensor");
+    ops.impl("npu_w2_grouped_blocked_dequant_matmul_310", torch::kPrivateUse1,
+             &vllm_ascend::npu_w2_grouped_blocked_dequant_matmul_310);
 
     ops.def("npu_qwen_w4_group_matmul_310(Tensor x, Tensor codes, Tensor scale, Tensor offset, bool tiled=False) -> Tensor");
     ops.impl("npu_qwen_w4_group_matmul_310", torch::kPrivateUse1, &vllm_ascend::npu_qwen_w4_group_matmul_310);
@@ -2881,6 +2888,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "int compress_ratio=4, int rotary_dim=64, float norm_eps=1e-6) -> ()");
     ops.impl("qsa_index_cache_update_310", torch::kPrivateUse1,
              &vllm_ascend::qsa_index_cache_update_310);
+
+    ops.def(
+        "mla_cache_write_310(Tensor(a!) cache, Tensor rows, "
+        "Tensor slot_mapping) -> ()");
+    ops.impl("mla_cache_write_310", torch::kPrivateUse1,
+             &vllm_ascend::mla_cache_write_310);
+
+    ops.def(
+        "mhc_sinkhorn_310(Tensor logits, int iterations=20, "
+        "float epsilon=1e-6) -> Tensor");
+    ops.impl("mhc_sinkhorn_310", torch::kPrivateUse1,
+             &vllm_ascend::mhc_sinkhorn_310);
 
     ops.def(
         "chunk_gated_delta_rule_fwd_h(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"

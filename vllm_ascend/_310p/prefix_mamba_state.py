@@ -26,6 +26,47 @@ def prefix_mamba_slot_count(max_num_reqs: int, num_speculative_tokens: int) -> i
     return max(PREFIX_MAMBA_MIN_SLOTS, 1 + max_num_reqs * 2 * (1 + num_speculative_tokens))
 
 
+class LiveMambaRequestSlots:
+    """Stable per-request lanes when prefix caching is disabled.
+
+    A lane holds only the current state and speculative candidates. Finished
+    requests release their lane; row reordering never changes its owner. The
+    caller zeros every state tensor in a newly assigned lane before reuse.
+    """
+
+    def __init__(self, max_requests: int, slots_per_request: int) -> None:
+        if max_requests < 1 or slots_per_request < 1:
+            raise ValueError("Live Mamba slots require positive request and slot counts")
+        self.max_requests = max_requests
+        self.slots_per_request = slots_per_request
+        self._lanes: dict[str, int] = {}
+
+    def assign(
+        self, active_requests: Sequence[str], known_requests: set[str]
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        if len(active_requests) > self.max_requests or len(set(active_requests)) != len(active_requests):
+            raise ValueError("Invalid live Mamba request batch")
+        if not set(active_requests) <= known_requests:
+            raise ValueError("Active Mamba request is missing from runner state")
+        self._lanes = {req_id: lane for req_id, lane in self._lanes.items() if req_id in known_requests}
+        free_lanes = sorted(set(range(self.max_requests)) - set(self._lanes.values()))
+        newly_assigned = []
+        for req_id in active_requests:
+            if req_id not in self._lanes:
+                if not free_lanes:
+                    raise RuntimeError("No compact Mamba lane available for live request")
+                lane = free_lanes.pop(0)
+                self._lanes[req_id] = lane
+                newly_assigned.append(lane)
+        return tuple(self._lanes[req_id] for req_id in active_requests), tuple(newly_assigned)
+
+    def mapped_columns(self, lanes: Sequence[int], columns: int) -> np.ndarray:
+        if columns <= 0 or any(lane < 0 or lane >= self.max_requests for lane in lanes):
+            raise ValueError("Invalid compact Mamba columns or lane")
+        template = np.arange(columns, dtype=np.int32) % self.slots_per_request
+        return np.stack([template + lane * self.slots_per_request for lane in lanes])
+
+
 def prefix_mamba_active_columns(
     used_columns: Sequence[int],
     computed_tokens: Sequence[int],

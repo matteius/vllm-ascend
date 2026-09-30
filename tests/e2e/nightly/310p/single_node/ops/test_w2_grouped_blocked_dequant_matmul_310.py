@@ -1,0 +1,131 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Hardware parity for grouped signed W2/W4 block-dequant Cube projections."""
+
+import pytest
+import torch
+import torch_npu
+
+from tools.deepseek_w2.w2_format import unpack_codes
+from vllm_ascend.models.glm5next_w2.model import _pack_codes_nz
+from vllm_ascend.utils import enable_custom_op
+
+
+@pytest.fixture(autouse=True, scope="module")
+def require_kernel():
+    if not torch_npu.npu.is_available() or "310" not in torch_npu.npu.get_device_name(0):
+        pytest.skip("requires Ascend 310P")
+    torch.npu.set_device(0)
+    torch_npu.npu.set_compile_mode(jit_compile=False)
+    enable_custom_op()
+    assert hasattr(torch.ops._C_ascend, "npu_w2_grouped_blocked_dequant_matmul_310")
+
+
+def _reference(
+    inputs: torch.Tensor,
+    codes: torch.Tensor,
+    scales: torch.Tensor,
+    group_ends: torch.Tensor,
+    bits: int,
+) -> torch.Tensor:
+    rows, k = inputs.shape
+    n = codes.shape[1]
+    output = torch.zeros(rows, n, dtype=torch.float32)
+    start = 0
+    for expert, end in enumerate(group_ends.cpu().tolist()):
+        if end > start:
+            unpacked = unpack_codes(codes[expert].cpu(), k, bits).float()
+            weight = (
+                unpacked.view(n // 32, 32, k // 32, 32) * scales[expert].cpu().view(n // 32, 1, k // 32, 1)
+            ).reshape(n, k)
+            output[start:end] = inputs[start:end].cpu().float() @ weight.t()
+        start = end
+    return output.half()
+
+
+@pytest.mark.parametrize("bits", [2, 4])
+def test_grouped_packed_projection_matches_reference(bits: int):
+    torch.manual_seed(7 + bits)
+    experts, rows, n, k = 4, 11, 256, 256
+    values_per_byte = 8 // bits
+    unsigned = torch.randint(0, 1 << bits, (experts, n, k), dtype=torch.uint8)
+    fields = [unsigned[:, :, field::values_per_byte] << (bits * field) for field in range(values_per_byte)]
+    codes = torch.stack(fields).sum(0).to(torch.uint8).contiguous()
+    scales = (torch.rand(experts, n // 32, k // 32) * 0.1 + 0.01).float()
+    inputs = torch.randn(rows, k).half()
+    group_ends = torch.tensor([3, 3, 8, 9], dtype=torch.int64)
+    expected = _reference(inputs, codes, scales, group_ends, bits)
+
+    actual = torch.ops._C_ascend.npu_w2_grouped_blocked_dequant_matmul_310(
+        inputs.npu(), codes.npu(), scales.npu(), group_ends.npu()
+    ).cpu()
+
+    # Rows after the final local group represent peer-owned routes and remain zero.
+    torch.testing.assert_close(actual[:9], expected[:9], rtol=4e-2, atol=4e-2)
+    assert torch.count_nonzero(actual[9:]) == 0
+
+
+def test_grouped_projection_reuses_workspace_for_wide_projection():
+    """Keep the real GLM expert geometry on the workspace-reuse path.
+
+    GLM gate/up projections have sixteen 128-channel output tiles.  A grouped
+    schedule assigns multiple tiles to each physical AI core.  Routes above 32
+    rows make the Cube epilogue large enough to expose overlap with persistent
+    dequant tables, while the smaller operator case above remains correct.
+    """
+    torch.manual_seed(31)
+    experts, rows, n, k = 2, 34, 2048, 4096
+    unsigned = torch.randint(0, 16, (experts, n, k), dtype=torch.uint8)
+    codes = (unsigned[:, :, 0::2] | (unsigned[:, :, 1::2] << 4)).contiguous()
+    scales = (torch.rand(experts, n // 32, k // 32) * 0.02 + 0.005).float()
+    inputs = torch.randn(rows, k).half().npu()
+    codes_npu = codes.npu()
+    scales_npu = scales.npu()
+    group_ends = torch.tensor([rows, rows], dtype=torch.int64, device="npu")
+
+    grouped = torch.ops._C_ascend.npu_w2_grouped_blocked_dequant_matmul_310(inputs, codes_npu, scales_npu, group_ends)
+    single = torch.ops._C_ascend.npu_w2_blocked_dequant_matmul_310(inputs, codes_npu[0], scales_npu[0])
+
+    torch.testing.assert_close(grouped.cpu(), single.cpu(), rtol=4e-2, atol=4e-2)
+
+
+@pytest.mark.parametrize("bits,n,k", [(4, 2048, 4096), (2, 4096, 2048)])
+def test_grouped_projection_matches_sparse_glm_routes(bits: int, n: int, k: int):
+    """Cover GLM-sized groups, empty experts, and peer-owned route rows.
+
+    The grouped kernel reuses one core's dequant workspace across output
+    tiles. An older package corrupted its UB tables when a group exceeded
+    32 rows, producing NaNs despite correct one-row results.
+    """
+    torch.manual_seed(72 + bits)
+    experts, rows = 4, 92
+    codes_per_byte = 8 // bits
+    codes = torch.randint(0, 256, (experts, n, k // codes_per_byte), dtype=torch.uint8).npu()
+    scales = (torch.rand(experts, n // 32, k // 32) * 0.02 + 0.005).npu()
+    inputs = torch.randn(rows, k).half().npu()
+    group_ends = torch.tensor([44, 44, 89, 90], dtype=torch.int64, device="npu")
+
+    grouped = torch.ops._C_ascend.npu_w2_grouped_blocked_dequant_matmul_310(inputs, codes, scales, group_ends).cpu()
+    for expert, start, end in ((0, 0, 44), (2, 44, 89), (3, 89, 90)):
+        expected = torch.ops._C_ascend.npu_w2_blocked_dequant_matmul_310(
+            inputs[start:end], codes[expert], scales[expert]
+        ).cpu()
+        assert torch.isfinite(grouped[start:end]).all()
+        torch.testing.assert_close(grouped[start:end], expected, rtol=4e-2, atol=4e-2)
+    assert torch.count_nonzero(grouped[90:]) == 0
+
+
+@pytest.mark.parametrize("bits,n,k", [(4, 2048, 4096), (2, 4096, 2048)])
+def test_grouped_nz_packed_projection_matches_canonical(bits: int, n: int, k: int):
+    torch.manual_seed(300 + bits)
+    experts, rows = 4, 16
+    canonical = torch.randint(0, 256, (experts, n, k // (8 // bits)), dtype=torch.uint8)
+    nz_codes = torch.stack([_pack_codes_nz(canonical[expert], k) for expert in range(experts)])
+    scales = (torch.rand(experts, n // 32, k // 32) * 0.02 + 0.005).npu()
+    inputs = torch.randn(rows, k).half().npu()
+    group_ends = torch.tensor([4, 4, 12, 16], dtype=torch.int64, device="npu")
+    op = torch.ops._C_ascend.npu_w2_grouped_blocked_dequant_matmul_310
+
+    baseline = op(inputs, canonical.npu(), scales, group_ends)
+    candidate = op(inputs, nz_codes.view(torch.int8).npu(), scales, group_ends)
+    torch.testing.assert_close(candidate.cpu(), baseline.cpu(), rtol=0, atol=0)

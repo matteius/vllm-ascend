@@ -23,8 +23,10 @@ extern "C" __global__ __aicore__ void w2_blocked_dequant_matmul_v310(GM_ADDR x, 
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC);
 
     GM_ADDR user = AscendC::GetUserWorkspace(workspace);
+    auto td = reinterpret_cast<__gm__ W2BlockedDequantMatmulTilingData *>(tiling);
 
     NsW2::W2BlockedDequantMatmulV310Cube op;
-    op.Init(x, codes, blockScale, y, user, tiling);
+    op.InitGeometry(x, codes, blockScale, y, user, td->numTokens, td->nDim,
+                    td->kDim, td->codesPerByte);
     op.Process();
 }

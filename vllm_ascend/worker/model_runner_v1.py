@@ -258,6 +258,12 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+EARLY_TP_COMMUNICATOR_ARCHITECTURES = frozenset(
+    {
+        "Glm5NextW2ForCausalLM",
+        "Glm5NextW2ForConditionalGeneration",
+    }
+)
 
 
 def _net_offloaded_device_bytes(offloader: Any) -> int:
@@ -285,20 +291,27 @@ def _reclaim_offloaded_device_memory(
     return resident_model_memory, net_offloaded_device_bytes
 
 
-def _warm_up_tp_communicator_for_prefetch(
+def _warm_up_tp_communicator_before_model_load(
     offloader: Any,
     device: torch.device,
+    model_config: Any,
 ) -> bool:
-    """Initialize lazy TP communication before prefetch weights consume memory.
+    """Initialize lazy TP communication before full-capacity model loading.
 
     HCCL creates its communicator on the first collective and allocates outside
-    PyTorch's caching allocator. Full-capacity models can leave enough logical
-    headroom after offload while still preventing that late external
-    allocation. A one-element collective reserves the communicator while the
-    device is still mostly empty; the communicator is then reused by model
-    collectives after loading.
+    PyTorch's caching allocator. Prefetch-offloaded models and packed-W2 GLM
+    models can leave enough logical headroom while still preventing that late
+    external allocation. A one-element collective reserves the communicator
+    while the device is still mostly empty; the communicator is then reused by
+    model collectives after loading.
     """
-    if not isinstance(offloader, AscendPrefetchOffloader):
+    architectures = getattr(model_config, "architectures", ()) or ()
+    if isinstance(architectures, str):
+        architectures = (architectures,)
+    requires_early_init = isinstance(offloader, AscendPrefetchOffloader) or bool(
+        EARLY_TP_COMMUNICATOR_ARCHITECTURES.intersection(architectures)
+    )
+    if not requires_early_init:
         return False
 
     tp_group = get_tp_group()
@@ -311,7 +324,7 @@ def _warm_up_tp_communicator_for_prefetch(
     del warmup_tensor
     torch.npu.empty_cache()
     logger.info_once(
-        "Initialized the TP communicator before prefetch-offloaded model loading."
+        "Initialized the TP communicator before full-capacity model loading."
     )
     return True
 
@@ -4072,7 +4085,11 @@ class NPUModelRunner(GPUModelRunner):
         logger.info("Starting to load model %s...", self.model_config.model)
 
         offloader = get_offloader()
-        _warm_up_tp_communicator_for_prefetch(offloader, self.device)
+        _warm_up_tp_communicator_before_model_load(
+            offloader,
+            self.device,
+            self.model_config,
+        )
 
         if self.ascend_config.mix_placement:
             # TODO: Enabling the mix placement in deepseek_v2.py
@@ -5048,18 +5065,28 @@ class NPUModelRunner(GPUModelRunner):
                         isinstance(current_kv_cache_spec, AscendMLAAttentionSpec)
                         and get_kv_cache_compression_ratio(current_kv_cache_spec) == 1
                     ):
-                        k_dim, v_dim = self._get_attention_kv_cache_dims(
-                            layer_name, current_kv_cache_spec
-                        )
-                        cache_prefix = kv_cache_shape[:-1]
-                        kv_cache_shape_list = [
-                            (*cache_prefix, k_dim),
-                            (*cache_prefix, v_dim),
-                        ]
-                        kv_cache_dtype_list = [
-                            current_kv_cache_spec.dtype,
-                            current_kv_cache_spec.dtype,
-                        ]
+                        if current_kv_cache_spec.use_nz_cache:
+                            # NoPE MLA uses the normalized latent as both K and
+                            # V. The 310P QSA backend publishes its complete NZ
+                            # page shape directly, so splitting its final axis
+                            # would corrupt that physical geometry. Build one
+                            # page-strided view and alias it as K/V below. This
+                            # also preserves MLA's one-latent-page memory budget.
+                            kv_cache_shape_list = [kv_cache_shape]
+                            kv_cache_dtype_list = [current_kv_cache_spec.dtype]
+                        else:
+                            k_dim, v_dim = self._get_attention_kv_cache_dims(
+                                layer_name, current_kv_cache_spec
+                            )
+                            cache_prefix = kv_cache_shape[:-1]
+                            kv_cache_shape_list = [
+                                (*cache_prefix, k_dim),
+                                (*cache_prefix, v_dim),
+                            ]
+                            kv_cache_dtype_list = [
+                                current_kv_cache_spec.dtype,
+                                current_kv_cache_spec.dtype,
+                            ]
 
                     if hasattr(current_kv_cache_spec, "scale_dim") and current_kv_cache_spec.scale_dim != 0:
                         indexer_k_shape = kv_cache_shape
@@ -5097,6 +5124,16 @@ class NPUModelRunner(GPUModelRunner):
                                            current_kv_cache_spec.page_size_bytes,
                                            overlap_full_kv_cache=overlap_full_kv_cache,
                                            )
+
+                    if (
+                        isinstance(current_kv_cache_spec, AscendMLAAttentionSpec)
+                        and current_kv_cache_spec.use_nz_cache
+                        and get_kv_cache_compression_ratio(current_kv_cache_spec) == 1
+                    ):
+                        # The latent cache is mathematically both the K and V
+                        # operand. Keep the conventional two-tensor MLA API
+                        # while pointing both operands at the same pages.
+                        kv_cache = [kv_cache[0], kv_cache[0]]
 
                     kv_caches[layer_name] = kv_cache
                 elif isinstance(current_kv_cache_spec, AscendSFAIndexerCacheSpec):
@@ -5665,6 +5702,29 @@ class NPUModelRunner(GPUModelRunner):
             elif self.use_compress:
                 # Skip modules that don't need KV cache (eg encoder-only attention)
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                    if isinstance(attn_module, MLAAttention) and bool(
+                        getattr(attn_module.impl, "uses_nz_cache", False)
+                    ):
+                        compression_ratio = get_kv_cache_compression_ratio(spec)
+                        ratio_kwargs: dict[str, Any] = (
+                            {"compress_ratio": compression_ratio}
+                            if vllm_version_is("0.28.0")
+                            else {"tokens_per_state": compression_ratio}
+                        )
+                        spec = AscendMLAAttentionSpec(
+                            block_size=spec.block_size,
+                            num_kv_heads=spec.num_kv_heads,
+                            head_size=spec.head_size,
+                            dtype=spec.dtype,
+                            cache_dtype_str=spec.cache_dtype_str,
+                            non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
+                            model_version=getattr(spec, "model_version", None),
+                            indexes_kv_by_block_stride=bool(
+                                getattr(spec, "indexes_kv_by_block_stride", False)
+                            ),
+                            use_nz_cache=True,
+                            **ratio_kwargs,
+                        )
                     kv_cache_spec[layer_name] = spec
             elif isinstance(attn_module, Attention):
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
@@ -5730,6 +5790,9 @@ class NPUModelRunner(GPUModelRunner):
                         non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
                         model_version=model_version,
                         indexes_kv_by_block_stride=indexes_kv_by_block_stride,
+                        use_nz_cache=bool(
+                            getattr(attn_module.impl, "uses_nz_cache", False)
+                        ),
                         **ratio_kwargs,
                     )
                     attn_layer_names.add(layer_name)

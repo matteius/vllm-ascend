@@ -12,8 +12,9 @@ constexpr int64_t NZ_INNER = 16;
 constexpr int64_t QSA_COMPRESS_RATIO = 4;
 constexpr int64_t SCALAR_VECTOR_WIDTH = 8;
 constexpr int64_t FP32_REDUCE_WIDTH = 64;
-constexpr int64_t MAX_HEAD_DIM = 256;
-constexpr int64_t MAX_QUERY_HEADS_PER_KV_HEAD = 24;
+constexpr int64_t MAX_HEAD_DIM = 512;
+constexpr int64_t FAST_REDUCE_HEAD_DIM = 256;
+constexpr int64_t MAX_QUERY_HEADS_PER_KV_HEAD = 64;
 constexpr float SCALE_Q24_FACTOR = 16777216.0f;
 
 class QsaSparseAttentionV310 {
@@ -46,6 +47,7 @@ public:
         queryGm_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(query));
         keyCacheGm_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(keyCache));
         valueCacheGm_.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(valueCache));
+        sharedKvCache_ = keyCache == valueCache;
         groupIndicesGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(groupIndices));
         groupCountsGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(groupCounts));
         tailStartsGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(tailStarts));
@@ -136,7 +138,7 @@ private:
         PipeBarrier<PIPE_ALL>();
         Cast(kv, halfKv, RoundMode::CAST_NONE, headDim_);
         PipeBarrier<PIPE_V>();
-        if (headDim_ == MAX_HEAD_DIM) {
+        if (headDim_ == FAST_REDUCE_HEAD_DIM) {
             // Reduce all 256-wide Q·K rows together. The first reduction
             // produces four adjacent partials per head; two strided reductions
             // combine even and odd heads without a per-head vector launch.
@@ -160,7 +162,7 @@ private:
         for (int64_t head = 0; head < queryHeadsPerKvHead_; ++head) {
             const int64_t headOffset = head * headDim_;
             float score;
-            if (headDim_ == MAX_HEAD_DIM) {
+            if (headDim_ == FAST_REDUCE_HEAD_DIM) {
                 const int64_t scoreOffset = head % 2 == 0 ? 0 : MAX_QUERY_HEADS_PER_KV_HEAD;
                 score = reducedScores.GetValue(scoreOffset + head / 2) * scale_;
             } else {
@@ -196,10 +198,12 @@ private:
             rowSum[head] = rowSum[head] * previousWeight + tokenWeight[head];
             rowMax[head] = raisesMax[head] ? scores[head] : rowMax[head];
         }
-        LoadNzRow(halfKv, valueCacheGm_, firstBlockOffset);
-        PipeBarrier<PIPE_ALL>();
-        Cast(kv, halfKv, RoundMode::CAST_NONE, headDim_);
-        PipeBarrier<PIPE_V>();
+        if (!sharedKvCache_) {
+            LoadNzRow(halfKv, valueCacheGm_, firstBlockOffset);
+            PipeBarrier<PIPE_ALL>();
+            Cast(kv, halfKv, RoundMode::CAST_NONE, headDim_);
+            PipeBarrier<PIPE_V>();
+        }
         for (int64_t head = 0; head < queryHeadsPerKvHead_; ++head) {
             const int64_t headOffset = head * headDim_;
             Axpy(accumulator[headOffset], kv, tokenWeight[head], headDim_);
@@ -245,10 +249,22 @@ private:
             rowMax[head] = -3.402823466e38f;
             rowSum[head] = 0.0f;
         }
-        const int64_t groupCount = groupCountsGm_.GetValue(tokenRow);
+        // Dense-prefix encodings avoid materializing an O(context) group-index
+        // tensor. A negative group count means sequential groups [0, -N).
+        // A negative tail count is the faster MLA form: groupCounts stores the
+        // raw token length, from which both the groups and tail are derived.
+        const int64_t encodedGroupCount = groupCountsGm_.GetValue(tokenRow);
+        const int64_t encodedTailCount = tailCountsGm_.GetValue(tokenRow);
+        const bool denseTokenPrefix = encodedTailCount < 0;
+        const bool densePrefix = denseTokenPrefix || encodedGroupCount < 0;
+        const int64_t groupCount = denseTokenPrefix
+                                     ? encodedGroupCount / QSA_COMPRESS_RATIO
+                                     : (encodedGroupCount < 0 ? -encodedGroupCount : encodedGroupCount);
         const int64_t channelBlock = kvHead * headDimBlocks_;
         for (int64_t groupRank = 0; groupRank < groupCount; ++groupRank) {
-            const int64_t group = groupIndicesGm_.GetValue(tokenRow * selectedGroupsWidth_ + groupRank);
+            const int64_t group = densePrefix
+                                    ? groupRank
+                                    : groupIndicesGm_.GetValue(tokenRow * selectedGroupsWidth_ + groupRank);
             const int64_t groupStart = group * QSA_COMPRESS_RATIO;
             // A compression group stays within one cache page because the
             // page size is a multiple of four. Resolve its page only once.
@@ -263,8 +279,12 @@ private:
                                 rowMax, rowSum, tokenWeight);
             }
         }
-        const int64_t tailStart = tailStartsGm_.GetValue(tokenRow);
-        const int64_t tailCount = tailCountsGm_.GetValue(tokenRow);
+        const int64_t tailStart = denseTokenPrefix
+                                    ? groupCount * QSA_COMPRESS_RATIO
+                                    : tailStartsGm_.GetValue(tokenRow);
+        const int64_t tailCount = denseTokenPrefix
+                                    ? encodedGroupCount - tailStart
+                                    : encodedTailCount;
         for (int64_t tail = 0; tail < tailCount; ++tail) {
             const int64_t token = tailStart + tail;
             const int64_t logicalBlock = token / cacheBlockSize_;
@@ -326,6 +346,7 @@ private:
     int64_t queryHeadsPerKvHead_ = 0;
     int64_t headDimBlocks_ = 0;
     float scale_ = 1.0f;
+    bool sharedKvCache_ = false;
 };
 
 }  // namespace NsQsaSparseAttention

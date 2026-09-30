@@ -49,9 +49,16 @@ using namespace tla;
 
 constexpr int64_t W2_BLOCK_SIZE = 32;
 constexpr uint32_t W2_FRACTAL_SIZE = 16;
+constexpr uint32_t W2_TILE_M = 128;
 constexpr uint32_t W2_TILE_N = 128;
 constexpr uint32_t W2_TILE_K = 128;
 constexpr uint32_t W2_K_FRACTALS_PER_TILE = W2_TILE_K / W2_FRACTAL_SIZE;
+// The unified-core CATLASS epilogue uses UB [0, 96 KiB) for a maximum-size
+// 128x128 FP32 accumulator followed by its FP16 output.  Keep dequant scratch
+// and, critically, the reusable masks/gather table above that region so a
+// logical block can safely process more than one output-channel tile.
+constexpr uint32_t W2_MMAD_EPILOGUE_UB_BYTES =
+    W2_TILE_M * W2_TILE_N * (sizeof(float) + sizeof(half));
 
 template <typename T>
 __aicore__ inline T CeilDivU(T a, T b) { return (b == 0) ? 0 : (a + b - 1) / b; }
@@ -73,15 +80,20 @@ public:
 
     __aicore__ inline W2BlockedDequantMatmulV310Cube() {}
 
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR codes, GM_ADDR blockScale, GM_ADDR y,
-                                GM_ADDR user, GM_ADDR tiling)
+    // Shared by the single-expert and grouped-expert entry points. Keeping the
+    // geometry explicit lets a grouped kernel advance through device-resident
+    // expert banks without manufacturing host tiling data or synchronizing
+    // route counts back to Python.
+    __aicore__ inline void InitGeometry(GM_ADDR x, GM_ADDR codes, GM_ADDR blockScale,
+                                        GM_ADDR y, GM_ADDR user, int64_t numTokens,
+                                        int64_t nDim, int64_t kDim,
+                                        int64_t codesPerByte, bool nzPacked = false)
     {
-        __gm__ W2BlockedDequantMatmulTilingData *__restrict td =
-            reinterpret_cast<__gm__ W2BlockedDequantMatmulTilingData *__restrict>(tiling);
-        T_ = td->numTokens;
-        N_ = td->nDim;
-        K_ = td->kDim;
-        codesPerByte_ = td->codesPerByte;
+        T_ = numTokens;
+        N_ = nDim;
+        K_ = kDim;
+        codesPerByte_ = codesPerByte;
+        nzPacked_ = nzPacked;
         bitsPerCode_ = 8 / codesPerByte_;
         packedK_ = K_ / codesPerByte_;
         packedTileCols_ = W2_TILE_K / codesPerByte_;
@@ -151,7 +163,7 @@ public:
 private:
     __aicore__ inline void AllocBuffers()
     {
-        uint32_t off = 0;
+        uint32_t off = W2_MMAD_EPILOGUE_UB_BYTES;
         scaleUB_ = resource.ubBuf.template GetBufferByByte<float>(off);
         off = AlignUpU<uint32_t>(off + (uint32_t)kbCount_ * sizeof(float), 512);
         cU8_ = resource.ubBuf.template GetBufferByByte<uint8_t>(off);
@@ -178,8 +190,8 @@ private:
         off = AlignUpU<uint32_t>(off + (uint32_t)decodedTileCount_ * sizeof(int16_t), 512);
         masksUB_ = resource.ubBuf.template GetBufferByByte<int16_t>(off);
         off = AlignUpU<uint32_t>(off + (uint32_t)decodedTileCount_ * sizeof(int16_t), 512);
-        nzFractalUB_ = resource.ubBuf.template GetBufferByByte<half>(off);
-        off = AlignUpU<uint32_t>(off + W2_FRACTAL_SIZE * W2_FRACTAL_SIZE * sizeof(half), 512);
+        nzTileUB_ = resource.ubBuf.template GetBufferByByte<half>(off);
+        off = AlignUpU<uint32_t>(off + decodedTileCount_ * sizeof(half), 512);
     }
 
     __aicore__ inline void FillTables()
@@ -195,16 +207,18 @@ private:
         // The vector unpack is field-major across the complete packed tile.
         // Gather directly into eight [N=16,K=16] row-major fragments, avoiding
         // an intermediate logical [16,128] tensor and 128 small UB copies.
-        for (int64_t row = 0; row < W2_FRACTAL_SIZE; ++row) {
-            for (int64_t k = 0; k < W2_TILE_K; ++k) {
-                const int64_t byte = k / codesPerByte_;
-                const int64_t field = k % codesPerByte_;
-                const int64_t decoded = field * packedTileCount_ + row * packedTileCols_ + byte;
-                const int64_t kFractal = k / W2_FRACTAL_SIZE;
-                const int64_t kWithinFractal = k % W2_FRACTAL_SIZE;
-                const int64_t reordered =
-                    kFractal * W2_FRACTAL_SIZE * W2_FRACTAL_SIZE + row * W2_FRACTAL_SIZE + kWithinFractal;
-                gatherOffsetsUB_.SetValue(reordered, (uint32_t)(decoded * sizeof(half)));
+        if (!nzPacked_) {
+            for (int64_t row = 0; row < W2_FRACTAL_SIZE; ++row) {
+                for (int64_t k = 0; k < W2_TILE_K; ++k) {
+                    const int64_t byte = k / codesPerByte_;
+                    const int64_t field = k % codesPerByte_;
+                    const int64_t decoded = field * packedTileCount_ + row * packedTileCols_ + byte;
+                    const int64_t kFractal = k / W2_FRACTAL_SIZE;
+                    const int64_t kWithinFractal = k % W2_FRACTAL_SIZE;
+                    const int64_t reordered =
+                        kFractal * W2_FRACTAL_SIZE * W2_FRACTAL_SIZE + row * W2_FRACTAL_SIZE + kWithinFractal;
+                    gatherOffsetsUB_.SetValue(reordered, (uint32_t)(decoded * sizeof(half)));
+                }
             }
         }
         PipeBarrier<PIPE_ALL>();
@@ -217,10 +231,14 @@ private:
         // with an MTE "burst num" exception even when every row and stride is
         // 32-byte aligned. The scalar overload is hardware-proven on 310P and
         // still batches all 128 logical K values for the vector decode below.
-        for (uint32_t row = 0; row < W2_FRACTAL_SIZE; ++row) {
-            DataCopy(cU8_[row * packedTileCols_],
-                     codesGm_[codeOffset + static_cast<int64_t>(row) * packedK_],
-                     static_cast<int32_t>(packedTileCols_));
+        if (nzPacked_) {
+            DataCopy(cU8_, codesGm_[codeOffset], (int32_t)packedTileCount_);
+        } else {
+            for (uint32_t row = 0; row < W2_FRACTAL_SIZE; ++row) {
+                DataCopy(cU8_[row * packedTileCols_],
+                         codesGm_[codeOffset + static_cast<int64_t>(row) * packedK_],
+                         static_cast<int32_t>(packedTileCols_));
+            }
         }
         SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
         WaitFlag<HardEvent::MTE2_V>(EVENT_ID0);
@@ -253,9 +271,11 @@ private:
         Cast(signedHalfUB_, fieldI16UB_, RoundMode::CAST_NONE, (int32_t)decodedTileCount_);
         PipeBarrier<PIPE_V>();
 
-        Gather(fractalRowsUB_, signedHalfUB_, gatherOffsetsUB_, (uint32_t)0,
-               (uint32_t)decodedTileCount_);
-        PipeBarrier<PIPE_V>();
+        if (!nzPacked_) {
+            Gather(fractalRowsUB_, signedHalfUB_, gatherOffsetsUB_, (uint32_t)0,
+                   (uint32_t)decodedTileCount_);
+            PipeBarrier<PIPE_V>();
+        }
     }
 
     __aicore__ inline void DequantTileToNz(uint32_t n0, uint32_t nActual)
@@ -269,8 +289,10 @@ private:
             for (uint32_t rowInScale = 0; rowInScale < W2_BLOCK_SIZE; rowInScale += W2_FRACTAL_SIZE) {
                 const uint32_t rowBase = scaleRowBase + rowInScale;
                 for (int64_t k0 = 0; k0 < K_; k0 += W2_TILE_K) {
-                    const int64_t codeOffset =
-                        (static_cast<int64_t>(n0) + rowBase) * packedK_ + k0 / codesPerByte_;
+                    const int64_t codeOffset = nzPacked_
+                        ? ((static_cast<int64_t>(n0) + rowBase) / W2_FRACTAL_SIZE *
+                               (K_ / W2_TILE_K) + k0 / W2_TILE_K) * packedTileCount_
+                        : (static_cast<int64_t>(n0) + rowBase) * packedK_ + k0 / codesPerByte_;
                     DecodeTile(codeOffset);
 
                     // W is [N,K], while Cube consumes B=W^T [K,N]. Transpose each
@@ -282,20 +304,29 @@ private:
                     for (int64_t kFractal = 0; kFractal < W2_K_FRACTALS_PER_TILE; ++kFractal) {
                         const int64_t localFractalOffset =
                             kFractal * W2_FRACTAL_SIZE * W2_FRACTAL_SIZE;
-                        const int64_t globalKFractal = k0 / W2_FRACTAL_SIZE + kFractal;
                         const int64_t scaleIndex = k0 / W2_BLOCK_SIZE + kFractal / 2;
                         const half scale = static_cast<half>(scaleUB_.GetValue(scaleIndex));
-                        AscendC::Transpose(nzFractalUB_, fractalRowsUB_[localFractalOffset]);
-                        PipeBarrier<PIPE_V>();
-                        Muls(nzFractalUB_, nzFractalUB_, scale,
+                        auto nzFractal = nzPacked_ ? signedHalfUB_[localFractalOffset]
+                                                   : nzTileUB_[localFractalOffset];
+                        if (!nzPacked_) {
+                            AscendC::Transpose(nzFractal, fractalRowsUB_[localFractalOffset]);
+                            PipeBarrier<PIPE_V>();
+                        }
+                        Muls(nzFractal, nzFractal, scale,
                              W2_FRACTAL_SIZE * W2_FRACTAL_SIZE);
-                        SetFlag<HardEvent::V_MTE3>(EVENT_ID2);
-                        WaitFlag<HardEvent::V_MTE3>(EVENT_ID2);
-                        DataCopy(wdqNzGm_[nzBase + globalKFractal * W2_FRACTAL_SIZE * W2_FRACTAL_SIZE],
-                                 nzFractalUB_, W2_FRACTAL_SIZE * W2_FRACTAL_SIZE);
-                        SetFlag<HardEvent::MTE3_V>(EVENT_ID1);
-                        WaitFlag<HardEvent::MTE3_V>(EVENT_ID1);
+                        PipeBarrier<PIPE_V>();
                     }
+                    SetFlag<HardEvent::V_MTE3>(EVENT_ID2);
+                    WaitFlag<HardEvent::V_MTE3>(EVENT_ID2);
+                    if (nzPacked_) {
+                        DataCopy(wdqNzGm_[nzBase + k0 * W2_FRACTAL_SIZE],
+                                 signedHalfUB_, decodedTileCount_);
+                    } else {
+                        DataCopy(wdqNzGm_[nzBase + k0 * W2_FRACTAL_SIZE],
+                                 nzTileUB_, decodedTileCount_);
+                    }
+                    SetFlag<HardEvent::MTE3_V>(EVENT_ID1);
+                    WaitFlag<HardEvent::MTE3_V>(EVENT_ID1);
                 }
             }
         }
@@ -322,7 +353,7 @@ private:
     LocalTensor<int16_t> threeUB_;
     LocalTensor<int16_t> signHalfUB_;
     LocalTensor<int16_t> masksUB_;
-    LocalTensor<half> nzFractalUB_;
+    LocalTensor<half> nzTileUB_;
 
     int64_t T_;
     int64_t N_;
@@ -337,6 +368,7 @@ private:
     int64_t signHalf_;
     int64_t kbCount_;
     int64_t coreNzBase_;
+    bool nzPacked_;
 };
 
 }  // namespace NsW2
