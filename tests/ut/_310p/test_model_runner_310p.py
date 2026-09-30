@@ -157,6 +157,7 @@ def test_glm5_next_cache_initialization_uses_shared_slot_allocator() -> None:
     runner.shared_kv_cache_layers = {}
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.kv_caches = []
+    runner._live_mamba_slots = None
 
     layer_name = "model.layers.3.self_attn"
     spec = SimpleNamespace(model_version="glm5_next")
@@ -308,6 +309,7 @@ def test_native_310p_mla_cache_allocation_uses_nz_layout() -> None:
     with patch(
         "vllm_ascend._310p.model_runner_310p.torch_npu.empty_with_format",
         return_value=expected,
+        create=True,
     ) as empty_nz:
         cache = _allocate_attention_cache_tensor(
             (4, 32, 32, 16),

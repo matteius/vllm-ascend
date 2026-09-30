@@ -4,6 +4,9 @@
 
 import torch
 
+# A 32-bit score temporary stays at or below 256 MiB before top-k selection.
+MAX_KPOOL_SCORE_ELEMENTS = 1 << 26
+
 
 def hadamard128(rows: torch.Tensor) -> torch.Tensor:
     """Apply the normalized 128-wide Walsh-Hadamard rotation in FP32."""
@@ -96,3 +99,27 @@ def expand_kpool_groups(
     tail = tail_starts[:, None] + tail_offsets[None, :]
     tail = tail.masked_fill(tail_offsets[None, :] >= tail_counts[:, None], -1)
     return torch.cat((expanded, tail), dim=1)
+
+
+def score_and_select_kpool_tokens(
+    queries: torch.Tensor,
+    weights: torch.Tensor,
+    pooled_keys: torch.Tensor,
+    positions: torch.Tensor,
+    topk_tokens: int,
+    pool_size: int,
+) -> torch.Tensor:
+    """Bound the head-by-query score temporary for long contexts."""
+    if queries.shape[0] == 0:
+        return torch.empty((0, topk_tokens + pool_size - 1), dtype=torch.int32, device=queries.device)
+    score_elements_per_query = queries.shape[1] * pooled_keys.shape[0]
+    query_chunk_size = max(1, MAX_KPOOL_SCORE_ELEMENTS // max(1, score_elements_per_query))
+    expanded_chunks = []
+    for start in range(0, queries.shape[0], query_chunk_size):
+        end = min(start + query_chunk_size, queries.shape[0])
+        logits = score_kpool(queries[start:end], weights[start:end], pooled_keys)
+        selected, _, tail_starts, tail_counts = select_kpool_groups(
+            logits, positions[start:end], topk_tokens, pool_size
+        )
+        expanded_chunks.append(expand_kpool_groups(selected, tail_starts, tail_counts, pool_size))
+    return expanded_chunks[0] if len(expanded_chunks) == 1 else torch.cat(expanded_chunks, dim=0)

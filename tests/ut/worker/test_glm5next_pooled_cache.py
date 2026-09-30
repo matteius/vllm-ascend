@@ -9,7 +9,7 @@ import torch
 from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolStateSpec,
@@ -79,6 +79,7 @@ def _make_config():
         scheduler_config=SimpleNamespace(
             disable_hybrid_kv_cache_manager=False,
             max_num_batched_tokens=8,
+            max_num_seqs=4,
         ),
         max_in_flight_tokens=8,
         cache_config=SimpleNamespace(
@@ -143,10 +144,11 @@ def _make_runner(config, main_cache_dims=(4, 0)):
     runner.sparse_kv_offload_enabled = False
     runner.sparse_kv_offload_config = SimpleNamespace(enabled=False)
     runner.tp_rank = 0
+    runner.max_num_reqs = config.scheduler_config.max_num_seqs
     runner.attn_backend = _AttentionBackend
     # The runner must consume the descriptor/spec contract without inspecting
     # a model type.
-    runner.model_config = SimpleNamespace()
+    runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm5_next_text"))
 
     specs = _make_specs()
     attn_groups = [
@@ -182,10 +184,11 @@ def _make_plan(num_blocks=3, main_head_size=4):
     config = _make_config()
     groups = get_glm5_next_kv_cache_groups(config, _make_specs(main_head_size))
     bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
+    fixed_bytes = config.scheduler_config.max_num_seqs * groups[2].kv_cache_spec.page_size_bytes
     plan = get_glm5_next_kv_cache_config(
         config,
         groups,
-        num_blocks * bytes_per_block,
+        num_blocks * bytes_per_block + fixed_bytes,
     )
     return config, groups, plan
 
@@ -195,7 +198,7 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     runner = _make_runner(config)
 
     raw_caches = runner._allocate_kv_cache_tensors(plan)
-    assert raw_caches[MAIN] is raw_caches[MAMBA]
+    assert raw_caches[MAIN] is not raw_caches[MAMBA]
     assert raw_caches[INDEXER] is raw_caches[STATE]
     assert raw_caches[MAIN] is not raw_caches[INDEXER]
 
@@ -212,8 +215,8 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     assert indexer_cache.shape == (3, 4, 1, 4)
     assert state_cache.shape == (3, 2, 3)
     assert [cache.shape for cache in caches[MAMBA]] == [
-        (3, 2, 2),
-        (3, 1, 2, 2),
+        (4, 2, 2),
+        (4, 1, 2, 2),
     ]
 
     for name, cache in ((INDEXER, indexer_cache), (STATE, state_cache)):
@@ -225,7 +228,7 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     mamba_second_offset = caches[MAMBA][0].numel() * caches[MAMBA][0].element_size()
     assert caches[MAMBA][1].data_ptr() - raw_caches[MAMBA].data_ptr() == mamba_second_offset
     mamba_payload_size = sum(cache.numel() * cache.element_size() for cache in caches[MAMBA])
-    assert mamba_payload_size < descriptors[MAMBA].size
+    assert mamba_payload_size == descriptors[MAMBA].size
 
     state_cache[2].fill_(7)
     state_payload_size = state_cache[0].numel() * state_cache.element_size()
@@ -282,6 +285,29 @@ def test_standalone_mtp_uses_existing_compressed_cache_allocator():
 
     assert set(raw_caches) == {MAIN, INDEXER, STATE}
     assert raw_caches[INDEXER] is raw_caches[STATE]
+
+
+def test_mamba_only_pipeline_stage_uses_fixed_live_state_backing():
+    config = _make_config()
+    groups = get_glm5_next_kv_cache_groups(config, _make_specs())
+    projected = [
+        KVCacheGroupSpec([MAMBA] if MAMBA in group.layer_names else [], group.kv_cache_spec) for group in groups
+    ]
+    plan = get_glm5_next_kv_cache_config(
+        config,
+        projected,
+        available_memory=config.scheduler_config.max_num_seqs * groups[2].kv_cache_spec.page_size_bytes,
+    )
+    runner = _make_runner(config)
+    runner._kv_cache_spec_attn_group_iterator = lambda: iter(
+        [SimpleNamespace(backend=None, kv_cache_spec=_make_specs()[MAMBA], layer_names=[MAMBA])]
+    )
+
+    raw_caches = runner._allocate_kv_cache_tensors(plan)
+    caches = runner._reshape_kv_cache_tensors(plan, raw_caches)
+
+    assert set(raw_caches) == {MAMBA}
+    assert [cache.shape[0] for cache in caches[MAMBA]] == [config.scheduler_config.max_num_seqs] * 2
 
 
 def test_indexer_state_admission_includes_chunk_and_rollover_pages():

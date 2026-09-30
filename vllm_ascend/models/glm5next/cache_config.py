@@ -4,14 +4,15 @@
 
 The main MLA cache and compressed indexer cache share scheduler block IDs,
 while compressor state and every KDA/Mamba group allocate IDs independently.
-Physical storage uses standard unpacked KV cache descriptors with two page-size
-classes: main MLA/KDA pages and compressed-indexer/state pages.
+Physical storage uses standard unpacked KV cache descriptors: historical MLA
+pages, compressed-indexer/state pages, and fixed live KDA state per request.
 """
 
 from dataclasses import dataclass
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import (
     create_kv_cache_group_specs,
     may_override_num_blocks,
@@ -43,6 +44,7 @@ class _Glm5NextCacheLayout:
     small_page_size: int
     main_slot_count: int
     small_slot_count: int
+    compact_mamba: bool
 
 
 def _is_glm5_next_spec(spec: KVCacheSpec) -> bool:
@@ -89,8 +91,15 @@ def _is_glm5_next_state_spec(spec: KVCacheSpec) -> bool:
     )
 
 
+def _compact_live_mamba_specs(mamba_specs: list[MambaSpec]) -> bool:
+    """Only the current KDA state is needed without prefix caching or MTP."""
+    return bool(mamba_specs) and all(
+        spec.mamba_cache_mode == "none" and spec.num_speculative_blocks == 0 for spec in mamba_specs
+    )
+
+
 def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
-    """Align GLM-Next specs into two physical page-size classes in-place."""
+    """Align GLM-Next historical caches into two page-size classes in-place."""
 
     main_specs = [spec for spec in kv_cache_spec.values() if _is_glm5_next_main_spec(spec)]
     indexer_specs = [spec for spec in kv_cache_spec.values() if _is_glm5_next_indexer_spec(spec)]
@@ -102,10 +111,13 @@ def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
     if not main_specs or not indexer_specs or not state_specs:
         raise ValueError("GLM-Next cache layout requires main MLA, compressed indexer, and compressor-state specs.")
 
-    main_candidates = (*main_specs, *mamba_specs)
+    # Live-only KDA state gets its own fixed pool. Historical MLA pages must
+    # not inherit the much larger padded KDA state page size.
+    compact_mamba = _compact_live_mamba_specs(mamba_specs)
+    main_candidates = main_specs if compact_mamba else [*main_specs, *mamba_specs]
     main_page_size = max(
-        max(spec.page_size_bytes for spec in main_candidates),
         max(_unpadded_page_size(spec) for spec in main_candidates),
+        max(spec.page_size_bytes for spec in main_candidates) if not compact_mamba else 0,
     )
     small_candidates = (*indexer_specs, *state_specs)
     small_page_size = max(
@@ -113,8 +125,11 @@ def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
         max(_unpadded_page_size(spec) for spec in small_candidates),
     )
 
-    for spec in main_candidates:
+    for spec in main_specs:
         object.__setattr__(spec, "page_size_padded", main_page_size)
+    if not compact_mamba:
+        for spec in mamba_specs:
+            object.__setattr__(spec, "page_size_padded", main_page_size)
     for spec in small_candidates:
         object.__setattr__(spec, "page_size_padded", small_page_size)
 
@@ -256,20 +271,18 @@ def _get_glm5_next_cache_layout(
     # Pipeline-parallel projection keeps empty groups with their global spec.
     # Derive the two canonical page classes from the retained specs, while the
     # slot counts below use only this worker's projected layer names.
-    main_page_sizes = {spec.page_size_bytes for spec in full_specs.values() if _is_glm5_next_main_spec(spec)} | {
-        group.kv_cache_spec.page_size_bytes for group in mamba_groups
-    }
+    compact_mamba = _compact_live_mamba_specs([group.kv_cache_spec for group in mamba_groups])
+    main_page_sizes = {spec.page_size_bytes for spec in full_specs.values() if _is_glm5_next_main_spec(spec)}
+    if not compact_mamba:
+        main_page_sizes |= {group.kv_cache_spec.page_size_bytes for group in mamba_groups}
     small_page_sizes = {spec.page_size_bytes for spec in full_specs.values() if _is_glm5_next_indexer_spec(spec)} | {
         spec.page_size_bytes for spec in state_specs.values()
     }
     if len(main_page_sizes) != 1 or len(small_page_sizes) != 1:
         raise ValueError("GLM-Next cache specs were not aligned to two physical page sizes.")
 
-    main_slot_count = max(
-        (
-            len(mla_names),
-            *(len(group.layer_names) for group in mamba_groups),
-        )
+    main_slot_count = (
+        len(mla_names) if compact_mamba else max((len(mla_names), *(len(group.layer_names) for group in mamba_groups)))
     )
     return _Glm5NextCacheLayout(
         full_group=full_group,
@@ -282,6 +295,7 @@ def _get_glm5_next_cache_layout(
         small_page_size=next(iter(small_page_sizes)),
         main_slot_count=main_slot_count,
         small_slot_count=len(indexer_names),
+        compact_mamba=compact_mamba,
     )
 
 
@@ -353,6 +367,14 @@ def get_glm5_next_kv_cache_groups(
     scheduler_config = getattr(vllm_config, "scheduler_config", None)
     if getattr(scheduler_config, "disable_hybrid_kv_cache_manager", False):
         raise ValueError("GLM-Next's paired MLA/indexer and sliding state layout requires the hybrid KV cache manager.")
+    if vllm_config.cache_config.enable_prefix_caching and any(
+        isinstance(spec, MambaSpec) and spec.mamba_cache_mode == "none" for spec in kv_cache_spec.values()
+    ):
+        raise ValueError("GLM-Next live-only KDA state does not support prefix caching.")
+    if getattr(vllm_config, "speculative_config", None) is not None and _compact_live_mamba_specs(
+        [spec for spec in kv_cache_spec.values() if isinstance(spec, MambaSpec)]
+    ):
+        raise ValueError("GLM-Next live-only KDA state does not support speculative decoding.")
 
     _align_glm5_next_cache_specs(kv_cache_spec)
     mamba_specs = {name: spec for name, spec in kv_cache_spec.items() if isinstance(spec, MambaSpec)}
@@ -374,7 +396,39 @@ def get_glm5_next_pool_bytes_per_block(groups: list[KVCacheGroupSpec]) -> int:
     layout = _get_glm5_next_cache_layout(groups)
     if layout is None:
         raise ValueError("Expected GLM-Next cache groups.")
-    return layout.main_slot_count * layout.main_page_size + layout.small_slot_count * layout.small_page_size
+    # A Mamba-only pipeline worker still needs virtual block IDs, but its
+    # physical state is entirely in the fixed live pool.
+    return max(1, layout.main_slot_count * layout.main_page_size + layout.small_slot_count * layout.small_page_size)
+
+
+def _compact_mamba_pool_bytes(vllm_config: VllmConfig, layout: _Glm5NextCacheLayout) -> int:
+    if not layout.compact_mamba:
+        return 0
+    max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+    return max_num_seqs * sum(
+        len(group.layer_names) * group.kv_cache_spec.page_size_bytes for group in layout.mamba_groups
+    )
+
+
+def _required_scheduler_blocks(vllm_config: VllmConfig, layout: _Glm5NextCacheLayout) -> int:
+    """Count virtual IDs held at peak, including in-flight KDA blocks."""
+    blocks = sum(
+        cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), group.kv_cache_spec.page_size_bytes)
+        for group in (layout.full_group, layout.state_group)
+    )
+    for group in layout.mamba_groups:
+        spec = group.kv_cache_spec
+        if layout.compact_mamba:
+            # A prefill can allocate more than one scheduler ID even though
+            # every historical ID maps to the same live physical state slot.
+            # Keep the previous live block through the next in-flight batch.
+            blocks += min(
+                cdiv(vllm_config.model_config.max_model_len, spec.block_size),
+                1 + cdiv(vllm_config.max_in_flight_tokens, spec.block_size),
+            )
+        else:
+            blocks += cdiv(spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
+    return blocks
 
 
 def get_glm5_next_kv_cache_config(
@@ -389,7 +443,14 @@ def get_glm5_next_kv_cache_config(
         raise ValueError("Expected GLM-Next cache groups.")
 
     bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
-    num_blocks = may_override_num_blocks(vllm_config, max(available_memory // bytes_per_block, 0))
+    fixed_bytes = _compact_mamba_pool_bytes(vllm_config, layout)
+    if fixed_bytes > available_memory:
+        raise ValueError("GLM-Next live KDA state exceeds the available KV cache memory.")
+    if layout.main_slot_count == layout.small_slot_count == 0:
+        num_blocks = 1 + vllm_config.scheduler_config.max_num_seqs * len(groups)
+    else:
+        num_blocks = max((available_memory - fixed_bytes) // bytes_per_block, 0)
+    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     tensors: list[KVCacheTensor] = []
 
     def make_tensor(size: int, layer_names: list[str], page_size: int) -> KVCacheTensor:
@@ -411,9 +472,10 @@ def get_glm5_next_kv_cache_config(
         shared_by: list[str] = []
         if slot < len(layout.mla_names):
             shared_by.append(layout.mla_names[slot])
-        for group in layout.mamba_groups:
-            if slot < len(group.layer_names):
-                shared_by.append(group.layer_names[slot])
+        if not layout.compact_mamba:
+            for group in layout.mamba_groups:
+                if slot < len(group.layer_names):
+                    shared_by.append(group.layer_names[slot])
         tensors.append(
             make_tensor(
                 layout.main_page_size * num_blocks,
@@ -430,6 +492,18 @@ def get_glm5_next_kv_cache_config(
                 layout.small_page_size,
             )
         )
+
+    if layout.compact_mamba:
+        for group in layout.mamba_groups:
+            page_size = group.kv_cache_spec.page_size_bytes
+            for layer_name in group.layer_names:
+                tensors.append(
+                    make_tensor(
+                        page_size * vllm_config.scheduler_config.max_num_seqs,
+                        [layer_name],
+                        page_size,
+                    )
+                )
 
     return KVCacheConfig(
         num_blocks=num_blocks,
@@ -450,9 +524,5 @@ def get_glm5_next_max_memory_usage(
     # Scheduler groups allocate disjoint IDs from the shared global BlockPool.
     # One request therefore needs enough IDs for every group even though one
     # physical tensor slot can be reused by layers from different groups.
-    blocks = sum(
-        (group.kv_cache_spec.max_memory_usage_bytes(vllm_config) + group.kv_cache_spec.page_size_bytes - 1)
-        // group.kv_cache_spec.page_size_bytes
-        for group in groups
-    )
-    return blocks * get_glm5_next_pool_bytes_per_block(groups)
+    blocks = _required_scheduler_blocks(vllm_config, layout)
+    return blocks * get_glm5_next_pool_bytes_per_block(groups) + _compact_mamba_pool_bytes(vllm_config, layout)

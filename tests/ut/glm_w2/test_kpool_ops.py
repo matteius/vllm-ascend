@@ -10,6 +10,7 @@ from vllm_ascend.models.glm5next.kpool_ops import (
     compress_kpool,
     expand_kpool_groups,
     hadamard128,
+    score_and_select_kpool_tokens,
     score_kpool,
     select_kpool_groups,
 )
@@ -82,6 +83,26 @@ def test_future_pool_cannot_change_earlier_selection():
     changed[:, 4:] += 10000
     after = select_kpool_groups(changed, positions, 8, 4)[0]
     torch.testing.assert_close(after, original)
+
+
+def test_chunked_kpool_scoring_matches_full_topk():
+    torch.manual_seed(31)
+    queries = torch.randn(12, 3, 128, dtype=torch.bfloat16)
+    weights = torch.randn(12, 3)
+    keys = torch.randn(11, 128, dtype=torch.float16)
+    positions = torch.arange(12, 24, dtype=torch.int32)
+    selected, _, starts, counts = select_kpool_groups(score_kpool(queries, weights, keys), positions, 8, 4)
+    expected = expand_kpool_groups(selected, starts, counts, 4)
+
+    with (
+        patch("vllm_ascend.models.glm5next.kpool_ops.MAX_KPOOL_SCORE_ELEMENTS", 2 * 3 * 11),
+        patch("vllm_ascend.models.glm5next.kpool_ops.score_kpool", wraps=score_kpool) as score,
+    ):
+        actual = score_and_select_kpool_tokens(queries, weights, keys, positions, 8, 4)
+
+    torch.testing.assert_close(actual, expected)
+    assert score.call_count == 6
+    assert all(call.args[0].shape[0] <= 2 for call in score.call_args_list)
 
 
 def test_indexer_completes_a_pool_across_prefill_chunks():

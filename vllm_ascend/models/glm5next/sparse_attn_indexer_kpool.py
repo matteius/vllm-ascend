@@ -9,7 +9,7 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm_ascend.models.glm5next.kpool_ops import (
     compress_kpool,
     expand_kpool_groups,
-    score_kpool,
+    score_and_select_kpool_tokens,
     select_kpool_groups,
 )
 
@@ -194,12 +194,19 @@ class SparseAttnIndexerKpool(CustomOp):
             keys = cache[page_ids, pool_ids % block_size, 0]
             if num_pools <= self.topk_tokens // index_kpool:
                 logits = torch.zeros(end - start, num_pools, device=cache.device)
+                selected, _, tail_starts, tail_counts = select_kpool_groups(
+                    logits, positions[start:end], self.topk_tokens, index_kpool
+                )
+                expanded = expand_kpool_groups(selected, tail_starts, tail_counts, index_kpool)
             else:
-                logits = score_kpool(q_quant[start:end], weights[start:end], keys)
-            selected, _, tail_starts, tail_counts = select_kpool_groups(
-                logits, positions[start:end], self.topk_tokens, index_kpool
-            )
-            expanded = expand_kpool_groups(selected, tail_starts, tail_counts, index_kpool)
+                expanded = score_and_select_kpool_tokens(
+                    q_quant[start:end],
+                    weights[start:end],
+                    keys,
+                    positions[start:end],
+                    self.topk_tokens,
+                    index_kpool,
+                )
             self.topk_indices_buffer[start:end, : expanded.shape[1]] = expanded
         return self.topk_indices_buffer
 

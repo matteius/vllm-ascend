@@ -4549,9 +4549,9 @@ class NPUModelRunner(GPUModelRunner):
         # standardized descriptors, whose ``size`` is the size of one common
         # backing allocation rather than the size of an individual layer.
         use_legacy_shared_by_layout = vllm_version_is("0.28.0")
-        is_glm5_next = any(
-            getattr(spec, "model_version", None) == "glm5_next"
-            for spec in layer_kv_cache_spec.values()
+        is_glm5_next = (
+            getattr(getattr(self.model_config, "hf_text_config", None), "model_type", None) == "glm5_next_text"
+            or any(getattr(spec, "model_version", None) == "glm5_next" for spec in layer_kv_cache_spec.values())
         )
         is_dsv4_main = not use_legacy_shared_by_layout and any(
             getattr(spec, "model_version", None) == "deepseek_v4"
@@ -4585,8 +4585,9 @@ class NPUModelRunner(GPUModelRunner):
 
         # GLM-Next emits one descriptor for each physical cache slot. Layers
         # listed by a descriptor deliberately alias that slot even when they
-        # belong to different scheduler groups (for example MLA and Mamba, or
-        # the compressed indexer and its state cache). This differs from the
+        # belong to different scheduler groups (the compressed indexer and
+        # its state cache). Live KDA states use fixed per-request descriptors.
+        # This differs from the
         # generic main layout, which treats descriptor layers as independent
         # regions within one common backing.
         if is_glm5_next:
@@ -4594,8 +4595,12 @@ class NPUModelRunner(GPUModelRunner):
                 shared_layers = get_kv_cache_tensor_layers(descriptor)
                 if not shared_layers:
                     raise ValueError("GLM-Next KV cache descriptor has no layers.")
+                compact_mamba = len(shared_layers) == 1 and isinstance(
+                    layer_kv_cache_spec[shared_layers[0]], MambaSpec
+                ) and layer_kv_cache_spec[shared_layers[0]].mamba_cache_mode == "none"
                 if not use_legacy_shared_by_layout:
-                    expected_size = kv_cache_config.num_blocks * descriptor.block_stride
+                    expected_blocks = self.max_num_reqs if compact_mamba else kv_cache_config.num_blocks
+                    expected_size = expected_blocks * descriptor.block_stride
                     if (
                         descriptor.offset != 0
                         or descriptor.layer_stride != 0
@@ -5417,7 +5422,19 @@ class NPUModelRunner(GPUModelRunner):
                     assert raw_tensor is not None
                     assert raw_tensor.numel() % current_kv_cache_spec.page_size_bytes == 0
                     num_blocks = raw_tensor.numel() // current_kv_cache_spec.page_size_bytes
-                    assert num_blocks >= kv_cache_config.num_blocks
+                    is_compact_glm_mamba = (
+                        current_kv_cache_spec.mamba_cache_mode == "none"
+                        and num_blocks == self.max_num_reqs
+                        and (
+                            any(
+                                getattr(spec, "model_version", None) == "glm5_next"
+                                for spec in layer_kv_cache_spec.values()
+                            )
+                            or getattr(getattr(self.model_config, "hf_text_config", None), "model_type", None)
+                            == "glm5_next_text"
+                        )
+                    )
+                    assert num_blocks >= kv_cache_config.num_blocks or is_compact_glm_mamba
 
                     # `num_blocks` is the number of blocks the model runner can use.
                     # `kv_cache_config.num_blocks` is the number of blocks that

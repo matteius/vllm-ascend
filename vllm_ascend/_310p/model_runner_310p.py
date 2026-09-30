@@ -267,7 +267,8 @@ class NPUModelRunner310(NPUModelRunner):
             not self.cache_config.enable_prefix_caching
             and (
                 self.max_num_reqs == 1
-                or getattr(self.model_config.hf_text_config, "model_type", None) == "qwen4_exp_text"
+                or getattr(self.model_config.hf_text_config, "model_type", None)
+                in {"qwen4_exp_text", "glm5_next_text"}
             )
             and (self.speculative_config is None or self._qwen4exp_mtp_ple)
         )
@@ -1159,16 +1160,14 @@ class NPUModelRunner310(NPUModelRunner):
                 "VLLM_ASCEND_310P_ENABLE_MLA=1: initializing experimental MLA "
                 "KV cache on 310P via AscendMLABackend310 (unverified on hardware)."
             )
-        # GLM-Next's planner emits one descriptor per physical cache slot and
-        # deliberately aliases MLA/Mamba or indexer/state layers whose block
-        # IDs come from independent scheduler groups.  Expanding those
-        # descriptors into private per-layer tensors multiplies the planned
-        # allocation and can OOM even though memory profiling admitted the
-        # cache.  Reuse the base Ascend shared-slot allocator and reshape path
-        # for this model; other 310P models retain their private cache layout.
+        # GLM-Next's planner emits one descriptor per physical cache slot.
+        # Indexer/state layers alias a slot; live KDA states have fixed
+        # per-request descriptors. Reuse the base Ascend allocator so the
+        # runner creates exactly the physical storage the planner admitted.
         layer_specs = self._get_layer_kv_cache_specs(kv_cache_config)
-        uses_glm5_next_shared_slots = any(
-            getattr(spec, "model_version", None) == "glm5_next" for spec in layer_specs.values()
+        uses_glm5_next_shared_slots = (
+            getattr(getattr(self.model_config, "hf_text_config", None), "model_type", None) == "glm5_next_text"
+            or any(getattr(spec, "model_version", None) == "glm5_next" for spec in layer_specs.values())
         )
         if uses_glm5_next_shared_slots:
             raw_caches = NPUModelRunner._allocate_kv_cache_tensors(
