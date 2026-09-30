@@ -56,6 +56,7 @@ public:
             .AutoContiguous();
         this->Attr("scaleQ24").AttrType(REQUIRED).Int();
         this->Attr("compressRatio").AttrType(OPTIONAL).Int(4);
+        this->Attr("logicalKvHeads").AttrType(OPTIONAL).Int(0);
 
         OpAICoreConfig config;
         config.DynamicCompileStaticFlag(true)

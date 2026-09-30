@@ -5,6 +5,7 @@ import pytest
 import torch
 import torch_npu
 
+from vllm_ascend._310p.attention.mla_v1_310 import _qsa_physical_cache_page
 from vllm_ascend.models.qwen4_exp.ops.qsa_batched_attention_310 import (
     QSAPrefillGatherStreams,
     qsa_batched_prefill_310,
@@ -27,6 +28,45 @@ from vllm_ascend.models.qwen4_exp.ops.qsa_sparse_attention_310 import (
     qsa_sparse_attention_310_reference,
 )
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, enable_custom_op
+
+
+def test_qsa_physical_cache_page_exposes_padding_without_copy() -> None:
+    backing = torch.empty((3, 64, 32, 16), dtype=torch.float16)
+    logical = backing[:, :32]
+
+    physical = _qsa_physical_cache_page(logical)
+
+    assert physical.shape == backing.shape
+    assert physical.data_ptr() == backing.data_ptr()
+    assert physical.is_contiguous()
+    with pytest.raises(ValueError, match="unsupported physical page layout"):
+        _qsa_physical_cache_page(logical.transpose(1, 2))
+
+
+def test_qsa_padded_physical_page_matches_compact_cache() -> None:
+    if not torch_npu.npu.is_available() or "310" not in torch_npu.npu.get_device_name(0):
+        pytest.skip("requires an Ascend 310P NPU")
+    enable_custom_op()
+    torch_npu.npu.set_compile_mode(jit_compile=False)
+    torch.manual_seed(532)
+    device = "npu:0"
+    query = torch.randn((1, 64, 512), dtype=torch.float16, device=device)
+    backing = torch.randn((2, 64, 32, 16), dtype=torch.float16, device=device)
+    compact = backing[:, :32].contiguous()
+    group_indices = torch.zeros((1, 1), dtype=torch.int32, device=device)
+    group_counts = torch.tensor([40], dtype=torch.int32, device=device)
+    tail_starts = torch.zeros((1,), dtype=torch.int32, device=device)
+    tail_counts = torch.full((1,), -1, dtype=torch.int32, device=device)
+    block_table = torch.tensor([[0, 1]], dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    op = torch.ops._C_ascend.npu_qsa_sparse_attention_310
+    args = (group_indices, group_counts, tail_starts, tail_counts, block_table, query_start_loc)
+
+    expected = op(query, compact, compact, *args, 512**-0.5, 4)
+    physical = _qsa_physical_cache_page(backing[:, :32])
+    actual = op(query, physical, physical, *args, 512**-0.5, 4, 1)
+
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])

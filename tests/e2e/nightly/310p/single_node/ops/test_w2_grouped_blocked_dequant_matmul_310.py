@@ -134,7 +134,7 @@ def test_grouped_nz_packed_projection_matches_canonical(bits: int, n: int, k: in
 
 @pytest.mark.parametrize("bits", [2, 4])
 @pytest.mark.parametrize("rows", [8, 32])
-def test_grouped_sparse_expert_walk_matches_dense_scan(bits: int, rows: int):
+def test_grouped_72_experts_matches_canonical(bits: int, rows: int):
     """Cover 72 local experts, empty groups, and peer-owned trailing rows."""
     torch.manual_seed(900 + bits + rows)
     experts, n, k = 72, 256, 256

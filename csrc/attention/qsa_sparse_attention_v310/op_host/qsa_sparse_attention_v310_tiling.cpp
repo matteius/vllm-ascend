@@ -63,8 +63,13 @@ ge::graphStatus Tiling(gert::TilingContext *context)
     OP_CHECK_IF(cacheHeadDimBlocks % (headDim / NZ_INNER) != 0,
                 OP_LOGE(context, "cache head dimension is incompatible with query head dimension"),
                 return ge::GRAPH_FAILED);
-    const int64_t numKvHeads = cacheHeadDimBlocks / (headDim / NZ_INNER);
-    OP_CHECK_IF(numKvHeads <= 0, OP_LOGE(context, "cache must contain at least one KV head"), return ge::GRAPH_FAILED);
+    const int64_t physicalKvHeads = cacheHeadDimBlocks / (headDim / NZ_INNER);
+    const int64_t *logicalKvHeadsAttr = context->GetAttrs()->GetInt(2);
+    OP_CHECK_NULL_WITH_CONTEXT(context, logicalKvHeadsAttr);
+    const int64_t numKvHeads = *logicalKvHeadsAttr == 0 ? physicalKvHeads : *logicalKvHeadsAttr;
+    OP_CHECK_IF(numKvHeads <= 0 || numKvHeads > physicalKvHeads,
+                OP_LOGE(context, "logical KV heads must fit the physical NZ cache page"),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(numQueryHeads % numKvHeads != 0 || numQueryHeads / numKvHeads > MAX_QUERY_HEADS_PER_KV_HEAD,
                 OP_LOGE(context, "query heads per KV head must be between 1 and 64"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(groups.GetDim(0) != numTokens, OP_LOGE(context, "selection rows must equal query tokens"),

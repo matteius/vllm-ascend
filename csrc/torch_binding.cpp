@@ -2864,7 +2864,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
         "npu_qsa_sparse_attention_310(Tensor query, Tensor key_cache, Tensor value_cache, "
         "Tensor group_indices, Tensor group_counts, Tensor tail_starts, Tensor tail_counts, "
-        "Tensor block_table, Tensor query_start_loc, float scale, int compress_ratio=4) -> Tensor");
+        "Tensor block_table, Tensor query_start_loc, float scale, int compress_ratio=4, "
+        "int logical_kv_heads=0) -> Tensor");
     ops.impl("npu_qsa_sparse_attention_310", torch::kPrivateUse1,
              &vllm_ascend::npu_qsa_sparse_attention_310);
 

@@ -92,6 +92,31 @@ _NPU_TOKEN_ALIGNMENT = 32
 _NZ_INNER = 16
 
 
+def _qsa_physical_cache_page(cache: torch.Tensor) -> torch.Tensor:
+    """Expose a padded NZ page without copying its logical latent slice.
+
+    GLM's MLA view can contain only the first 512 channels of a larger page.
+    The native QSA kernel addresses the whole physical page using its channel
+    count, while a separate argument supplies the logical KV head count.
+    """
+    if cache.ndim != 4 or cache.shape[3] != _NZ_INNER:
+        raise ValueError("QSA cache must have NZ [blocks, channels/16, block, 16] shape")
+    _, logical_channels, block_size, inner = cache.shape
+    channel_stride = block_size * inner
+    page_stride = cache.stride(0)
+    if cache.stride()[1:] != (channel_stride, inner, 1) or page_stride % channel_stride:
+        raise ValueError("QSA cache has an unsupported physical page layout")
+    physical_channels = page_stride // channel_stride
+    if physical_channels < logical_channels:
+        raise ValueError("QSA physical page is smaller than its logical latent view")
+    if physical_channels == logical_channels:
+        return cache
+    return cache.as_strided(
+        (cache.shape[0], physical_channels, block_size, inner),
+        (page_stride, channel_stride, inner, 1),
+    )
+
+
 def _qsa_cache_block_table(block_table: torch.Tensor, cache_block_size: int) -> torch.Tensor:
     """Map the MLA kernel's split block IDs to the shared cache's pages.
 
@@ -723,10 +748,21 @@ class AscendMLAImpl310(AscendMLAImpl):
                 tail_counts,
                 _QSA_COMPRESS_RATIO,
             )
+        if key_cache.shape != value_cache.shape:
+            raise ValueError("QSA key and value caches must have the same logical shape")
+        logical_channels = key_cache.shape[1]
+        head_dim_blocks = query.shape[2] // _NZ_INNER
+        if head_dim_blocks == 0 or query.shape[2] % _NZ_INNER or logical_channels % head_dim_blocks:
+            raise ValueError("QSA logical cache channels must contain whole KV heads")
+        logical_kv_heads = logical_channels // head_dim_blocks
+        physical_key_cache = _qsa_physical_cache_page(key_cache)
+        physical_value_cache = _qsa_physical_cache_page(value_cache)
+        if physical_key_cache.shape != physical_value_cache.shape:
+            raise ValueError("QSA key and value physical pages must have the same shape")
         latent_output = op(
             query.contiguous(),
-            key_cache,
-            value_cache,
+            physical_key_cache,
+            physical_value_cache,
             group_sentinel,
             sequence_lengths,
             tail_starts,
@@ -735,6 +771,7 @@ class AscendMLAImpl310(AscendMLAImpl):
             query_start_loc,
             self.scale,
             _QSA_COMPRESS_RATIO,
+            logical_kv_heads,
         )
         return self._v_up_proj(latent_output.transpose(0, 1).contiguous())
 

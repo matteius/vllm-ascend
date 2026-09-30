@@ -18,7 +18,8 @@ at::Tensor npu_qsa_sparse_attention_310(
     const at::Tensor& block_table,
     const at::Tensor& query_start_loc,
     double scale,
-    int64_t compress_ratio)
+    int64_t compress_ratio,
+    int64_t logical_kv_heads)
 {
     TORCH_CHECK(query.dim() == 3, "query must be [T, Nq, D]");
     TORCH_CHECK(key_cache.dim() == 4 && value_cache.sizes() == key_cache.sizes(),
@@ -31,6 +32,7 @@ at::Tensor npu_qsa_sparse_attention_310(
     TORCH_CHECK(block_table.scalar_type() == at::kInt && query_start_loc.scalar_type() == at::kInt,
                 "block_table and query_start_loc must be int32");
     TORCH_CHECK(compress_ratio == 4, "310P QSA sparse attention requires compress_ratio=4");
+    TORCH_CHECK(logical_kv_heads >= 0, "logical_kv_heads must be nonnegative");
 
     at::Tensor output = at::empty_like(query);
     int64_t scale_q24 = static_cast<int64_t>(std::llround(scale * QSA_SCALE_Q24_FACTOR));
@@ -46,6 +48,7 @@ at::Tensor npu_qsa_sparse_attention_310(
                  query_start_loc,
                  scale_q24,
                  compress_ratio,
+                 logical_kv_heads,
                  output);
     return output;
 }

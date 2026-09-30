@@ -103,3 +103,28 @@ experts; follow with matched end-to-end one- and four-stream runs. A direct
 small-batch packed-code projection is a plausible prototype because each
 active expert receives few rows, but this trace does not establish that it
 will beat the current Cube path.
+
+## Follow-up before the next GLM reload
+
+An isolated NZ-packed grouped build replaced the 72-expert linear scan with a
+binary search for decode rows. Four hardware parity cases passed. Its isolated
+operator medians did not improve on the known-good build, so the source was
+returned to the linear scan and the candidate package was not used for serving.
+
+| Projection | Rows | Known-good | Binary-scan candidate |
+| --- | ---: | ---: | ---: |
+| W4 gate/up | 8 | 1.0800 ms | 1.1207 ms |
+| W2 down | 8 | 1.3058 ms | 1.3112 ms |
+| W4 gate/up | 32 | 4.0421 ms | 4.0533 ms |
+| W2 down | 32 | 4.9823 ms | 4.9607 ms |
+
+A direct QSA probe with the trace's 342-page geometry measured 2.90 ms per
+call for the logical `[342,32,384,16]` view backed by 64 physical channels.
+A contiguous 64-channel control took 0.065 ms. That control has a different
+logical KV-head count, so the timing isolates the copy cost but is not an
+equivalent attention result. The source now passes QSA a contiguous physical
+page and an explicit logical KV-head count; the kernel uses its existing
+physical page stride for addressing. A regression compares this path against
+an unpadded page. The requested NPU deferral began before this change could
+be built or measured end to end. The compact live-KDA planner remains a
+separate route to avoid padding the MLA page in the first place.
