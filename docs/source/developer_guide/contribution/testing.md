@@ -258,6 +258,24 @@ For running nightly multi-node model test cases locally, refer to the `Running L
 
 - Offline test example: [`tests/e2e/pull_request/one_card/test_qwen3_0_6b.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_qwen3_0_6b.py)
 
+### Csrc incremental build cache checks
+
+For changes to native build inputs or the cache adapter, run the cache engine,
+concurrency, and snapshot-key tests before requesting an NPU build:
+
+```bash
+pytest -q --confcutdir=tests/ut/_tools \
+  tests/ut/_tools/test_build_cache.py \
+  tests/ut/_tools/test_build_cache_concurrency.py \
+  tests/ut/_tools/test_prepare_csrc_l1_restore.py
+```
+
+On CI, a successful restore step only proves that an outer L1 snapshot was
+available. Check the inner cache telemetry for action HIT/MISS/BYPASS to
+establish whether a source build actually reused compiled work. See the
+[persistent csrc build cache design](../Design_Documents/persistent_csrc_build_cache.md)
+for the identity and failure contracts.
+
 ### PR selective testing (CI)
 
 The PR CI workflow ([pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) does not run the full suite on every PR. It selects tests with a coverage/AST based precision-testing pipeline and routes them to NPU runners. Tests run when the PR has the `ready-precise` label (recommended subset), the `ready-all` label (full suite), or the `main2main` label (full suite executed against both the verified vLLM main commit and the matched vLLM release tag).
@@ -270,8 +288,10 @@ How tests are selected:
 Adding a new test requires no configuration change: place the UT file under the
 matching `tests/ut/<module>[/<npu>]` directory or the E2E file under the matching
 `tests/e2e/pull_request/<card>` directory, and CI picks it up automatically from
-the test tree. Routing metadata (runner mapping, partitions, estimated times)
-lives in [`.github/workflows/scripts/test_config.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/scripts/test_config.yaml).
+the test tree. Routing metadata (runner mapping, partitions) lives in
+[`.github/workflows/scripts/test_config.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/scripts/test_config.yaml).
+Estimated times used for load balancing live in
+`.github/workflows/scripts/estimated_times.yaml`.
 
 You can preview locally which runners a set of tests would be routed to:
 
@@ -310,6 +330,48 @@ The CI resource is limited, and you might need to reduce the number of layers of
     model.save_pretrained(DIST_MODEL_PATH)
     ```
 
+### CI workflow triggers and the `schedule_` prefix
+
+Workflow files under `.github/workflows/` whose names start with `schedule_`
+belong to the recurring CI family (nightly, weekly, doc, coverage, and similar
+periodic jobs). The `schedule_` prefix does **not** guarantee that the workflow
+declares a GitHub Actions `schedule:` (cron) trigger.
+
+Some `schedule_*.yaml` files intentionally omit `schedule:` and are dispatched by
+the project's external automation through `workflow_dispatch` instead. This is by
+design, not a missing cron entry, because the external scheduler has more control
+over when resource-heavy NPU jobs run.
+
+Workflows with a native GitHub cron trigger:
+
+| Workflow | Additional triggers |
+|---|---|
+| `schedule_doc_linkcheck.yaml` | PR path filter, `workflow_dispatch` |
+| `schedule_doc_translate.yaml` | `workflow_dispatch` |
+| `schedule_e2e_upstream_test.yaml` | - |
+| `schedule_lint_image_build.yaml` | `workflow_dispatch`, `push` |
+| `schedule_main2main.yaml` | `workflow_dispatch` |
+| `schedule_stale_manage.yaml` | `issue_comment` |
+
+Workflows without a cron trigger, dispatched externally via `workflow_dispatch`:
+
+| Workflow | Additional triggers |
+|---|---|
+| `schedule_doc_getting_started_test.yaml` | PR path filter |
+| `schedule_e2e_test.yaml` | - |
+| `schedule_image_build_and_push.yaml` | PR label, tag `push` |
+| `schedule_nightly_test_310p.yaml` | - |
+| `schedule_nightly_test_a2.yaml` | - |
+| `schedule_nightly_test_a3.yaml` | - |
+| `schedule_nightly_test_a3_560t.yaml` | - |
+| `schedule_nightly_test_a5.yaml` | - |
+| `schedule_release_code_and_wheel.yml` | tag `push` |
+| `schedule_test_coverage.yaml` | - |
+| `schedule_weekly_test_310p.yaml` | - |
+| `schedule_weekly_test_a2.yaml` | - |
+| `schedule_weekly_test_a3.yaml` | - |
+| `schedule_weekly_test_a3_560t.yaml` | - |
+
 ### Run doctest
 
 Doctests validate fixed, marked Quick Start and Installation code blocks, not every code block in the documentation. Quick Start covers A2 and 310P (Atlas 300I DUO), running offline and online examples sequentially. Installation covers `pip`, `uv`, and `source` on A2, followed by offline inference verification. Both support Ubuntu and openEuler.
@@ -327,7 +389,7 @@ Run one of these commands from the repository root in a prepared NPU environment
 
 The entrypoint does not create a container. Use a matching vLLM Ascend image for Quick Start or a disposable CANN container for Installation, which changes system and Python packages. Prepare the examples' model cache in advance; the workers enable Hugging Face offline mode.
 
-In CI, `.github/workflows/schedule_doctest.yaml` appears as **Doc Test**. Relevant PR changes targeting `main` or `releases/v*` select affected cases automatically. You can also run it manually with `quickstart_device` and/or `installation_method`; `none` skips that case. Each selected case runs on both operating systems. There is no scheduled trigger.
+In CI, `.github/workflows/schedule_doc_getting_started_test.yaml` appears as **Doc Test**. Relevant PR changes targeting `main` or `releases/v*` select affected cases automatically. External automation can dispatch it on a schedule, or you can run it manually with comma-separated `quickstart_devices` and/or `installation_methods`; leave an input empty to skip that test type. Each selected case runs on both operating systems.
 
 For block extraction, plan preview, and selection rules, see the usage notes and function comments in `tests/e2e/doctests/scripts/doctest_helper.py` on the corresponding branch.
 

@@ -187,6 +187,11 @@ class AscendDSparkProposer(AscendDflashProposer):
                 builder = attn_group.get_metadata_builder()
                 if isinstance(builder, AscendDSAMetadataBuilder):
                     builder.enable_dspark_device_metadata(self.max_query_tokens)
+                else:
+                    from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
+
+                    if isinstance(builder, AscendDSAV41MetadataBuilder):
+                        builder.enable_device_metadata()
 
         self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
         self.kernel_block_size = self._per_group_kernel_block_sizes[self.kv_cache_gid]
@@ -240,6 +245,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_query_total = batch_size * self.num_query_per_req
         num_sample_total = batch_size * self.num_speculative_tokens
         has_num_rejected = num_rejected_tokens_gpu is not None
+        dcp_size = getattr(self, "dcp_size", 1)
+        dcp_rank = getattr(self, "dcp_rank", 0)
+        cp_interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size if dcp_size > 1 else 1
+        long_seq_args = None
         primary_gid = getattr(self, "kv_cache_gid", 0)
         self._per_group_block_table_buffers = {
             attn_group.kv_cache_group_id: self._per_group_block_tables[attn_group.kv_cache_group_id]
@@ -292,6 +301,9 @@ class AscendDSparkProposer(AscendDflashProposer):
                 batch_size=batch_size,
                 HAS_NUM_REJECTED=has_num_rejected,
                 SAMPLE_FROM_ANCHOR=self.sample_from_anchor,
+                DCP_SIZE=dcp_size,
+                DCP_RANK=dcp_rank,
+                CP_INTERLEAVE_SIZE=cp_interleave_size,
             )
         # to compute self._context_slot_mapping_buffers from dict to list
         self._context_slot_mapping_buffers = [
@@ -336,7 +348,19 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
-        return num_query_total, token_indices_to_sample, cad, None
+        if dcp_size > 1:
+            assert self.runner is not None
+            dcp_manager = getattr(self.runner, "dcp_manager", None)
+            assert dcp_manager is not None
+            dcp_manager.prepare_parallel_draft_metadata(cad, self.draft_attn_groups)
+
+        return num_query_total, token_indices_to_sample, cad, long_seq_args
+
+    def _clear_dummy_slot_mappings(self) -> None:
+        for buf in self._per_group_query_slot_mapping_buffers.values():
+            buf.fill_(-1)
+        for buf in self._per_group_context_slot_mapping_buffers.values():
+            buf.fill_(-1)
 
     @torch.inference_mode()
     def dummy_run(
@@ -358,8 +382,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_query_tokens, is_draft_model=True)
-        if num_tokens_across_dp is not None:
-            num_input_tokens = int(num_tokens_across_dp[self.dp_rank].item())
 
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
@@ -368,7 +390,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         context_states = self.hidden_states[:num_input_tokens]
 
         self.token_indices_to_sample.fill_(0)
-        self._pad_draft_buffers(num_query_total, num_input_tokens)
+        self._clear_dummy_slot_mappings()
 
         with set_ascend_forward_context(
             None,
@@ -380,6 +402,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             batch_descriptor=batch_descriptor,
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
+            model_instance=self.model,
             draft_attn_metadatas=[],
             eplb_heat_collection_status=(
                 self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False

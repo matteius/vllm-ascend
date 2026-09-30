@@ -73,8 +73,7 @@ def _flatten_state_indices(
         return ssm_state_indices[:total_tokens].to(torch.int32).contiguous()
 
     num_seqs = (cu_seqlens[1:] - cu_seqlens[:-1]).shape[0]
-    seq_lens = cu_seqlens[1 : num_seqs + 1] - cu_seqlens[:num_seqs]
-    ssm_state_indices = ssm_state_indices[:num_seqs]
+    q_per_seq = ssm_state_indices.shape[1]
 
     # Uniform spec-decode ACL graph uses fixed q_len per request; reshape avoids
     # NPU masked_select which breaks stream capture (aclnnMaskedSelect / 107027).
@@ -82,6 +81,9 @@ def _flatten_state_indices(
         q_per_seq = ssm_state_indices.shape[1]
         flat = ssm_state_indices[:, :q_per_seq].reshape(-1)
         return flat[:total_tokens].to(torch.int32).contiguous()
+
+    seq_lens = cu_seqlens[1 : num_seqs + 1] - cu_seqlens[:num_seqs]
+    ssm_state_indices = ssm_state_indices[:num_seqs]
 
     # Eager mixed batches with variable seq_lens: compact on CPU, copy back async.
     ssm_cpu = ssm_state_indices.cpu()
@@ -362,15 +364,20 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                     spec_valid_tokens,
                     token_dim=0,
                 )
+            # Always slice to real spec rows (GPU GDN pattern). FULL-graph pad
+            # tails must not reach npu_causal_conv1d_310 / recurrent kernels —
+            # even with PAD_SLOT_ID, cu_seqlens / accepted desync under MTP
+            # has been observed to poison hybrid state and emit wrong tokens.
+            num_spec = attn_metadata.num_spec_decodes
             mixed_qkv_spec = torch.ops._C_ascend.npu_causal_conv1d_310(
                 mixed_qkv_spec,
                 conv_weights,
                 bias=self.conv1d.bias,
                 conv_states=conv_state,
-                query_start_loc=spec_query_start_loc_device,
-                cache_indices=spec_causal_conv1d_meta.cache_indices,
+                query_start_loc=spec_query_start_loc_device[: num_spec + 1],
+                cache_indices=spec_causal_conv1d_meta.cache_indices[:num_spec],
                 initial_state_mode=None,
-                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
+                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens[:num_spec],
                 activation_mode=activation_num,
                 pad_slot_id=PAD_SLOT_ID,
                 run_mode=1,

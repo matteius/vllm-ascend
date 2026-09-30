@@ -48,6 +48,7 @@ from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
 from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
+from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
 from vllm_ascend._310p.prefix_mamba_state import (
@@ -73,7 +74,6 @@ from vllm_ascend.utils import (
     get_kv_cache_tensor_layers,
     is_rc_device,
     lmhead_tp_enable,
-    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -457,7 +457,10 @@ class NPUModelRunner310(NPUModelRunner):
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
     ):
-        is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        is_prefilling = (
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] < self.input_batch.num_prompt_tokens[:num_reqs]
+        )
+        is_all_decode = not np.any(is_prefilling)
 
         # The parent dummy run starts with a prefill-like attention state and
         # switches to SpecDecoding while building metadata. Do not veto its
@@ -507,6 +510,7 @@ class NPUModelRunner310(NPUModelRunner):
     def _build_attention_metadata(self, *args: Any, **kwargs: Any):
         # Parent dummy_run assigns ChunkedPrefill for non-MLA MTP (910B FIA graph).
         # 310P must capture SpecDecoding + splitfuse for SpecDecoding uniform decode graphs.
+        # TODO: Migrate 310P MTP graph capture and replay before dropping SpecDecoding.
         if self._spec_dummy_capture:
             self.attn_state = AscendAttentionState.SpecDecoding
         return super()._build_attention_metadata(*args, **kwargs)
@@ -552,6 +556,7 @@ class NPUModelRunner310(NPUModelRunner):
             and not np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0)
             and np.all(num_scheduled_tokens == self.uniform_decode_query_len)
         ):
+            # TODO: Retire this state with the 310P MTP splitfuse graph path.
             attn_state = AscendAttentionState.SpecDecoding
             self.attn_state = attn_state
         return attn_state
@@ -876,13 +881,6 @@ class NPUModelRunner310(NPUModelRunner):
                 self.mrope_positions.cpu,
                 non_blocking=True,
             )
-        elif self.uses_xdrope_dim > 0:
-            self._calc_xdrope_positions(scheduler_output)
-            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True,
-            )
-
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
         base_num_reqs = self.input_batch.num_reqs
@@ -1123,13 +1121,20 @@ class NPUModelRunner310(NPUModelRunner):
             static_forward_context=(self.compilation_config.static_forward_context),
         )
 
-    def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
+    def initialize_kv_cache_tensors(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int] | None = None,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
+    ) -> dict[str, torch.Tensor]:
         """
         Override the base class method.
         Initialize the memory buffer for KV cache.
 
         Args:
             kv_cache_config: The KV cache config
+            kv_cache_allocation_context: Sleep-mode pool used only for discardable
+            KV backing allocations. Sharing and bind stay outside.
         Returns:
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
@@ -1354,10 +1359,9 @@ class NPUModelRunner310(NPUModelRunner):
                     attn_backend = layer_attention_backends[layer_name]
                     assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
                     num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
-                    if not vllm_version_is("0.28.0"):
-                        # vLLM #51718 packs all group layers into one tensor;
-                        # kv_cache_config.num_blocks is the per-layer block count.
-                        num_blocks = kv_cache_config.num_blocks
+                    # vLLM #51718 packs all group layers into one tensor;
+                    # kv_cache_config.num_blocks is the per-layer block count.
+                    num_blocks = kv_cache_config.num_blocks
                     assert num_blocks >= kv_cache_config.num_blocks
                     supported_sizes = [
                         size
@@ -1521,7 +1525,11 @@ class NPUModelRunner310(NPUModelRunner):
             src=draft_token_ids.flatten()[prev_draft_token_indices_tensor],
         )
 
-    def may_reinitialize_input_batch(self, kv_cache_config: KVCacheConfig) -> None:
+    def may_reinitialize_input_batch(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int] | None = None,
+    ) -> None:
         """
         Re-initialize the input batch if the block sizes are different from
         `[self.cache_config.block_size]`. This usually happens when there

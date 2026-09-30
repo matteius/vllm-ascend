@@ -35,11 +35,14 @@ from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.worker import mamba_utils
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
+    get_layerwise_data_plane,
+    get_layerwise_protocol,
+    validate_layerwise_topology,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
-    is_block_key_layerwise,
     is_kv_save_role,
-    validate_mooncake_layerwise_topology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
@@ -105,13 +108,12 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
+        self.memcache_dp_init_barrier = extra_config.get("memcache_dp_init_barrier", True)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
-        self.use_block_key_layerwise = is_block_key_layerwise(self.use_layerwise, self.backend_name)
-        validate_mooncake_layerwise_topology(
-            vllm_config.parallel_config,
-            self.backend_name,
-            self.use_layerwise,
-        )
+        self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
+        self.layerwise_data_plane = get_layerwise_data_plane(self.layerwise_protocol)
+        self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
+        validate_layerwise_topology(self.layerwise_protocol, vllm_config.parallel_config, self.use_layerwise)
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":
@@ -124,6 +126,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         self._current_step_has_real_forward = False
         self._mamba_copy_bufs = None
+        # Handle to the (V2) mamba hybrid model state while its per-layer
+        # align pre-copy is deferred behind this connector's layerwise loads.
+        self._mamba_state: Any = None
         self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
 
         self.connector_scheduler: KVPoolScheduler | None = None
@@ -137,6 +142,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_config,
                 self.use_layerwise,
                 kv_cache_config,
+                memcache_dp_init_barrier=self.memcache_dp_init_barrier,
             )
             assert self.connector_worker is not None
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
@@ -241,9 +247,31 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        """Fence the previous save before this step can reuse KV blocks.
+
+        This hook is temporarily reused for deferred KV cache save
+        synchronization and will be replaced by a dedicated mechanism.
+        """
+        assert self.connector_worker is not None
+        self.connector_worker.wait_for_previous_save()
+
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        if self.use_layerwise:
+            assert self.connector_worker is not None
+            # Layerwise hooks need this step's tasks before target forward.
+            # If scheduler_output.has_sync_kv_loads is False (e.g. save-only
+            # steps), V1 calls start_load_kv after target forward, before MTP.
+            # Target hooks have advanced current_layer by then, so preparing
+            # the step there would reset the current layer before MTP.
+            self._mamba_copy_bufs = None
+            self.connector_worker.prepare_layerwise_step(connector_metadata)
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
-        self._mamba_copy_bufs = None
+        if not self.use_layerwise:
+            self._mamba_copy_bufs = None
         metadata = self._get_connector_metadata()
         self._current_step_has_real_forward = forward_context is not None
         logger.debug(
@@ -271,21 +299,39 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 self._mamba_copy_bufs,
                 layer_name,
             )
+        # Mamba state copy must run AFTER this layer's load finishes,
+        # otherwise the copy would race with the in-flight layerwise load and
+        # read half-loaded state. The model state no-ops for non-mamba layers
+        # and for layers whose copy already ran.
+        if self._mamba_state is not None:
+            self._mamba_state.do_mamba_copy_for_layer(layer_name)
 
-    def prepare_mamba_state_copy(self, copy_bufs) -> bool:
+    def prepare_mamba_state_copy(self, mamba_state_or_copy_bufs) -> bool:
+        """Take over the mamba align pre-copy for this step.
+
+        The V1 model runner passes its mamba copy buffers; each layer's copy
+        is then executed from :meth:`wait_for_layer_load` via
+        ``mamba_utils.do_mamba_copy_block_for_layer``. The V2 model runner
+        passes its mamba hybrid model state from ``preprocess_state``; each
+        layer's copy is executed from :meth:`wait_for_layer_load` right after
+        that layer's KV load (conv/ssm state included) completes.
+        """
         if not self.requires_mamba_state_copy_after_layer_load:
             return False
-        mamba_utils.prepare_mamba_copy_by_layer(copy_bufs)
-        self._mamba_copy_bufs = copy_bufs
+        if hasattr(mamba_state_or_copy_bufs, "do_mamba_copy_for_layer"):
+            self._mamba_state = mamba_state_or_copy_bufs
+        else:
+            mamba_utils.prepare_mamba_copy_by_layer(mamba_state_or_copy_bufs)
+            self._mamba_copy_bufs = mamba_state_or_copy_bufs
         return True
 
     def finish_mamba_state_copy(self) -> None:
-        if self._mamba_copy_bufs is None:
-            return
-        try:
-            mamba_utils.finish_mamba_copy_by_layer(self._mamba_copy_bufs)
-        finally:
-            self._mamba_copy_bufs = None
+        if self._mamba_copy_bufs is not None:
+            try:
+                mamba_utils.finish_mamba_copy_by_layer(self._mamba_copy_bufs)
+            finally:
+                self._mamba_copy_bufs = None
+        self._mamba_state = None
 
     def save_kv_layer(
         self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs

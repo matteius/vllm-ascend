@@ -971,6 +971,9 @@ class MiniMaxM3DecoderLayer(nn.Module):
 @support_torch_compile
 class MiniMaxM3Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
+    # vLLM #50514 validates and relays the model's existing PP aux payload.
+    supports_aux_hidden_states_over_pp = True
+    AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1385,6 +1388,12 @@ class MiniMaxM3SparseForCausalLM(
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def compute_logits_local(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)

@@ -87,6 +87,7 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
         calls.append("update")
 
     def fake_model(**kwargs):
+        assert "is_dummy_run" not in kwargs
         calls.append("model")
         return torch.ones(1)
 
@@ -881,6 +882,31 @@ def test_multi_request_remap_precopy_and_postprocess_follow_row_identity() -> No
     torch.testing.assert_close(states[tier.slot_for(146)], torch.full((2,), 11, dtype=torch.float16))
     torch.testing.assert_close(states[tier.slot_for(202)], torch.full((2,), 22, dtype=torch.float16))
     np.testing.assert_array_equal(raw, np.stack([np.arange(101, 157), np.arange(201, 257)]))
+
+
+def test_graph_dispatch_does_not_treat_later_prefill_chunk_as_decode() -> None:
+    runner = object.__new__(NPUModelRunner310)
+    runner.input_batch = SimpleNamespace(
+        num_computed_tokens_cpu=np.array([8], dtype=np.int32),
+        num_prompt_tokens=np.array([16], dtype=np.int32),
+    )
+    runner.attn_state = AscendAttentionState.DecodeOnly
+    runner.speculative_config = None
+
+    with patch(
+        "vllm_ascend.worker.model_runner_v1.NPUModelRunner._determine_batch_execution_and_padding",
+        return_value="dispatch-result",
+    ) as parent_dispatch:
+        result = runner._determine_batch_execution_and_padding(
+            num_tokens=1,
+            num_reqs=1,
+            num_scheduled_tokens_np=np.array([1], dtype=np.int32),
+            max_num_scheduled_tokens=1,
+            use_cascade_attn=False,
+        )
+
+    assert result == "dispatch-result"
+    assert parent_dispatch.call_args.kwargs["force_uniform_decode"] is None
 
 
 class TestNPUModelRunner310(TestBase):
