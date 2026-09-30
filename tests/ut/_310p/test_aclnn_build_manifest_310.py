@@ -15,7 +15,7 @@ QWEN4EXP_RUNTIME_OPS = {
     "causal_conv1d_v310",
     "gdn_gating_v310",
     "recurrent_gated_delta_rule_v310",
-    "chunk_fwd_o",
+    "chunk_fwd_o_vllm",
     "chunk_gated_delta_rule_fwd_h",
     "qsa_index_cache_update_v310",
     "qsa_indexer_score_v310",
@@ -33,8 +33,10 @@ def _ascend310_ops(script: str) -> set[str]:
 
 def test_qwen4exp_runtime_ops_are_packaged_together() -> None:
     script = BUILD_SCRIPT.read_text()
-    missing_ops = QWEN4EXP_RUNTIME_OPS - _ascend310_ops(script)
+    packaged_ops = _ascend310_ops(script)
+    missing_ops = QWEN4EXP_RUNTIME_OPS - packaged_ops
     assert not missing_ops, f"310P custom-op package is missing: {sorted(missing_ops)}"
+    assert "chunk_fwd_o" not in packaged_ops
 
 
 def test_custom_op_build_does_not_reuse_stale_cmake_manifest() -> None:
