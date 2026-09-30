@@ -1,0 +1,56 @@
+{
+  "hardware": "2x Atlas 300I Duo (4x Ascend 310P3)",
+  "configuration": {
+    "tensor_parallel_size": 4,
+    "expert_parallel": true,
+    "mtp_speculative_tokens": 2,
+    "max_model_len": 262144,
+    "max_num_seqs": 4,
+    "max_num_batched_tokens": 512,
+    "served_model_name": "qwen38-w4-pipeline-c1-dispatch",
+    "port": 8001,
+    "mtp_expert_execution": "w8a8_grouped"
+  },
+  "c1": {
+    "runs_tok_s": [
+      32.4401006450267,
+      29.73735985828787,
+      28.688215016095118,
+      34.33815254557928,
+      29.04793604163476
+    ],
+    "median_tok_s": 29.73735985828787,
+    "mean_tok_s": 30.850352821324744,
+    "peak_tok_s": 34.33815254557928,
+    "median_acceptance": 0.7075471698113207
+  },
+  "c4": {
+    "runs_aggregate_decode_tok_s": [
+      61.36998790196524,
+      60.87885038337323,
+      59.44025843961213
+    ],
+    "median_aggregate_decode_tok_s": 60.87885038337323,
+    "max_running": [
+      4.0,
+      4.0,
+      4.0
+    ],
+    "max_waiting": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "retained_baseline": {
+    "c1_median_tok_s": 29.86104432648593,
+    "c1_peak_tok_s": 30.31914547814125,
+    "c4_median_aggregate_decode_tok_s": 59.52331078172743
+  },
+  "validation": {
+    "focused_host_tests": "71 passed, 1 skipped",
+    "real_npu_service": true,
+    "coherence_smoke": true,
+    "fixed_228_question_gate_rerun": false
+  }
+}

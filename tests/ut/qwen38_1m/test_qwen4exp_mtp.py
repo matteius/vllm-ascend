@@ -4,7 +4,7 @@
 
 import sys
 from types import ModuleType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 import pytest
 import torch
@@ -115,19 +115,72 @@ def test_mtp_graph_capture_defers_eager_route_dispatch_into_stable_output() -> N
 
 
 @pytest.mark.parametrize("projection,shape", [("gate_up_proj", (64, 64)), ("down_proj", (64, 32))])
-def test_quantized_draft_expert_load_and_cpu_reference(projection, shape):
+@pytest.mark.parametrize("grouped_experts", [False, True])
+def test_quantized_draft_expert_load_and_cpu_reference(projection, shape, grouped_experts):
     config = _tiny_text_config(num_layers=1, moe=True, ple_layer_ids=())
     policy = Qwen4ExpDtypePolicy()
-    bank = _MTPFP16MoE(config, policy, (0, 1), quantize_experts=True)
+    bank = _MTPFP16MoE(
+        config,
+        policy,
+        (0, 1),
+        quantize_experts=True,
+        grouped_experts=grouped_experts,
+    )
     source = torch.randn(shape, generator=torch.Generator().manual_seed(17)).half()
     bank.load_expert_weight(projection, 0, source)
     scale = (source.float().abs().amax(dim=1) / 127).clamp_min(1e-8)
-    expected_weight = torch.round(source.float() / scale[:, None]).clamp(-127, 127).to(torch.int8).T
+    quantized = torch.round(source.float() / scale[:, None]).clamp(-127, 127).to(torch.int8)
+    expected_weight = quantized if grouped_experts else quantized.T
     torch.testing.assert_close(getattr(bank, projection)[0], expected_weight)
-    torch.testing.assert_close(getattr(bank, projection + "_scale")[0], scale.half())
+    expected_scale = scale if grouped_experts else scale.half()
+    torch.testing.assert_close(getattr(bank, projection + "_scale")[0], expected_scale)
     x = torch.randn(2, shape[1], generator=torch.Generator().manual_seed(18)).half()
-    expected = x.float() @ (expected_weight.float() * scale.half().float())
+    runtime_weight = quantized.T
+    expected = x.float() @ (runtime_weight.float() * expected_scale.float())
     torch.testing.assert_close(bank._expert_linear(x, projection, 0), expected)
+
+
+def test_grouped_mtp_experts_use_packed_bank_and_device_grouped_path():
+    config = _tiny_text_config(num_layers=1, moe=True, ple_layer_ids=())
+    policy = Qwen4ExpDtypePolicy()
+    bank = _MTPFP16MoE(config, policy, (0, 1), quantize_experts=True, grouped_experts=True)
+    assert bank.gate_up_proj.shape == (
+        config.num_experts,
+        2 * config.moe_intermediate_size,
+        config.hidden_size,
+    )
+    assert bank.down_proj.shape == (
+        config.num_experts,
+        config.hidden_size,
+        config.moe_intermediate_size,
+    )
+
+    x = torch.randn(2, config.hidden_size, dtype=torch.float16)
+    expected = torch.randn_like(x)
+    weights = torch.rand(2, config.num_experts_per_tok)
+    ids = torch.zeros(2, config.num_experts_per_tok, dtype=torch.int64)
+    with (
+        patch("vllm_ascend.models.qwen4_exp.mtp.route_topk", return_value=(weights, ids)),
+        patch(
+            "vllm_ascend.models.qwen4_exp.mtp._w8a8_packed_grouped_experts_npu",
+            return_value=expected,
+        ) as grouped,
+        patch.object(bank, "_finish_output", side_effect=lambda _x, output: output),
+        patch.object(torch.Tensor, "device", new_callable=PropertyMock, return_value=SimpleNamespace(type="npu")),
+    ):
+        actual = bank._forward_eager(x)
+
+    torch.testing.assert_close(actual, expected)
+    grouped.assert_called_once_with(
+        x,
+        weights,
+        ids,
+        bank.gate_up_proj,
+        bank.gate_up_proj_scale,
+        bank.down_proj,
+        bank.down_proj_scale,
+        bank.expert_offset,
+    )
 
 
 def test_mtp_lm_head_sharing_requires_identical_loaded_weights():
@@ -168,6 +221,9 @@ def test_mtp_recycles_multi_stream_state_and_applies_embedding_to_each_stream():
         model.model.fc_embedding.copy_(torch.eye(hidden_size))
     hidden = torch.randn(2, model.config.hc_count, hidden_size, dtype=model.dtype_policy.main_dtype)
     embedding = torch.randn(2, hidden_size, dtype=model.dtype_policy.main_dtype)
+    # Newer vLLM dispatches unquantized CPU GEMMs through a loader-installed
+    # callback. This host-only test does not run the post-load pass.
+    model.lm_head.cpu_linear = torch.nn.functional.linear
     with _single_rank_tp(), torch.no_grad():
         sample, recycled = model(None, torch.arange(2), hidden.flatten(-2), inputs_embeds=embedding)
         logits = model.compute_logits(sample)
@@ -226,6 +282,28 @@ def test_mtp_load_formats_static_draft_projections() -> None:
     with patch("vllm_ascend.models.qwen4_exp.mtp._format_eager_linear_weights_npu") as formatter:
         model.load_weights([])
     formatter.assert_called_once_with(model.model, (_MTPPredictor, _MTPFP16MoE))
+
+
+def test_grouped_mtp_load_converts_expert_banks_to_nz_once() -> None:
+    config = _tiny_text_config(num_layers=1, moe=True, ple_layer_ids=())
+    bank = _MTPFP16MoE(
+        config,
+        Qwen4ExpDtypePolicy(),
+        (0, 1),
+        quantize_experts=True,
+        grouped_experts=True,
+    )
+    gate_up = bank.gate_up_proj
+    down = bank.down_proj
+    with patch("vllm_ascend.models.qwen4_exp.mtp.maybe_trans_nz", side_effect=lambda weight: weight) as convert:
+        bank.prepare_grouped_weights()
+        bank.prepare_grouped_weights()
+
+    assert convert.call_args_list[0].args[0].data_ptr() == gate_up.data_ptr()
+    assert convert.call_args_list[1].args[0].data_ptr() == down.data_ptr()
+    assert convert.call_count == 2
+    with pytest.raises(RuntimeError, match="after layout conversion"):
+        bank.load_expert_weight("gate_up_proj", 0, torch.zeros_like(gate_up[0], dtype=torch.float16))
 
 
 def test_checkpoint_experts_are_sliced_by_tp_rank_and_invalid_weights_fail():

@@ -20,6 +20,8 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsPP
 from vllm.model_executor.models.utils import make_empty_intermediate_tensors_factory, maybe_prefix
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.utils import maybe_trans_nz
+
 from .dtype_policy import Qwen4ExpDtypePolicy
 from .lm_head_w8a8 import enable_dynamic_w8a8_lm_head
 from .model import (
@@ -34,7 +36,7 @@ from .model import (
     _remap_non_expert,
     _resolve_expert_sharding,
 )
-from .moe import _w8a16_linear_npu, route_topk, swiglu_gate_up
+from .moe import _w8a8_packed_grouped_experts_npu, _w8a16_linear_npu, route_topk, swiglu_gate_up
 from .w4_moe import w4_config
 
 
@@ -56,7 +58,7 @@ def _select_local_mtp_routes(
 
 
 class _MTPFP16MoE(nn.Module):
-    """Local slice of the FP16 MTP checkpoint, optionally stored as W8A16."""
+    """Local slice of the FP16 MTP checkpoint, optionally stored as INT8."""
 
     def __init__(
         self,
@@ -64,6 +66,7 @@ class _MTPFP16MoE(nn.Module):
         policy: Qwen4ExpDtypePolicy,
         sharding: tuple[int, int],
         quantize_experts: bool = False,
+        grouped_experts: bool = False,
     ) -> None:
         super().__init__()
         self.policy = policy
@@ -79,8 +82,34 @@ class _MTPFP16MoE(nn.Module):
         self.hidden_size = hidden
         self.intermediate_size = intermediate
         self.quantized_experts = quantize_experts
+        self.grouped_experts = grouped_experts
+        self._grouped_weights_prepared = False
+        if self.grouped_experts and not self.quantized_experts:
+            raise ValueError("grouped MTP experts require quantized weights")
         self.gate = nn.Parameter(torch.zeros(self.num_experts, hidden, dtype=policy.main_dtype))
-        if quantize_experts:
+        if quantize_experts and grouped_experts:
+            # Keep each local bank in the checkpoint's logical [expert, N, K]
+            # layout until all experts are loaded. ``prepare_grouped_weights``
+            # then converts it in-place to the FRACTAL_NZ layout consumed by
+            # QuantGroupedMatmulDequant. Unlike stacking ParameterList entries
+            # after load, this never creates a second several-hundred-MiB bank.
+            self.gate_up_proj = nn.Parameter(
+                torch.zeros(self.num_local_experts, 2 * intermediate, hidden, dtype=torch.int8),
+                requires_grad=False,
+            )
+            self.down_proj = nn.Parameter(
+                torch.zeros(self.num_local_experts, hidden, intermediate, dtype=torch.int8),
+                requires_grad=False,
+            )
+            self.gate_up_proj_scale = nn.Parameter(
+                torch.ones(self.num_local_experts, 2 * intermediate, dtype=torch.float32),
+                requires_grad=False,
+            )
+            self.down_proj_scale = nn.Parameter(
+                torch.ones(self.num_local_experts, hidden, dtype=torch.float32),
+                requires_grad=False,
+            )
+        elif quantize_experts:
             # The checkpoint remains FP16; each local expert is quantized once
             # during load. The runtime 310P W8A16 matmul consumes [K, N] INT8
             # weights and one FP16 symmetric scale per output channel.
@@ -130,6 +159,8 @@ class _MTPFP16MoE(nn.Module):
             self._tp_reduce = tensor_model_parallel_all_reduce
 
     def load_expert_weight(self, projection: str, local_id: int, source: torch.Tensor) -> None:
+        if self._grouped_weights_prepared:
+            raise RuntimeError("grouped MTP weights cannot be loaded after layout conversion")
         weights = getattr(self, projection)
         with torch.no_grad():
             if not self.quantized_experts:
@@ -140,8 +171,18 @@ class _MTPFP16MoE(nn.Module):
             source_fp32 = source.to(torch.float32)
             scales = (source_fp32.abs().amax(dim=1) / 127).clamp_min(1e-8)
             quantized = torch.round(source_fp32 / scales[:, None]).clamp(-127, 127).to(torch.int8)
-            weights[local_id].copy_(quantized.t().contiguous())
-            getattr(self, projection + "_scale")[local_id].copy_(scales.to(self.policy.main_dtype))
+            stored_weight = quantized if self.grouped_experts else quantized.t().contiguous()
+            weights[local_id].copy_(stored_weight)
+            target_scale = getattr(self, projection + "_scale")[local_id]
+            target_scale.copy_(scales.to(target_scale.dtype))
+
+    def prepare_grouped_weights(self) -> None:
+        """Convert a loaded grouped INT8 bank to the 310P runtime layout."""
+        if not self.grouped_experts or self._grouped_weights_prepared:
+            return
+        self.gate_up_proj.data = maybe_trans_nz(self.gate_up_proj.data)
+        self.down_proj.data = maybe_trans_nz(self.down_proj.data)
+        self._grouped_weights_prepared = True
 
     def _expert_linear(self, x: torch.Tensor, projection: str, local_id: int) -> torch.Tensor:
         weights = getattr(self, projection)
@@ -150,7 +191,8 @@ class _MTPFP16MoE(nn.Module):
         scales = getattr(self, projection + "_scale")[local_id]
         if x.device.type == "npu":
             return _w8a16_linear_npu(x, weights[local_id], scales)
-        return x.to(torch.float32) @ (weights[local_id].to(torch.float32) * scales.to(torch.float32)).to(torch.float32)
+        weight = weights[local_id].T if self.grouped_experts else weights[local_id]
+        return x.to(torch.float32) @ (weight.to(torch.float32) * scales.to(torch.float32)).to(torch.float32)
 
     def _finish_output(self, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         """Apply the shared expert and TP reduction after routed experts."""
@@ -172,6 +214,18 @@ class _MTPFP16MoE(nn.Module):
             renormalize=self.renormalize,
             routed_scaling_factor=self.routed_scaling_factor,
         )
+        if self.grouped_experts and x.device.type == "npu":
+            output = _w8a8_packed_grouped_experts_npu(
+                x,
+                weights,
+                ids,
+                self.gate_up_proj,
+                self.gate_up_proj_scale,
+                self.down_proj,
+                self.down_proj_scale,
+                self.expert_offset,
+            )
+            return self._finish_output(x, output)
         flat_ids = ids.flatten()
         flat_weights = weights.flatten()
         local_ids, slot_ids, token_ids, flat_weights = _select_local_mtp_routes(
@@ -255,6 +309,11 @@ class _MTPPredictor(nn.Module):
         self.expert_sharding = _resolve_expert_sharding(vllm_config)
         runtime_device = getattr(getattr(vllm_config, "device_config", None), "device", None)
         quantize_experts = getattr(runtime_device, "type", None) == "npu"
+        metadata = getattr(config, "ascend_expert_quantization", None)
+        mtp_expert_execution = (
+            metadata.get("mtp_expert_execution", "w8a16_routed") if isinstance(metadata, dict) else "w8a16_routed"
+        )
+        grouped_experts = mtp_expert_execution == "w8a8_grouped"
         self.layers = nn.ModuleList()
         # The target's INT8 bank is several GiB. Do not construct it only to
         # replace it with the MTP checkpoint's FP16 bank.
@@ -278,6 +337,7 @@ class _MTPPredictor(nn.Module):
                     policy,
                     self.expert_sharding,
                     quantize_experts=quantize_experts,
+                    grouped_experts=grouped_experts,
                 )
             self.layers.append(layer)
         self.hyper_connection_mixer = _GatedResidual(
@@ -482,12 +542,14 @@ class AscendQwen4ExpMTP(nn.Module, SupportsPP, MixtureOfExperts):
                         f"got {tensor.dtype} {tuple(tensor.shape)}"
                     )
                 for index in range(local):
-                    target_name = f"{target_base}.{index}"
                     projection = "gate_up_proj" if name.endswith(".gate_up_proj") else "down_proj"
                     bank.load_expert_weight(projection, index, tensor[tp_rank * local + index])
-                    loaded.add(target_name)
-                    if bank.quantized_experts:
-                        loaded.add(f"{target_base}_scale.{index}")
+                    if not bank.grouped_experts:
+                        loaded.add(f"{target_base}.{index}")
+                        if bank.quantized_experts:
+                            loaded.add(f"{target_base}_scale.{index}")
+                if bank.grouped_experts:
+                    loaded.update((target_base, f"{target_base}_scale"))
                 continue
             target = params.get(name)
             if target is not None and tuple(target.shape) == tuple(tensor.shape):
@@ -543,6 +605,8 @@ class AscendQwen4ExpMTP(nn.Module, SupportsPP, MixtureOfExperts):
         for module in self.model.modules():
             if isinstance(module, _GatedResidual):
                 module.prepare_norm_affine()
+            elif isinstance(module, _MTPFP16MoE):
+                module.prepare_grouped_weights()
         _format_eager_linear_weights_npu(self.model, (_MTPPredictor, _MTPFP16MoE))
         self.model.prepare_norm_affines()
         return loaded
