@@ -482,3 +482,77 @@ Host validation covers the safe-gate formula, variable-length spec slot
 flattening, four-entry KDA cache dtype contract, operator-lane structure, and
 the existing W2 regressions (80 tests passing). Throughput and real-weight
 golden output still require the next authorized 310P run.
+
+## UPDATE 12 (2026-09-29, grouped-kernel package and real-weight throughput)
+
+After the Threadripper reboot, all four 310P chips initialized and the GLM
+W4-through-layer-32 checkpoint loaded at TP4 (35.6075 GB of weights per rank).
+The first grouped run emitted gibberish. Disabling only the grouped MoE path
+selected the golden first token ` forty`, isolating the failure to grouped
+execution. A direct NPU comparison at GLM dimensions and 536 routed rows found
+NaNs in the installed grouped W4 and W2 operator, while the separate-expert
+operator remained finite.
+
+The installed grouped package was stale: its kernel object was dated 03:22 UTC,
+before the shared Cube header's updated workspace layout at 20:18 UTC. Building
+the grouped package from the current source and installing it separately
+eliminated the NaNs. Grouped and separate-expert projections then matched
+exactly for W4 `[72, 2048, 4096]` and W2 `[72, 4096, 2048]` banks with
+536 rows, mostly empty groups, and peer-owned rows. The new package was
+promoted to `opp-grouped`; the prior package remains at
+`opp-grouped-stale-20260929`. The GLM launcher now includes the separate MLA
+operator package that the first post-reboot run was missing.
+
+The real-weight prompt now produces coherent output:
+` 42. The quick brown fox jumps over the lazy sleeping dog near the winding river as the bright sun slowly sets.`
+The golden first token ` forty` is the second choice after a space, separated
+by 0.008 log-prob in the eight-token run. The dedicated 310P grouped-operator
+test suite passes all five cases, including new W2/W4 GLM-sized regression
+coverage for groups over 32 rows.
+
+Measured end-to-end generation time on this 67-token prompt was 22.89 s for
+eight output tokens and 44.04 s for 24 tokens (the latter 0.545 output
+tokens/s including prefill). The difference suggests about 0.76 tokens/s for
+steady decode and about 13.6 s for first-token latency; these are estimates
+from two separate runs, not direct token timestamps. Offline `LLM.generate()`
+returned no per-request timing metrics. Further performance experiments should
+batch requests into one model session rather than reloading the 151.58 GiB
+checkpoint for each measurement.
+
+## UPDATE 13 (2026-09-30, persistent-server end to end profile)
+
+The same TP4 GLM server stayed loaded for streaming baselines, two 16-step
+torch NPU traces, and CPU sampling. With 25 prompt tokens and 32 output tokens
+per stream, unprofiled decode reached 0.764 tokens/s for one stream and 1.474
+aggregate tokens/s for four streams. The corresponding first-token latencies
+were 8.62 s and 8.56–20.8 s. Profiled decode was 0.726 and 1.447 aggregate
+tokens/s; these rates include profiler overhead. All four chips remained
+healthy. Reproduction scripts, per-request timing JSON, a Python speedscope
+sample, and the complete four-rank summary are in
+`artifacts/glm-profile-20260930/`.
+
+The 16-iteration captures include prefill and decode. Each rank executes
+1,472 collectives. The one-stream task span is 29.8 s/rank, with 14.2–15.4 s
+of grouped W2/W4 projections and 8.3–9.6 s of collectives. Four streams
+increase the span to 49.6 s/rank, with 28.4–29.9 s of grouped projections
+and 11.1–12.8 s of collectives. Collective transit takes only 18–51 ms per
+rank across the capture; most collective time is waiting for rank arrival.
+The rank arriving last changes throughout both runs, so there is no single
+slow card. These task sums are diagnostics, not additive end to end latency.
+
+The grouped 310P kernel runs on eight Cube blocks and scales with the number
+of active local experts. Its recorded median decode task takes about 4.3 ms
+for eight routed rows and 8.6 ms for 32 rows. Hardware counters report much
+more vector dequant time than MAC time. An isolated synthetic test with two
+versus eight active local experts measured approximately 4.4/4.6 ms versus
+17.3/18.2 ms for W4 gate/up and W2 down projections. The next meaningful
+optimization target is the grouped packed-weight dequant/GEMM design and its
+rank-synchronization cost, rather than Python combine or router microchanges.
+
+Two small kernel candidates were kept separate from the live package. The
+integer-shift unpack failed five 310P W2/W4 parity cases. Lookup-table reuse
+passed all five but improved isolated GLM decode projections by less than 1%,
+so it did not justify a full model reload. Initial builds of both candidates
+had silently reused the old kernel object; clean build directories and binary
+SHA-256 checks exposed that error. The experimental source edits were
+reverted on both local and host trees, and the known good server remains up.

@@ -1,0 +1,161 @@
+grouped_task_count 2016
+shape "32,4096;72,2048,2048;72,64,128;72" blocks 8 count 780
+Duration(us) median 8594.479 mean 8268.387 min 4.505 max 21478.124
+aicore_time(us) median 7982.345 mean 7678.724 min 3.9 max 19941.53
+vec_time(us) median 5237.908 mean 5036.8 min 0.002 max 13092.764
+mac_time(us) median 18.031 mean 17.338 min 0.0 max 45.078
+mte1_time(us) median 68.118 mean 65.499 min 0.0 max 170.296
+mte2_time(us) median 1090.988 mean 1054.391 min 0.141 max 2741.345
+mte3_time(us) median 1990.854 mean 1916.919 min 0.0 max 4983.045
+memory_bound median 0.21 mean 0.206 min 0.0 max 0.217
+cube_utilization(%) median 92.866 mean 91.201 min 0.0 max 92.973
+shape "32,2048;72,4096,1024;72,128,64;72" blocks 8 count 390
+Duration(us) median 8600.911 mean 8271.533 min 4.531 max 21491.249
+aicore_time(us) median 7985.005 mean 7679.603 min 3.91 max 19947.04
+vec_time(us) median 5238.373 mean 5037.249 min 0.002 max 13093.926
+mac_time(us) median 18.031 mean 17.338 min 0.0 max 45.078
+mte1_time(us) median 68.118 mean 65.499 min 0.0 max 170.296
+mte2_time(us) median 1088.644 mean 1052.785 min 0.126 max 2732.495
+mte3_time(us) median 1993.434 mean 1917.217 min 0.0 max 4984.289
+memory_bound median 0.209 mean 0.205 min 0.0 max 0.214
+cube_utilization(%) median 92.844 mean 91.178 min 0.0 max 92.908
+shape "32,4096;72,2048,1024;72,64,128;72" blocks 8 count 312
+Duration(us) median 9049.375 mean 9742.199 min 4.583 max 22609.582
+aicore_time(us) median 8409.655 mean 9052.71 min 3.95 max 21005.72
+vec_time(us) median 5533.626 mean 5959.497 min 0.002 max 13835.615
+mac_time(us) median 18.031 mean 19.418 min 0.0 max 45.078
+mte1_time(us) median 68.119 mean 73.359 min 0.0 max 170.299
+mte2_time(us) median 1067.791 mean 1150.317 min 0.132 max 2666.959
+mte3_time(us) median 1995.076 mean 2146.003 min 0.0 max 4981.823
+memory_bound median 0.193 mean 0.191 min 0.0 max 0.196
+cube_utilization(%) median 92.918 mean 91.731 min 0.0 max 93.11
+shape "32,2048;72,4096,512;72,128,64;72" blocks 8 count 156
+Duration(us) median 9049.622 mean 9745.746 min 4.792 max 22612.238
+aicore_time(us) median 8407.335 mean 9054.391 min 4.11 max 21008.65
+vec_time(us) median 5534.091 mean 5959.999 min 0.002 max 13836.775
+mac_time(us) median 18.031 mean 19.418 min 0.0 max 45.078
+mte1_time(us) median 68.119 mean 73.359 min 0.0 max 170.297
+mte2_time(us) median 1069.762 mean 1151.92 min 0.147 max 2672.528
+mte3_time(us) median 1992.948 mean 2146.43 min 0.0 max 4982.481
+memory_bound median 0.193 mean 0.191 min 0.0 max 0.195
+cube_utilization(%) median 92.906 mean 91.717 min 0.0 max 93.03
+shape "200,4096;72,2048,2048;72,64,128;72" blocks 8 count 60
+Duration(us) median 49457.302 mean 49519.595 min 25846.691 max 75393.824
+aicore_time(us) median 45927.05 mean 45930.619 min 23972.11 max 69891.81
+vec_time(us) median 30126.798 mean 30121.759 min 15719.95 max 45832.462
+mac_time(us) median 105.461 mean 103.917 min 54.094 max 157.774
+mte1_time(us) median 391.903 mean 391.71 min 204.355 max 596.037
+mte2_time(us) median 6287.673 mean 6290.71 min 3287.171 max 9534.372
+mte3_time(us) median 11501.796 mean 11491.048 min 6002.281 max 17515.988
+memory_bound median 0.209 mean 0.209 min 0.207 max 0.21
+cube_utilization(%) median 92.747 mean 92.751 min 92.504 max 92.994
+shape "8,4096;72,2048,2048;72,64,128;72" blocks 8 count 60
+Duration(us) median 4298.802 mean 3944.357 min 4.557 max 10743.489
+aicore_time(us) median 3991.345 mean 3662.891 min 3.92 max 9981.27
+vec_time(us) median 2618.285 mean 2400.096 min 0.002 max 6545.715
+mac_time(us) median 9.016 mean 8.264 min 0.0 max 22.539
+mte1_time(us) median 34.059 mean 31.222 min 0.0 max 85.15
+mte2_time(us) median 544.339 mean 502.98 min 0.175 max 1362.262
+mte3_time(us) median 995.179 mean 914.116 min 0.0 max 2494.121
+memory_bound median 0.209 mean 0.175 min 0.0 max 0.215
+cube_utilization(%) median 92.846 mean 77.381 min 0.0 max 92.925
+shape "608,4096;72,2048,2048;72,64,128;72" blocks 8 count 60
+Duration(us) median 54883.812 mean 56004.415 min 27944.478 max 84232.47
+aicore_time(us) median 50977.22 mean 51973.995 min 25955.29 max 77995.18
+vec_time(us) median 33459.561 mean 34095.645 min 17046.014 max 51124.543
+mac_time(us) median 125.635 mean 123.733 min 58.602 max 179.367
+mte1_time(us) median 435.812 mean 443.585 min 221.384 max 664.598
+mte2_time(us) median 7017.386 mean 7156.0 min 3574.024 max 10764.669
+mte3_time(us) median 12709.992 mean 12957.048 min 6467.305 max 19426.017
+memory_bound median 0.21 mean 0.21 min 0.209 max 0.211
+cube_utilization(%) median 92.861 mean 92.805 min 92.436 max 92.942
+shape "200,2048;72,4096,1024;72,128,64;72" blocks 8 count 30
+Duration(us) median 49438.513 mean 49427.331 min 25805.519 max 75193.798
+aicore_time(us) median 45902.975 mean 45908.926 min 23960.23 max 69875.34
+vec_time(us) median 30129.52 mean 30124.445 min 15721.349 max 45836.538
+mac_time(us) median 105.461 mean 103.917 min 54.094 max 157.774
+mte1_time(us) median 391.903 mean 391.71 min 204.355 max 596.035
+mte2_time(us) median 6278.624 mean 6253.825 min 3288.36 max 9476.509
+mte3_time(us) median 11476.475 mean 11492.868 min 5991.561 max 17521.228
+memory_bound median 0.209 mean 0.208 min 0.207 max 0.209
+cube_utilization(%) median 92.854 mean 92.878 min 92.84 max 92.935
+shape "8,2048;72,4096,1024;72,128,64;72" blocks 8 count 30
+Duration(us) median 4301.146 mean 3943.496 min 4.531 max 10743.541
+aicore_time(us) median 3993.06 mean 3661.335 min 3.9 max 9976.62
+vec_time(us) median 2618.517 mean 2400.31 min 0.002 max 6546.299
+mac_time(us) median 9.016 mean 8.264 min 0.0 max 22.539
+mte1_time(us) median 34.059 mean 31.222 min 0.0 max 85.15
+mte2_time(us) median 544.677 mean 501.148 min 0.143 max 1354.904
+mte3_time(us) median 996.486 mean 913.939 min 0.0 max 2494.897
+memory_bound median 0.208 mean 0.174 min 0.0 max 0.214
+cube_utilization(%) median 92.84 mean 77.371 min 0.0 max 92.899
+shape "608,2048;72,4096,1024;72,128,64;72" blocks 8 count 30
+Duration(us) median 54913.825 mean 55945.54 min 27971.509 max 83862.235
+aicore_time(us) median 50991.63 mean 51950.868 min 25979.33 max 77880.88
+vec_time(us) median 33462.824 mean 34098.827 min 17047.528 max 51129.171
+mac_time(us) median 125.635 mean 123.733 min 58.602 max 179.367
+mte1_time(us) median 435.812 mean 443.585 min 221.384 max 664.598
+mte2_time(us) median 7005.698 mean 7103.577 min 3566.622 max 10601.433
+mte3_time(us) median 12712.354 mean 12961.721 min 6481.938 max 19447.473
+memory_bound median 0.209 mean 0.208 min 0.207 max 0.21
+cube_utilization(%) median 92.861 mean 92.86 min 92.843 max 92.878
+shape "200,4096;72,2048,1024;72,64,128;72" blocks 8 count 24
+Duration(us) median 49895.062 mean 50819.41 min 36246.378 max 65803.408
+aicore_time(us) median 46274.205 mean 47142.823 min 33646.42 max 61016.79
+vec_time(us) median 30443.822 mean 31016.026 min 22137.602 max 40130.442
+mac_time(us) median 99.172 mean 101.347 min 72.125 max 130.727
+mte1_time(us) median 374.65 mean 381.783 min 272.473 max 493.857
+mte2_time(us) median 5919.665 mean 6036.691 min 4303.236 max 7847.332
+mte3_time(us) median 10985.669 mean 11179.125 min 7983.525 max 14446.41
+memory_bound median 0.195 mean 0.195 min 0.195 max 0.196
+cube_utilization(%) median 92.767 mean 92.77 min 92.634 max 92.906
+shape "8,4096;72,2048,1024;72,64,128;72" blocks 8 count 24
+Duration(us) median 3399.479 mean 3586.485 min 2263.255 max 6791.484
+aicore_time(us) median 3157.63 mean 3331.802 min 2102.37 max 6308.63
+vec_time(us) median 2074.609 mean 2189.864 min 1383.07 max 4149.217
+mac_time(us) median 6.762 mean 7.138 min 4.508 max 13.523
+mte1_time(us) median 25.546 mean 26.965 min 17.03 max 51.091
+mte2_time(us) median 400.409 mean 422.767 min 266.694 max 799.604
+mte3_time(us) median 748.577 mean 789.821 min 497.518 max 1497.087
+memory_bound median 0.193 mean 0.193 min 0.192 max 0.195
+cube_utilization(%) median 92.888 mean 92.9 min 92.797 max 93.028
+shape "608,4096;72,2048,1024;72,64,128;72" blocks 8 count 24
+Duration(us) median 64611.39 mean 65759.439 min 43049.269 max 86144.449
+aicore_time(us) median 59977.875 mean 61051.881 min 39976.85 max 80044.81
+vec_time(us) median 39473.796 mean 40166.317 min 26313.166 max 52646.005
+mac_time(us) median 135.596 mean 137.85 min 89.21 max 181.983
+mte1_time(us) median 486.233 mean 494.748 min 324.007 max 648.459
+mte2_time(us) median 7709.542 mean 7857.603 min 5136.524 max 10315.139
+mte3_time(us) median 14188.897 mean 14438.623 min 9453.194 max 18931.682
+memory_bound median 0.196 mean 0.196 min 0.195 max 0.196
+cube_utilization(%) median 92.84 mean 92.835 min 92.598 max 92.979
+shape "200,2048;72,4096,512;72,128,64;72" blocks 8 count 12
+Duration(us) median 49760.18 mean 50695.438 min 36188.8 max 65589.918
+aicore_time(us) median 46265.945 mean 47127.053 min 33645.78 max 60966.05
+vec_time(us) median 30446.383 mean 31018.645 min 22139.465 max 40133.822
+mac_time(us) median 99.172 mean 101.347 min 72.125 max 130.727
+mte1_time(us) median 374.65 mean 381.783 min 272.473 max 493.857
+mte2_time(us) median 5882.359 mean 5988.256 min 4276.46 max 7749.881
+mte3_time(us) median 11006.062 mean 11208.994 min 8006.018 max 14491.721
+memory_bound median 0.193 mean 0.193 min 0.193 max 0.193
+cube_utilization(%) median 92.966 mean 92.962 min 92.945 max 92.978
+shape "8,2048;72,4096,512;72,128,64;72" blocks 8 count 12
+Duration(us) median 3399.101 mean 3586.938 min 2269.01 max 6785.599
+aicore_time(us) median 3157.32 mean 3332.352 min 2109.44 max 6303.64
+vec_time(us) median 2074.782 mean 2190.049 min 1383.187 max 4149.568
+mac_time(us) median 6.762 mean 7.138 min 4.508 max 13.523
+mte1_time(us) median 25.545 mean 26.965 min 17.03 max 51.09
+mte2_time(us) median 400.937 mean 423.112 min 267.26 max 801.08
+mte3_time(us) median 750.038 mean 791.582 min 503.296 max 1494.935
+memory_bound median 0.194 mean 0.194 min 0.193 max 0.194
+cube_utilization(%) median 92.904 mean 92.902 min 92.804 max 92.968
+shape "608,2048;72,4096,512;72,128,64;72" blocks 8 count 12
+Duration(us) median 64506.247 mean 65648.323 min 43000.467 max 86059.423
+aicore_time(us) median 59934.68 mean 60997.499 min 39956.18 max 79967.99
+vec_time(us) median 39477.285 mean 40169.863 min 26315.466 max 52650.683
+mac_time(us) median 135.596 mean 137.85 min 89.21 max 181.983
+mte1_time(us) median 486.233 mean 494.748 min 324.007 max 648.459
+mte2_time(us) median 7642.086 mean 7781.824 min 5093.407 max 10217.346
+mte3_time(us) median 14202.851 mean 14453.498 min 9468.828 max 18945.25
+memory_bound median 0.194 mean 0.194 min 0.193 max 0.195
+cube_utilization(%) median 92.919 mean 92.916 min 92.903 max 92.925
