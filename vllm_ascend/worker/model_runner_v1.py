@@ -353,6 +353,19 @@ def _warm_up_tp_communicator_before_model_load(
     return True
 
 
+def _select_draft_kernel_block_sizes(
+    kernel_block_sizes: Sequence[int | Sequence[int]],
+) -> list[int]:
+    """Select one concrete kernel block size for each draft cache group."""
+    selected_sizes: list[int] = []
+    for group_sizes in kernel_block_sizes:
+        if isinstance(group_sizes, Sequence):
+            if not group_sizes:
+                raise ValueError("Draft KV cache group has no supported kernel block size")
+            group_sizes = group_sizes[0]
+        selected_sizes.append(int(group_sizes))
+    return selected_sizes
+
 
 @dataclass
 class GraphCaptureContext:
@@ -4719,14 +4732,7 @@ class NPUModelRunner(GPUModelRunner):
                 | AscendDSparkProposer
                 | AscendDraftModelProposer,
             )
-            kernel_block_sizes = self.kernel_block_sizes
-            if isinstance(self.drafter, AscendDSparkProposer):
-                sizes = kernel_block_sizes if isinstance(kernel_block_sizes, list) else [kernel_block_sizes]
-                draft_kernel_block_sizes = [
-                    int(size[0] if isinstance(size, (list, tuple)) else size) for size in sizes
-                ]
-            else:
-                draft_kernel_block_sizes = kernel_block_sizes
+            draft_kernel_block_sizes = _select_draft_kernel_block_sizes(self.kernel_block_sizes)
             self.drafter.initialize_attn_backend(kv_cache_config, draft_kernel_block_sizes)
 
         if (
