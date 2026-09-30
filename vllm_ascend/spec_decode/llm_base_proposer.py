@@ -115,11 +115,22 @@ def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
+    arange: torch.Tensor
     # Models without extended/decoupled (xdrope) rope never set these, but
     # the proposer reads them unconditionally. Mirror the defaults that
     # NPUModelRunner310.__init__ applies to the runner for the same reason.
     uses_xdrope_dim: int = 0
     draft_uses_xdrope_dim: int = 0
+
+    def _ensure_query_start_loc_arange_capacity(self) -> None:
+        """Ensure ``arange`` includes the terminal query boundary."""
+        required_size = max(self.max_batch_size, self.max_num_tokens) + 1
+        if self.arange.numel() < required_size:
+            self.arange = torch.arange(
+                required_size,
+                device=self.arange.device,
+                dtype=self.arange.dtype,
+            )
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Expose the draft runner type during model construction.
