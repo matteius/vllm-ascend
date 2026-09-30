@@ -810,8 +810,10 @@ at::Tensor npu_qsa_sparse_attention_310_meta(
     const at::Tensor& block_table,
     const at::Tensor& query_start_loc,
     double scale,
-    int64_t compress_ratio)
+    int64_t compress_ratio,
+    int64_t logical_kv_heads)
 {
+    (void)logical_kv_heads;
     return at::empty_symint(query.sym_sizes(), query.options());
 }
 
