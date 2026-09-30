@@ -803,6 +803,26 @@ void qsa_index_cache_update_310_meta(
     (void)norm_eps;
 }
 
+void qwen4exp_ple_decode_310_meta(
+    const at::Tensor &projected,
+    const at::Tensor &hidden,
+    const at::Tensor &norm_key_weight,
+    const at::Tensor &norm_query_weight,
+    const at::Tensor &norm_conv_weight,
+    const at::Tensor &current_conv_weight,
+    at::Tensor &output,
+    double norm_eps)
+{
+    (void)projected;
+    (void)hidden;
+    (void)norm_key_weight;
+    (void)norm_query_weight;
+    (void)norm_conv_weight;
+    (void)current_conv_weight;
+    (void)output;
+    (void)norm_eps;
+}
+
 at::Tensor npu_recurrent_gated_delta_rule_meta(
     const at::Tensor& query,
     const at::Tensor& key,
@@ -2231,6 +2251,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_qsa_indexer_score_310", &vllm_ascend::meta::npu_qsa_indexer_score_310_meta);
     // qsa_index_cache_update_310
     ops.impl("qsa_index_cache_update_310", &vllm_ascend::meta::qsa_index_cache_update_310_meta);
+    // qwen4exp_ple_decode_310
+    ops.impl("qwen4exp_ple_decode_310", &vllm_ascend::meta::qwen4exp_ple_decode_310_meta);
     // chunk_gated_delta_rule_fwd_h
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o

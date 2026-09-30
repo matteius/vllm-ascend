@@ -8,12 +8,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BUILD_SCRIPT = REPO_ROOT / "csrc" / "build_aclnn.sh"
 QSA_SPARSE_ATTENTION_DEF = (
-    REPO_ROOT
-    / "csrc"
-    / "attention"
-    / "qsa_sparse_attention_v310"
-    / "op_host"
-    / "qsa_sparse_attention_v310_def.cpp"
+    REPO_ROOT / "csrc" / "attention" / "qsa_sparse_attention_v310" / "op_host" / "qsa_sparse_attention_v310_def.cpp"
 )
 
 QWEN4EXP_RUNTIME_OPS = {
@@ -25,6 +20,7 @@ QWEN4EXP_RUNTIME_OPS = {
     "qsa_index_cache_update_v310",
     "qsa_indexer_score_v310",
     "qsa_sparse_attention_v310",
+    "qwen4_exp_ple_decode_v310",
 }
 
 

@@ -69,6 +69,7 @@ SHARED_EXPERT_EXECUTIONS = (
     "replicated_deferred",
 )
 LM_HEAD_EXECUTIONS = ("float16", "w8a8_dynamic")
+PLE_PROJECTION_EXECUTIONS = ("float16", "w8a8_dynamic")
 
 
 class DeferredReduceStream:
@@ -116,6 +117,9 @@ def w4_config(config: object) -> dict | None:
         raise ValueError(f"lm_head_execution must be one of {LM_HEAD_EXECUTIONS}")
     if lm_head_execution == "w8a8_dynamic" and backend != NATIVE_INT4_BACKEND:
         raise ValueError("dynamic-W8A8 LM head requires the hardware-qualified native INT4 backend")
+    ple_projection_execution = metadata.get("ple_projection_execution", "float16")
+    if ple_projection_execution not in PLE_PROJECTION_EXECUTIONS:
+        raise ValueError(f"ple_projection_execution must be one of {PLE_PROJECTION_EXECUTIONS}")
     group = metadata.get("group_size")
     if type(group) is not int or group <= 0 or group % 2:
         raise ValueError("W4 group_size must be a positive even integer")

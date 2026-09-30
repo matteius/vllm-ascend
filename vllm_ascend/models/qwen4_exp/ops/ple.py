@@ -51,6 +51,46 @@ GATE_MAGNITUDE_FLOOR = 1e-6
 _DEFAULT_ACCUM_DTYPE = torch.float32
 
 
+def ple_decode_310(
+    projected: torch.Tensor,
+    hidden: torch.Tensor,
+    norm_key_w: torch.Tensor,
+    norm_query_w: torch.Tensor,
+    norm_conv_w: torch.Tensor,
+    current_conv_weight: torch.Tensor,
+    eps: float,
+    output: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Fused 310P decode PLE gate, current convolution tap, and residual.
+
+    ``projected`` is the contiguous ``[key, value]`` projection with shape
+    ``[T, HC*H + H]``. Consuming it whole avoids materializing two strided
+    split views before the device kernel runs.
+
+    ``output`` lets the breakable-graph callback write directly into its stable
+    graph-pool tensor, avoiding a second device copy before captured layers run.
+    """
+    if projected.device.type != "npu":
+        raise RuntimeError("ple_decode_310 is an Ascend NPU-only path")
+    op_namespace = getattr(torch.ops, "_C_ascend", None)
+    op = None if op_namespace is None else getattr(op_namespace, "qwen4exp_ple_decode_310", None)
+    if op is None:
+        raise RuntimeError("vLLM Ascend was built without the dedicated 310P PLE decode operator")
+    if output is None:
+        output = torch.empty_like(hidden)
+    op(
+        projected.contiguous(),
+        hidden.contiguous(),
+        norm_key_w.contiguous(),
+        norm_query_w.contiguous(),
+        norm_conv_w.contiguous(),
+        current_conv_weight.contiguous(),
+        output,
+        eps,
+    )
+    return output
+
+
 def _compute_dtype(input_dtype: torch.dtype, accum_dtype: torch.dtype) -> torch.dtype:
     """Precision reductions run in: the wider of input and accumulation dtype."""
     return torch.promote_types(input_dtype, accum_dtype)
@@ -224,6 +264,7 @@ def ple_short_conv(
 
 __all__ = [
     "GATE_MAGNITUDE_FLOOR",
+    "ple_decode_310",
     "ple_grouped_rmsnorm",
     "ple_gate",
     "ple_short_conv",

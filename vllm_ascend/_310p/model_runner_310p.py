@@ -1003,6 +1003,13 @@ class NPUModelRunner310(NPUModelRunner):
             query_start_loc, ngram_context = self._stage_qwen4exp_ple_inputs(num_tokens_padded)
             model_kwargs["query_start_loc"] = query_start_loc
             model_kwargs["ngram_context"] = ngram_context
+            # Synchronous Qwen4Exp scheduling already has authoritative token,
+            # boundary, and rollback-safe history buffers on the host. Let the
+            # PLE eager graph break hash those directly instead of launching a
+            # tiny device graph and synchronously copying its row IDs back.
+            model_kwargs["input_ids_cpu"] = self.input_ids.cpu[:num_tokens_padded]
+            model_kwargs["query_start_loc_cpu"] = self._ple_query_start_loc_cpu
+            model_kwargs["ngram_context_cpu"] = self._ple_context_cpu
 
         assert self.model is not None
         forward_context = get_forward_context()

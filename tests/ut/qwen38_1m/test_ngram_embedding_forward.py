@@ -166,6 +166,20 @@ def test_compute_ngram_ids_ple_dense_layer_id_shifts_hash():
     assert torch.equal(ids1, ref_compute_ngram_ids(toks, _ref_cfg(config, 1)))
 
 
+def test_large_cpu_hash_survives_registered_buffers_moving_off_cpu():
+    """Profile/prefill host hashing must not read NPU-owned module buffers."""
+    config = _make_config(ngram_size=3, heads_per_ngram=2)
+    with torch.device("meta"):
+        module = _module(config)
+    toks = _tokens(17, seed=310, sprinkle_eos=False)
+    history = torch.full((config.ngram_size - 1,), _EOS, dtype=torch.long)
+    expected = ref_compute_ngram_ids(toks, _ref_cfg(config))
+
+    assert module.layer_multipliers.device.type == "meta"
+    assert module._host_multiplier_tensor.device.type == "cpu"
+    assert torch.equal(_single_request(module, toks, history), expected)
+
+
 def test_eos_padded_sequence_start_matches_reference():
     """Token 0's predecessors are all the EOS pad (fresh segment)."""
     config = _make_config(ngram_size=4, heads_per_ngram=1)
@@ -228,6 +242,33 @@ def test_multi_request_packing_matches_per_request_reference():
     assert torch.equal(packed[0:5], ref_compute_ngram_ids(req_a, cfg))
     assert torch.equal(packed[5:12], ref_compute_ngram_ids(req_b, cfg))
     assert torch.equal(packed[12:13], ref_compute_ngram_ids(req_c, cfg))
+
+
+def test_small_cpu_hash_handles_multiple_requests_and_padding():
+    """The direct decode hash preserves request history and duplicate tails."""
+    config = _make_config(ngram_size=3, heads_per_ngram=2)
+    module = _module(config)
+    cfg = _ref_cfg(config)
+    req_a = torch.tensor([101])
+    req_b = torch.tensor([202])
+    padding = torch.tensor([303])
+    input_ids = torch.cat((req_a, req_b, padding))
+    query_start_loc = torch.tensor([0, 1, 2, 3, 3, 3], dtype=torch.long)
+    history = torch.tensor(
+        [
+            [11, 12],
+            [_EOS, 21],
+            [_EOS, _EOS],
+            [_EOS, _EOS],
+            [_EOS, _EOS],
+        ],
+        dtype=torch.long,
+    )
+
+    packed = module.compute_ngram_ids(input_ids, query_start_loc, history)
+    assert torch.equal(packed[0:1], ref_compute_ngram_ids(req_a, cfg, history=history[0]))
+    assert torch.equal(packed[1:2], ref_compute_ngram_ids(req_b, cfg, history=history[1]))
+    assert torch.equal(packed[2:3], ref_compute_ngram_ids(padding, cfg, history=history[2]))
 
 
 # =========================================================================== #

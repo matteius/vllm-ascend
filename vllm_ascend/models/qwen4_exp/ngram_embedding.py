@@ -71,6 +71,7 @@ logger = logging.getLogger(__name__)
 # the table cannot coexist with this reserve.
 OS_TRANSFER_RESERVE_BYTES = 48 * (1024**3)
 PLE_LAZY_SHARD_READ_WORKERS = 8
+PLE_HOST_HASH_DIRECT_MAX_TOKENS = 32
 
 # Default location for the file-backed shared table. tmpfs (/dev/shm) keeps the
 # pages resident and lets co-located workers share one physical copy.
@@ -544,6 +545,10 @@ class AscendPLELazyShardEmbeddingMethod(AscendPLEEmbeddingMethod):
         self._weight_map: dict[str, str] | None = None
         self._shard_memmaps: dict[int, np.memmap] = {}
         self._shard_files: dict[int, Path] = {}
+        # Decode touches rows from many shards every step. Recreating a thread
+        # pool for each tiny gather adds avoidable host latency and scheduler
+        # churn, so keep one lazy-spawned pool for the transport lifetime.
+        self._read_pool = ThreadPoolExecutor(max_workers=PLE_LAZY_SHARD_READ_WORKERS)
         super().__init__(
             num_embeddings,
             embedding_dim,
@@ -642,33 +647,31 @@ class AscendPLELazyShardEmbeddingMethod(AscendPLEEmbeddingMethod):
         shard = arr // self.shard_rows
         row = arr % self.shard_rows
         out = np.empty((arr.size, self.embedding_dim), dtype=np.float16)
-        shard_indices = np.unique(shard).tolist()
-        # Checkpoint shards are independent files. Cold, random row reads are
-        # dominated by page faults, so overlap those reads across shards while
-        # keeping each shard's output positions disjoint and in original order.
+        # Cold, random row reads are dominated by page faults, so keep a fixed
+        # number of reads in flight. Assigning positions directly avoids the
+        # unique/flatnonzero/sort machinery that otherwise dominates once the
+        # relevant pages are resident in the OS cache.
         self._load_weight_map()
 
-        def read_shard(shard_index: int) -> None:
-            positions = np.flatnonzero(shard == shard_index)
-            rows = row[positions]
-            mm = self._shard_memmap(shard_index)
-            if rows.size and int(rows.max()) >= mm.shape[0]:
-                raise IndexError(f"PLE row id {int(rows.max())} resolves past shard {shard_index} ({mm.shape[0]} rows)")
-            # Keep the output in token/head order, but read each shard in file
-            # order so adjacent pages can be coalesced by the storage stack.
-            order = np.argsort(rows)
-            positions = positions[order]
-            rows = rows[order]
-            out[positions] = mm[rows]
+        read_workers = min(PLE_LAZY_SHARD_READ_WORKERS, arr.size)
 
-        if len(shard_indices) == 1:
-            read_shard(shard_indices[0])
+        def read_positions(worker_index: int) -> None:
+            for position in range(worker_index, arr.size, read_workers):
+                shard_index = int(shard[position])
+                row_index = int(row[position])
+                mem = self._shard_memmap(shard_index)
+                if row_index >= mem.shape[0]:
+                    raise IndexError(f"PLE row id {row_index} resolves past shard {shard_index} ({mem.shape[0]} rows)")
+                out[position] = mem[row_index]
+
+        if read_workers == 1:
+            read_positions(0)
         else:
-            with ThreadPoolExecutor(max_workers=min(PLE_LAZY_SHARD_READ_WORKERS, len(shard_indices))) as pool:
-                list(pool.map(read_shard, shard_indices))
+            list(self._read_pool.map(read_positions, range(read_workers)))
         return torch.from_numpy(out)
 
     def close(self) -> None:
+        self._read_pool.shutdown(wait=True)
         for mem in self._shard_memmaps.values():
             raw = getattr(mem, "_mmap", None)
             if raw is not None:
@@ -947,6 +950,18 @@ class AscendQwen4ExpNGramEmbedding(nn.Module):
             ngram_heads=self.ngram_heads,
             ple_dense_layer_id=self.ple_dense_layer_id,
         )
+        # Small decode batches are hashed directly on the host. Keep immutable
+        # Python copies to avoid constructing and dispatching a dozen tiny Torch
+        # operations for one to a few tokens.
+        self._host_multipliers = tuple(multipliers)
+        self._host_vocab_sizes = tuple(sizes)
+        self._host_vocab_offsets = tuple(offsets)
+        # Keep vectorized host copies outside the module buffer registry. The
+        # serving model moves registered buffers to NPU, while profile/prefill
+        # can still hash CPU mirrors with more than the direct-path token cap.
+        self._host_multiplier_tensor = torch.tensor(multipliers, dtype=torch.int64, device="cpu")
+        self._host_vocab_size_tensor = torch.tensor(sizes, dtype=torch.int64, device="cpu")
+        self._host_vocab_offset_tensor = torch.tensor(offsets, dtype=torch.int64, device="cpu")
         # Padded table geometry (parity with the fork nvidia ngram_embedding):
         # the physical shards cover total_vocab_size rounded up to the
         # make_ngram_vocab_size_divisible_by boundary, split into split_ngram_parts.
@@ -1031,6 +1046,8 @@ class AscendQwen4ExpNGramEmbedding(nn.Module):
         query_start_loc = query_start_loc.reshape(-1).long()
         num_reqs = query_start_loc.numel() - 1
         num_tokens = input_ids.shape[0]
+        if input_ids.device.type == "cpu" and num_tokens <= PLE_HOST_HASH_DIRECT_MAX_TOKENS:
+            return self._compute_ngram_ids_small_cpu(input_ids, query_start_loc, ngram_context)
 
         positions = torch.arange(num_tokens, device=input_ids.device, dtype=torch.int64)
         packed = torch.full(
@@ -1061,17 +1078,73 @@ class AscendQwen4ExpNGramEmbedding(nn.Module):
 
         adjusted_columns = columns + self.ngram_size - 1
         id_blocks = []
+        if input_ids.device.type == "cpu":
+            layer_multipliers = self._host_multiplier_tensor
+            ngram_heads_vocab_sizes = self._host_vocab_size_tensor
+            ngram_heads_offsets = self._host_vocab_offset_tensor
+        else:
+            layer_multipliers = self.layer_multipliers
+            ngram_heads_vocab_sizes = self.ngram_heads_vocab_sizes
+            ngram_heads_offsets = self.ngram_heads_offsets
         for ngram in range(2, self.ngram_size + 1):
             start = (ngram - 2) * self.heads_per_ngram
             end = start + self.heads_per_ngram
-            mixed = shifted[0] * self.layer_multipliers[0]
+            mixed = shifted[0] * layer_multipliers[0]
             for index in range(1, ngram):
-                mixed = torch.bitwise_xor(mixed, shifted[index] * self.layer_multipliers[index])
-            sizes = self.ngram_heads_vocab_sizes[start:end]
-            offsets = self.ngram_heads_offsets[start:end]
+                mixed = torch.bitwise_xor(mixed, shifted[index] * layer_multipliers[index])
+            sizes = ngram_heads_vocab_sizes[start:end]
+            offsets = ngram_heads_offsets[start:end]
             ids = torch.remainder(mixed.unsqueeze(-1), sizes) + offsets
             id_blocks.append(ids[request_indices, adjusted_columns])
         return torch.cat(id_blocks, dim=-1)
+
+    def _compute_ngram_ids_small_cpu(
+        self,
+        input_ids: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        ngram_context: torch.Tensor,
+    ) -> torch.Tensor:
+        """Hash a small packed decode batch without Torch dispatcher overhead."""
+        token_values = input_ids.tolist()
+        boundaries = query_start_loc.tolist()
+        num_reqs = len(boundaries) - 1
+        contexts = ngram_context[:num_reqs].tolist()
+        output_rows: list[list[int]] = []
+        request_index = 0
+
+        for token_index, current_token in enumerate(token_values):
+            while request_index < num_reqs - 1 and token_index >= boundaries[request_index + 1]:
+                request_index += 1
+            request_start = boundaries[request_index]
+            local_position = token_index - request_start
+            history = contexts[request_index]
+
+            shifted = [current_token]
+            crossed_eos = False
+            for shift in range(1, self.ngram_size):
+                source_position = local_position - shift
+                if source_position >= 0:
+                    predecessor = token_values[request_start + source_position]
+                else:
+                    context_position = len(history) + source_position
+                    predecessor = history[context_position] if context_position >= 0 else self.eos_token_id
+                if crossed_eos or predecessor == self.eos_token_id:
+                    predecessor = self.eos_token_id
+                    crossed_eos = True
+                shifted.append(predecessor)
+
+            output_row: list[int] = []
+            for ngram in range(2, self.ngram_size + 1):
+                mixed = shifted[0] * self._host_multipliers[0]
+                for shift in range(1, ngram):
+                    mixed ^= shifted[shift] * self._host_multipliers[shift]
+                for _ in range(self.heads_per_ngram):
+                    output_column = len(output_row)
+                    output_row.append(
+                        mixed % self._host_vocab_sizes[output_column] + self._host_vocab_offsets[output_column]
+                    )
+            output_rows.append(output_row)
+        return torch.tensor(output_rows, dtype=torch.int64, device="cpu").reshape(-1, self.ngram_heads)
 
     # -- gather ------------------------------------------------------------- #
 

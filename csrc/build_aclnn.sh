@@ -266,6 +266,7 @@ if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
         "qsa_indexer_score_v310"
         "qsa_sparse_attention_v310"
         "qsa_gather_value_nz_v310"
+        "qwen4_exp_ple_decode_v310"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
         "chunk_kda_fwd"

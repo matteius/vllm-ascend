@@ -126,6 +126,11 @@ def test_metadata_and_eager_gate_fail_closed():
     with pytest.raises(ValueError, match="native INT4 backend"):
         w4_config(bad)
 
+    bad = config()
+    bad.ascend_expert_quantization["ple_projection_execution"] = "automatic"
+    with pytest.raises(ValueError, match="ple_projection_execution"):
+        w4_config(bad)
+
 
 @pytest.mark.parametrize(
     "mode,expected_width",
