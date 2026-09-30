@@ -61,6 +61,31 @@ def legacy_candidate_topk(scores: torch.Tensor, k: int) -> torch.Tensor:
     return candidate_indices.gather(1, order)[:, :k]
 
 
+def repaired_topk(scores: torch.Tensor, k: int) -> torch.Tensor:
+    """Use top-k for the cutoff, then repair only its equal-score slots."""
+    values, selected = torch.topk(scores, k, dim=1, sorted=True)
+    cutoff = values[:, -1:]
+    selected_ties = values == cutoff
+    indices = torch.arange(scores.shape[1], device=scores.device).expand_as(scores)
+    negative_inf = torch.full_like(scores, -torch.inf)
+    tie_priority = torch.where(scores == cutoff, -indices.to(scores.dtype), negative_inf)
+    tie_indices = torch.topk(tie_priority, k, dim=1, sorted=True).indices
+    tie_ranks = selected_ties.cumsum(dim=1) - 1
+    selected = torch.where(selected_ties, tie_indices.gather(1, tie_ranks.clamp_min(0)), selected)
+    # Restore the exact score-descending/index-ascending order by sorting only
+    # the 512 selected entries rather than the entire visible history.
+    order = torch.argsort(selected.to(torch.float32), dim=1, stable=True)
+    selected = selected.gather(1, order)
+    selected_values = scores.gather(1, selected)
+    order = torch.argsort(selected_values, dim=1, descending=True, stable=True)
+    return selected.gather(1, order)
+
+
+def raw_topk(scores: torch.Tensor, k: int) -> torch.Tensor:
+    """Fast device top-k without a guaranteed equal-score index tie-break."""
+    return torch.topk(scores, k, dim=1, sorted=True).indices
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--vendor-path", required=True)
@@ -127,9 +152,13 @@ def main() -> None:
     topk_width = min(512, scores.shape[1])
     stable_selection = legacy_candidate_topk(scores, topk_width)
     argsort_selection = _stable_topk_indices(scores, topk_width)
+    repaired_selection = repaired_topk(scores, topk_width)
+    raw_selection = raw_topk(scores, topk_width)
     torch_npu.npu.synchronize()
     if not torch.equal(stable_selection, argsort_selection):
         raise AssertionError("stable top-k differs from full stable argsort")
+    if not torch.equal(repaired_selection, argsort_selection):
+        raise AssertionError("repaired top-k differs from full stable argsort")
     matmul_selection = _stable_topk_indices(matmul_scores, topk_width)
     for name, fn in (
         (
@@ -161,7 +190,12 @@ def main() -> None:
             torch_npu.npu.synchronize()
             combined_times.append((time.perf_counter() - start) * 1000)
         samples[f"{name}_and_stable_topk"] = combined_times
-    for name, fn in (("candidate_topk_legacy", legacy_candidate_topk), ("stable_argsort", _stable_topk_indices)):
+    for name, fn in (
+        ("candidate_topk_legacy", legacy_candidate_topk),
+        ("raw_topk", raw_topk),
+        ("repaired_topk", repaired_topk),
+        ("stable_argsort", _stable_topk_indices),
+    ):
         times = []
         for _ in range(args.repeats):
             start = time.perf_counter()
@@ -173,7 +207,12 @@ def main() -> None:
     for width in (512, 1712, 4096, 8192, 32768):
         sweep_scores = torch.randn((args.tokens, width), dtype=torch.float32, device=device)
         sort_sweep[width] = {}
-        for name, fn in (("candidate_topk_legacy", legacy_candidate_topk), ("stable_argsort", _stable_topk_indices)):
+        for name, fn in (
+            ("candidate_topk_legacy", legacy_candidate_topk),
+            ("raw_topk", raw_topk),
+            ("repaired_topk", repaired_topk),
+            ("stable_argsort", _stable_topk_indices),
+        ):
             fn(sweep_scores, min(512, width))
             torch_npu.npu.synchronize()
             times = []
@@ -191,6 +230,9 @@ def main() -> None:
                 "table_blocks": args.table_blocks,
                 "bounded_blocks": bounded_blocks,
                 "wide_matmul_selection_equal": torch.equal(matmul_selection, argsort_selection),
+                "repaired_selection_equal": torch.equal(repaired_selection, argsort_selection),
+                "raw_selection_equal": torch.equal(raw_selection, argsort_selection),
+                "raw_selection_mismatches": torch.count_nonzero(raw_selection != argsort_selection).item(),
                 "wide_matmul_max_score_error": max_score_error,
                 "milliseconds": samples,
                 "sort_sweep_ms": sort_sweep,

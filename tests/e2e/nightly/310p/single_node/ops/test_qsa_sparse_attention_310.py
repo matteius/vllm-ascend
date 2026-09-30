@@ -5,7 +5,10 @@ import pytest
 import torch
 import torch_npu
 
-from vllm_ascend.models.qwen4_exp.ops.qsa_batched_attention_310 import qsa_batched_prefill_310
+from vllm_ascend.models.qwen4_exp.ops.qsa_batched_attention_310 import (
+    QSAPrefillGatherStreams,
+    qsa_batched_prefill_310,
+)
 from vllm_ascend.models.qwen4_exp.ops.qsa_index_cache_310 import (
     qsa_index_cache_shape,
     qsa_index_cache_update_310,
@@ -29,7 +32,7 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, enable_custom_op
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("ratio", [3, 4])
 @pytest.mark.parametrize("capacity", [512, 5856])
-def test_qsa_position_geometry_preserves_int64_and_floor_on_npu(dtype, ratio, capacity):
+def test_qsa_position_geometry_preserves_input_dtype_and_floor_on_npu(dtype, ratio, capacity):
     if not torch_npu.npu.is_available() or "310" not in torch_npu.npu.get_device_name(0):
         pytest.skip("requires an Ascend 310P NPU")
     torch_npu.npu.set_compile_mode(jit_compile=False)
@@ -46,7 +49,7 @@ def test_qsa_position_geometry_preserves_int64_and_floor_on_npu(dtype, ratio, ca
         [p + 1 - start for p, start in zip(values, expected_starts)],
     )
     for actual, reference in zip((groups, starts, counts), expected):
-        torch.testing.assert_close(actual.cpu(), torch.tensor(reference, dtype=torch.int64), rtol=0, atol=0)
+        torch.testing.assert_close(actual.cpu(), torch.tensor(reference, dtype=dtype), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(
@@ -60,6 +63,7 @@ def test_qsa_position_geometry_preserves_int64_and_floor_on_npu(dtype, ratio, ca
         (64, 256, 0.1),
         (64, 512, 0.1),
         (64, 512, 4.0),
+        (65, 512, 0.1),
     ],
 )
 @pytest.mark.parametrize("use_visible_blocks", [False, True])
@@ -103,6 +107,7 @@ def test_batched_prefill_matches_native_with_paged_cache_and_tail(
         query_start_loc,
         scale=256**-0.5,
         visible_blocks=num_blocks if use_visible_blocks else None,
+        gather_streams=QSAPrefillGatherStreams().get(),
     )
     # Compare on CPU: this test need not invoke torch_npu's unsupported
     # float64 IsClose tolerance path after the kernels have completed.
@@ -125,6 +130,217 @@ def test_batched_prefill_matches_native_with_paged_cache_and_tail(
 
         grouped = grouped_decode()
         torch.testing.assert_close(grouped.cpu(), expected.cpu(), rtol=1e-2, atol=2e-3)
+
+
+def test_multi_request_grouped_decode_matches_native_paged_attention() -> None:
+    if not torch_npu.npu.is_available() or "310" not in torch_npu.npu.get_device_name(0):
+        pytest.skip("requires an Ascend 310P NPU")
+
+    enable_custom_op()
+    torch.manual_seed(317)
+    device = "npu:0"
+    query_lens = [3, 3]
+    num_tokens = sum(query_lens)
+    block_size, num_groups = 128, 512
+    num_query_heads, num_kv_heads, head_dim = 24, 2, 256
+    request_blocks = (num_groups * 4 + 4 + block_size - 1) // block_size
+    cache_blocks = request_blocks * len(query_lens) + 17
+    query = torch.randn((num_tokens, num_query_heads, head_dim), dtype=torch.float16, device=device)
+    key_cache = torch_npu.npu_format_cast(
+        (torch.randn((cache_blocks, num_kv_heads * head_dim // 16, block_size, 16)) * 0.1).half().to(device),
+        29,
+    )
+    value_cache = torch_npu.npu_format_cast(
+        (torch.randn((cache_blocks, num_kv_heads * head_dim // 16, block_size, 16)) * 0.1).half().to(device),
+        29,
+    )
+    selection = QSAGroupSelection(
+        group_indices=torch.stack(
+            [torch.randperm(num_groups, device=device, dtype=torch.int32) for _ in range(num_tokens)]
+        ),
+        group_counts=torch.full((num_tokens,), num_groups, dtype=torch.int32, device=device),
+        tail_starts=torch.full((num_tokens,), num_groups * 4, dtype=torch.int32, device=device),
+        tail_counts=torch.arange(num_tokens, dtype=torch.int32, device=device) % 4,
+    )
+    block_table = torch.stack(
+        [torch.randperm(cache_blocks, device=device, dtype=torch.int32)[:request_blocks] for _ in query_lens]
+    )
+    query_start_loc = torch.tensor([0, query_lens[0], num_tokens], dtype=torch.int32, device=device)
+    expected = qsa_sparse_attention_310(
+        query,
+        key_cache,
+        value_cache,
+        selection,
+        block_table,
+        query_start_loc,
+    )
+    group_list = torch.arange(1, num_tokens * num_kv_heads + 1, dtype=torch.int64, device=device) * (
+        num_query_heads // num_kv_heads
+    )
+    prefill_actual = qsa_batched_prefill_310(
+        query,
+        key_cache,
+        value_cache,
+        selection,
+        block_table,
+        query_start_loc,
+        scale=head_dim**-0.5,
+        query_lens=query_lens,
+    )
+    decode_actual = qsa_batched_prefill_310(
+        query,
+        key_cache,
+        value_cache,
+        selection,
+        block_table,
+        query_start_loc,
+        scale=head_dim**-0.5,
+        decode_group_list=group_list,
+        query_lens=query_lens,
+    )
+    expected_cpu = expected.cpu()
+    torch.testing.assert_close(prefill_actual.cpu(), expected_cpu, rtol=1e-2, atol=2e-3)
+    torch.testing.assert_close(decode_actual.cpu(), expected_cpu, rtol=1e-2, atol=2e-3)
+
+
+def test_multi_request_grouped_decode_graph_replay_refreshes_paged_inputs() -> None:
+    if not torch_npu.npu.is_available() or "310" not in torch_npu.npu.get_device_name(0):
+        pytest.skip("requires an Ascend 310P NPU")
+
+    enable_custom_op()
+    torch.npu.set_device(0)
+    torch.npu.set_compile_mode(jit_compile=False)
+    generator = torch.Generator().manual_seed(319)
+    device = "npu:0"
+    query_lens = [3, 3]
+    num_tokens = sum(query_lens)
+    block_size, num_groups = 128, 512
+    num_query_heads, num_kv_heads, head_dim = 24, 2, 256
+    request_blocks = (num_groups * 4 + 4 + block_size - 1) // block_size
+    cache_blocks = request_blocks * len(query_lens) + 17
+    cache_shape = (cache_blocks, num_kv_heads * head_dim // 16, block_size, 16)
+    query = torch.zeros((num_tokens, num_query_heads, head_dim), dtype=torch.float16, device=device)
+    key_cache = torch_npu.npu_format_cast(torch.zeros(cache_shape, dtype=torch.float16, device=device), 29)
+    value_cache = torch_npu.npu_format_cast(torch.zeros(cache_shape, dtype=torch.float16, device=device), 29)
+    selection = QSAGroupSelection(
+        group_indices=torch.zeros((num_tokens, num_groups), dtype=torch.int32, device=device),
+        group_counts=torch.full((num_tokens,), num_groups, dtype=torch.int32, device=device),
+        tail_starts=torch.full((num_tokens,), num_groups * 4, dtype=torch.int32, device=device),
+        tail_counts=torch.ones(num_tokens, dtype=torch.int32, device=device),
+    )
+    block_table = torch.zeros((len(query_lens), request_blocks), dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, query_lens[0], num_tokens], dtype=torch.int32, device=device)
+    group_list = torch.arange(1, num_tokens * num_kv_heads + 1, dtype=torch.int64, device=device) * (
+        num_query_heads // num_kv_heads
+    )
+
+    def grouped() -> torch.Tensor:
+        return qsa_batched_prefill_310(
+            query,
+            key_cache,
+            value_cache,
+            selection,
+            block_table,
+            query_start_loc,
+            scale=head_dim**-0.5,
+            decode_group_list=group_list,
+            query_lens=query_lens,
+        )
+
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        for _ in range(3):
+            grouped()
+    torch.npu.current_stream().wait_stream(stream)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, stream=stream):
+        captured = grouped()
+
+    previous = None
+    for phase in range(2):
+        query.copy_((torch.randn(query.shape, generator=generator) * 0.5).half())
+        key_cache.copy_((torch.randn(cache_shape, generator=generator) * (phase + 1)).half().to(device))
+        value_cache.copy_((torch.randn(cache_shape, generator=generator) * 0.1).half().to(device))
+        selection.group_indices.copy_(
+            torch.stack([torch.randperm(num_groups, generator=generator) for _ in range(num_tokens)]).to(
+                device=device, dtype=torch.int32
+            )
+        )
+        block_table.copy_(
+            torch.stack([torch.randperm(cache_blocks, generator=generator)[:request_blocks] for _ in query_lens]).to(
+                device=device, dtype=torch.int32
+            )
+        )
+        expected = qsa_sparse_attention_310(
+            query,
+            key_cache,
+            value_cache,
+            selection,
+            block_table,
+            query_start_loc,
+        )
+        captured.fill_(float("nan"))
+        graph.replay()
+        actual = captured.cpu()
+        torch.testing.assert_close(actual, expected.cpu(), rtol=1e-2, atol=2e-3)
+        assert torch.isfinite(actual).all()
+        if previous is not None:
+            assert not torch.equal(actual, previous)
+        previous = actual
+
+
+def test_multi_request_indexer_gemm_matches_individual_requests() -> None:
+    if not torch_npu.npu.is_available() or "310" not in torch_npu.npu.get_device_name(0):
+        pytest.skip("requires an Ascend 310P NPU")
+
+    enable_custom_op()
+    torch.manual_seed(318)
+    device = "npu:0"
+    query_lens = [3, 3]
+    num_tokens = sum(query_lens)
+    pages, groups_per_page = 128, 16
+    query = torch.randn((num_tokens, 4, 128), dtype=torch.float16, device=device)
+    cache = torch.randn((pages * 2 + 13, groups_per_page + 3, 128), dtype=torch.float16, device=device)
+    block_table = torch.stack(
+        [torch.randperm(cache.shape[0], device=device, dtype=torch.int32)[:pages] for _ in query_lens]
+    )
+    positions = torch.full((num_tokens,), pages * groups_per_page * 4 - 1, dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, query_lens[0], num_tokens], dtype=torch.int32, device=device)
+    actual = qsa_indexer_select_groups_310(
+        query,
+        cache,
+        block_table,
+        query_start_loc,
+        positions,
+        compress_ratio=4,
+        token_topk=2048,
+        max_matmul_decode_tokens=8,
+        query_lens=query_lens,
+    )
+    expected_parts = []
+    start = 0
+    for request, length in enumerate(query_lens):
+        stop = start + length
+        expected_parts.append(
+            qsa_indexer_select_groups_310(
+                query[start:stop],
+                cache,
+                block_table[request : request + 1],
+                torch.tensor([0, length], dtype=torch.int32, device=device),
+                positions[start:stop],
+                compress_ratio=4,
+                token_topk=2048,
+                max_matmul_decode_tokens=8,
+            )
+        )
+        start = stop
+    expected = QSAGroupSelection(
+        *(torch.cat([getattr(part, field) for part in expected_parts], dim=0) for field in actual.__dataclass_fields__)
+    )
+    for field in actual.__dataclass_fields__:
+        torch.testing.assert_close(getattr(actual, field), getattr(expected, field), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("num_tokens", [1, 2, 3, 5, 8])

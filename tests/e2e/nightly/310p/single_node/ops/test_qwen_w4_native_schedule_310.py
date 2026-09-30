@@ -103,6 +103,23 @@ def test_pack_meta_shapes_and_invalid_inputs():
             op(value)
 
 
+def test_pack_accepts_full_2k_prefill_route_capacity():
+    rows = 20480
+    low, high, scale, total = pack_activation_device(torch.zeros((rows, 256), device="npu", dtype=torch.float16))
+    assert [tuple(t.shape) for t in (low, high, scale, total)] == [
+        (rows, 128),
+        (rows, 128),
+        (rows, 2, 8),
+        (rows, 2, 8),
+    ]
+    # q=0 decomposes to low=-8 and high=0; two packed -8 nibbles are
+    # represented by the signed byte 0x88 (-120).
+    assert torch.count_nonzero(low != -120).item() == 0
+    assert torch.count_nonzero(high).item() == 0
+    assert torch.count_nonzero(scale != 1).item() == 0
+    assert torch.count_nonzero(total).item() == 0
+
+
 @pytest.mark.parametrize("rows", [3, 81, 129])
 @pytest.mark.parametrize("outputs", [128, 640, 1280])
 def test_pack_and_matmul_changing_input_graph(rows, outputs):

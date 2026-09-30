@@ -66,7 +66,7 @@ def test_native_position_geometry_reuses_one_quotient(dtype, ratio, capacity, mo
     values = [-2, -1, 0, ratio - 1, ratio, 511, 512, 23423, 131071, 2**31 - 2]
     if dtype == torch.int64:
         values.append(2**40)
-    # Noncontiguous input must not change integer arithmetic or narrow INT64.
+    # Noncontiguous input must not change integer arithmetic or dtype.
     positions = torch.tensor([[p, 0] for p in values], dtype=dtype)[:, 0]
     division = torch.div
     calls = []
@@ -81,13 +81,13 @@ def test_native_position_geometry_reuses_one_quotient(dtype, ratio, capacity, mo
     expected_starts = [(p + 1) // ratio * ratio for p in values]
     expected_counts = [p + 1 - start for p, start in zip(values, expected_starts)]
     for actual, expected in zip((groups, starts, counts), (expected_groups, expected_starts, expected_counts)):
-        torch.testing.assert_close(actual, torch.tensor(expected, dtype=torch.int64))
+        torch.testing.assert_close(actual, torch.tensor(expected, dtype=dtype))
     assert calls == ["floor"]
 
 
 def test_native_position_geometry_empty_batch():
     outputs = _qsa_position_geometry(torch.empty(0, dtype=torch.int32), _RATIO, 512)
-    assert all(output.shape == (0,) and output.dtype == torch.int64 for output in outputs)
+    assert all(output.shape == (0,) and output.dtype == torch.int32 for output in outputs)
 
 
 def _make_indexer(*, budget: int, ratio: int = _RATIO) -> AscendQwen4ExpQSAIndexer:

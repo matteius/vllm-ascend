@@ -13,6 +13,10 @@ from tests.ut.qwen38_1m.test_w4_moe import config
 from vllm_ascend.models.qwen4_exp.dtype_policy import Qwen4ExpDtypePolicy
 from vllm_ascend.models.qwen4_exp.w4_moe import (
     MAX_CUBE_ROUTES,
+    MAX_GROUPED_NATIVE_ROUTES,
+    MAX_GROUPED_NATIVE_TOKENS,
+    MAX_GROUPED_W4A16_ROUTES,
+    MAX_GROUPED_W4A16_TOKENS,
     MAX_W4A16_ROUTES,
     W4SparseMoE,
     require_eager_w4,
@@ -36,6 +40,20 @@ def make_layer(backend="cube_310_grouped"):
         cfg.ascend_expert_quantization["activation_quantization"] = "int8_per_group"
     require_eager_w4(SimpleNamespace(enforce_eager=False), cfg)
     return W4SparseMoE(config=cfg, dtype_policy=Qwen4ExpDtypePolicy(), expert_sharding=(1, 2))
+
+
+@pytest.mark.parametrize(
+    "backend,token_limit,route_limit",
+    [
+        ("cube_310_grouped", MAX_GROUPED_W4A16_TOKENS, MAX_GROUPED_W4A16_ROUTES),
+        (NATIVE_INT4_BACKEND, MAX_GROUPED_NATIVE_TOKENS, MAX_GROUPED_NATIVE_ROUTES),
+    ],
+)
+def test_grouped_prefill_chunk_respects_backend_route_workspace(backend, token_limit, route_limit):
+    layer = make_layer(backend)
+    assert layer.grouped_chunk_tokens == min(token_limit, route_limit // layer.top_k)
+    assert layer.grouped_chunk_tokens * layer.top_k <= route_limit
+    assert layer.grouped_chunk_tokens == (2048 if backend == NATIVE_INT4_BACKEND else 512)
 
 
 @pytest.mark.parametrize("tokens", [1, 8, 27, 128, 513])

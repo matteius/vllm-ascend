@@ -19,6 +19,7 @@ def _qsa_gather_nz_310(
     *,
     head_dim: int,
     transpose_output: bool,
+    output: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Gather selected QSA K/V without materializing an ND tensor.
 
@@ -57,12 +58,15 @@ def _qsa_gather_nz_310(
         if transpose_output
         else (token_count, num_kv_heads, padded_tokens, head_dim)
     )
-    output = torch_npu.empty_with_format(
-        size=output_shape,
-        dtype=cache.dtype,
-        device=cache.device,
-        acl_format=29,
-    )
+    if output is None:
+        output = torch_npu.empty_with_format(
+            size=output_shape,
+            dtype=cache.dtype,
+            device=cache.device,
+            acl_format=29,
+        )
+    elif output.shape != output_shape or output.dtype != cache.dtype or output.device != cache.device:
+        raise ValueError("QSA NZ gather output has incompatible shape, dtype, or device")
     namespace = getattr(torch.ops, "_C_ascend", None)
     op = None if namespace is None else getattr(namespace, "qsa_gather_value_nz_310", None)
     if op is None:
@@ -88,9 +92,17 @@ def qsa_gather_value_nz_310(
     block_table: torch.Tensor,
     *,
     head_dim: int,
+    output: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Gather selected QSA values in ``[T,H,S,D]`` NZ layout."""
-    return _qsa_gather_nz_310(value_cache, selection, block_table, head_dim=head_dim, transpose_output=False)
+    return _qsa_gather_nz_310(
+        value_cache,
+        selection,
+        block_table,
+        head_dim=head_dim,
+        transpose_output=False,
+        output=output,
+    )
 
 
 def qsa_gather_key_transposed_nz_310(
@@ -99,9 +111,17 @@ def qsa_gather_key_transposed_nz_310(
     block_table: torch.Tensor,
     *,
     head_dim: int,
+    output: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Gather selected QSA keys directly as a ``[T,H,D,S]`` NZ score operand."""
-    return _qsa_gather_nz_310(key_cache, selection, block_table, head_dim=head_dim, transpose_output=True)
+    return _qsa_gather_nz_310(
+        key_cache,
+        selection,
+        block_table,
+        head_dim=head_dim,
+        transpose_output=True,
+        output=output,
+    )
 
 
 __all__ = ["qsa_gather_key_transposed_nz_310", "qsa_gather_value_nz_310"]

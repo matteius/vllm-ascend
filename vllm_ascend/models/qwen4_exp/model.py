@@ -131,7 +131,7 @@ from .ngram_embedding import (
     AscendPLEPinnedHostEmbeddingMethod,
     AscendQwen4ExpNGramEmbedding,
 )
-from .ops.qsa_batched_attention_310 import qsa_batched_prefill_310
+from .ops.qsa_batched_attention_310 import QSAPrefillGatherStreams, qsa_batched_prefill_310
 from .ops.qsa_index_cache_310 import qsa_index_cache_update_310
 from .ops.qsa_indexer import QSAGroupSelection, copy_group_selection_into, qsa_indexer_select_groups_310
 from .ops.qsa_sparse_attention_310 import qsa_sparse_attention_310
@@ -1268,12 +1268,14 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
         dtype_policy: Qwen4ExpDtypePolicy,
         prefix: str = "",
         expert_sharding: tuple[int, int] = (0, 1),
+        prefill_gather_streams: QSAPrefillGatherStreams | None = None,
     ) -> None:
         super().__init__()
         _register_in_static_forward_context(prefix, self)
         self.prefix = prefix
         self.compute_dtype = dtype_policy.accumulation_dtype
         self.params_dtype = dtype_policy.qsa_main_dtype
+        self.prefill_gather_streams = prefill_gather_streams
         expert_quant = w4_config(config)
         self.reuse_query_rope = expert_quant is None or expert_quant["backend"] in CUBE_DEVICE_ROUTED_BACKENDS
         # QSA arithmetic is independent of expert quantization. Both W8 and
@@ -1331,6 +1333,8 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
         vllm_config = get_current_vllm_config_or_none()
         device_config = getattr(vllm_config, "device_config", None)
         device = getattr(device_config, "device", torch.device("cpu"))
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        max_num_seqs = max(1, int(getattr(scheduler_config, "max_num_seqs", 1)))
         # Share the constant axis map as well as per-forward query tables.
         # Creating a tensor from this Python list during MRoPE capture would
         # issue a prohibited synchronous host-to-device copy.
@@ -1345,7 +1349,7 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
             "_qsa_decode_group_list",
             torch.arange(
                 1,
-                self._batched_qsa_max_decode_tokens * self.num_kv_heads + 1,
+                self._batched_qsa_max_decode_tokens * max_num_seqs * self.num_kv_heads + 1,
                 dtype=torch.int64,
                 device=device,
             )
@@ -1354,12 +1358,27 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
         )
 
     def _can_use_batched_qsa_decode(self, metadata: object, num_tokens: int, selected_groups: int) -> bool:
+        query_lens_cpu = getattr(metadata, "query_lens_cpu", None)
+        max_query_tokens = num_tokens
+        if query_lens_cpu is not None and query_lens_cpu.device.type == "cpu" and query_lens_cpu.numel():
+            max_query_tokens = int(query_lens_cpu.max().item())
         return (
             metadata.num_decodes > 0
             and metadata.num_prefills == 0
-            and num_tokens <= self._batched_qsa_max_decode_tokens
+            and max_query_tokens <= self._batched_qsa_max_decode_tokens
             and selected_groups >= _BATCHED_QSA_MIN_DECODE_GROUPS
         )
+
+    @staticmethod
+    def _has_qsa_request_boundaries(metadata: object) -> bool:
+        """Whether packed QSA rows can be split without reading the NPU."""
+        block_tables = getattr(metadata, "block_tables", None)
+        if block_tables is None or block_tables.ndim != 2:
+            return False
+        query_lens_cpu = getattr(metadata, "query_lens_cpu", None)
+        if query_lens_cpu is None:
+            return block_tables.shape[0] == 1
+        return bool(query_lens_cpu.device.type == "cpu" and query_lens_cpu.numel() == block_tables.shape[0])
 
     def _reduce_output(self, output: torch.Tensor) -> torch.Tensor:
         if self.tp_size > 1:
@@ -1748,10 +1767,10 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
 
                 num_groups = self.indexer.token_topk // self.indexer.compress_ratio
                 selection = QSAGroupSelection(
-                    group_indices=torch.empty((seq_len, num_groups), dtype=torch.int64, device=index_q.device),
-                    group_counts=torch.empty(seq_len, dtype=torch.int64, device=index_q.device),
-                    tail_starts=torch.empty(seq_len, dtype=torch.int64, device=index_q.device),
-                    tail_counts=torch.empty(seq_len, dtype=torch.int64, device=index_q.device),
+                    group_indices=torch.empty((seq_len, num_groups), dtype=torch.int32, device=index_q.device),
+                    group_counts=torch.empty(seq_len, dtype=torch.int32, device=index_q.device),
+                    tail_starts=torch.empty(seq_len, dtype=torch.int32, device=index_q.device),
+                    tail_counts=torch.empty(seq_len, dtype=torch.int32, device=index_q.device),
                 )
                 weak_index_q = weak_ref_tensor(index_q)
                 weak_index_cache = weak_ref_tensor(index_cache)
@@ -1766,6 +1785,8 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
                 def select_current_groups() -> None:
                     current_metadata = get_forward_context().attn_metadata[self.prefix]
                     current_seq_lens = getattr(current_metadata, "seq_lens_cpu", None)
+                    current_query_lens_cpu = getattr(current_metadata, "query_lens_cpu", None)
+                    current_query_lens = None if current_query_lens_cpu is None else current_query_lens_cpu.tolist()
                     current_max_groups = None
                     if (
                         current_seq_lens is not None
@@ -1783,11 +1804,14 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
                         token_topk=self.indexer.token_topk,
                         max_visible_groups=current_max_groups,
                         max_matmul_decode_tokens=self._batched_qsa_max_decode_tokens,
+                        query_lens=current_query_lens,
                     )
                     copy_group_selection_into(weak_selection, current)
 
                 capture.add_eager(select_current_groups)
             else:
+                query_lens_cpu = getattr(metadata, "query_lens_cpu", None)
+                query_lens = None if query_lens_cpu is None else query_lens_cpu.tolist()
                 selection = qsa_indexer_select_groups_310(
                     index_q,
                     index_cache,
@@ -1798,15 +1822,22 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
                     token_topk=self.indexer.token_topk,
                     max_visible_groups=max_visible_groups,
                     max_matmul_decode_tokens=self._batched_qsa_max_decode_tokens,
+                    query_lens=query_lens,
                 )
             sparse_attention = qsa_sparse_attention_310
             use_batched_prefill = (
                 metadata.num_prefills > 0 and metadata.num_decodes == 0 and seq_len >= _BATCHED_QSA_MIN_PREFILL_TOKENS
             )
             use_batched_decode = self._can_use_batched_qsa_decode(metadata, seq_len, selection.group_indices.shape[1])
-            if metadata.block_tables.shape[0] == 1 and (use_batched_prefill or use_batched_decode):
+            query_lens_cpu = getattr(metadata, "query_lens_cpu", None)
+            if (use_batched_prefill or use_batched_decode) and self._has_qsa_request_boundaries(metadata):
                 sparse_attention = qsa_batched_prefill_310
             sparse_kwargs = {}
+            if sparse_attention is qsa_batched_prefill_310:
+                if query_lens_cpu is not None:
+                    sparse_kwargs["query_lens"] = query_lens_cpu.tolist()
+                if use_batched_prefill and self.prefill_gather_streams is not None:
+                    sparse_kwargs["gather_streams"] = self.prefill_gather_streams.get()
             if sparse_attention is qsa_batched_prefill_310 and use_batched_decode:
                 sparse_kwargs["decode_group_list"] = self._qsa_decode_group_list
             if sparse_attention is qsa_batched_prefill_310 and max_visible_tokens is not None:
@@ -2402,6 +2433,7 @@ class AscendQwen4ExpDecoderLayer(nn.Module):
         checkpoint_dir: str | None = None,
         num_speculative_tokens: int = 0,
         deferred_reduce_stream: DeferredReduceStream | None = None,
+        qsa_prefill_gather_streams: QSAPrefillGatherStreams | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -2464,6 +2496,7 @@ class AscendQwen4ExpDecoderLayer(nn.Module):
                     dtype_policy=dtype_policy,
                     prefix=attn_prefix,
                     expert_sharding=expert_sharding,
+                    prefill_gather_streams=qsa_prefill_gather_streams,
                 )
             else:
                 self.attention = _EagerDenseAttention(config=config, dtype_policy=dtype_policy, prefix=attn_prefix)
@@ -2596,6 +2629,9 @@ class AscendQwen4ExpModel(nn.Module):
             if metadata is not None and metadata.get("shared_expert_execution") == "replicated_deferred"
             else None
         )
+        self.qsa_prefill_gather_streams = (
+            QSAPrefillGatherStreams() if getattr(config, "indexer_n_heads", None) is not None else None
+        )
         self.layers = nn.ModuleList(
             get_offloader().wrap_modules(
                 (
@@ -2609,6 +2645,7 @@ class AscendQwen4ExpModel(nn.Module):
                         checkpoint_dir=self.checkpoint_dir,
                         num_speculative_tokens=getattr(vllm_config, "num_speculative_tokens", 0),
                         deferred_reduce_stream=self.deferred_reduce_stream,
+                        qsa_prefill_gather_streams=self.qsa_prefill_gather_streams,
                     )
                     for idx in range(config.num_hidden_layers)
                 ),

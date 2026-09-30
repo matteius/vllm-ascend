@@ -104,6 +104,17 @@ def test_empty_experts_m_tails_and_peer_zero(rows, native):
     assert torch.isfinite(actual).all()
 
 
+def test_native_grouped_kernel_accepts_full_2k_prefill_route_capacity():
+    rows = 20480
+    data = values(rows)
+    # All routes are peer-owned. This exercises the extended route contract
+    # and full output overwrite without spending the test on a large GEMM.
+    ends = torch.zeros(3, dtype=torch.int64)
+    actual = invoke(device_arguments(data, ends, True), True)
+    assert actual.shape == (rows, data[1].shape[1])
+    assert torch.count_nonzero(actual).item() == 0
+
+
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("inputs,outputs", [(2560, 1280), (640, 2560)])
 def test_real_projection_shapes(inputs, outputs, native):

@@ -55,9 +55,13 @@ MAX_FUSED_DOWN_ROUTES = 30
 FUSED_DOWN_INPUTS = 640
 FUSED_DOWN_OUTPUTS = 2560
 # Bound route expansion and the device count matrix independently of the
-# configured context window. Shape-only chunking never inspects device ids.
-MAX_GROUPED_TOKENS = 512
-MAX_GROUPED_ROUTES = 5120
+# configured context window. Keep the established W4A16 workspace unchanged.
+# Native INT4 streams the route dimension through bounded on-chip tiles; its
+# pack and grouped-matmul operators expose a 20,480-route prefill contract.
+MAX_GROUPED_W4A16_TOKENS = 512
+MAX_GROUPED_W4A16_ROUTES = 5120
+MAX_GROUPED_NATIVE_TOKENS = 2048
+MAX_GROUPED_NATIVE_ROUTES = 20480
 # Concurrent shared/routed GEMMs help only while decode leaves Cube headroom.
 # Multi-request MTP can split work into two-row MoE calls, where the concurrent
 # GEMMs contend and regress aggregate throughput. Restrict overlap to one row.
@@ -314,7 +318,12 @@ class W4SparseMoE(nn.Module):
         self.top_k = int(config.num_experts_per_tok)
         if self.top_k <= 0 or self.top_k > int(config.num_experts):
             raise ValueError("W4 top_k must be positive and no larger than num_experts")
-        self.grouped_chunk_tokens = min(MAX_GROUPED_TOKENS, MAX_GROUPED_ROUTES // self.top_k)
+        grouped_token_limit, grouped_route_limit = (
+            (MAX_GROUPED_NATIVE_TOKENS, MAX_GROUPED_NATIVE_ROUTES)
+            if self.native_int4
+            else (MAX_GROUPED_W4A16_TOKENS, MAX_GROUPED_W4A16_ROUTES)
+        )
+        self.grouped_chunk_tokens = min(grouped_token_limit, grouped_route_limit // self.top_k)
         if self.grouped_routing and self.grouped_chunk_tokens == 0:
             raise ValueError("W4 grouped top_k exceeds the bounded route workspace")
         self.expert_tp_rank, self.expert_tp_size = expert_sharding

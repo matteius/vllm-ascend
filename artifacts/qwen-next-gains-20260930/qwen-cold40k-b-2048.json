@@ -1,0 +1,21 @@
+{
+  "concurrency": 1,
+  "max_tokens_per_stream": 64,
+  "aggregate_decode_tok_s": 32.102833001237904,
+  "median_stream_decode_tok_s": 32.102833001237904,
+  "warmup": null,
+  "streams": [
+    {
+      "stream": 0,
+      "prompt_tokens": 40028,
+      "completion_tokens": 64,
+      "ttft_s": 120.55815387799521,
+      "decode_s": 1.9624436260055518,
+      "decode_tok_s": 32.102833001237904,
+      "started": 72100.736693329,
+      "first": 72221.294847207,
+      "last": 72223.257290833,
+      "finished": 72223.25735786
+    }
+  ]
+}

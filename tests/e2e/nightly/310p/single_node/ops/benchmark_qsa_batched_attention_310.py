@@ -33,6 +33,11 @@ def main() -> None:
     parser.add_argument("--tile-sizes", type=int, nargs="+", default=[64])
     parser.add_argument("--profile-stages", action="store_true")
     parser.add_argument(
+        "--serving-only",
+        action="store_true",
+        help="Skip the unbounded diagnostic/reference paths for serving-sized token batches",
+    )
+    parser.add_argument(
         "--sort-groups",
         action="store_true",
         help="Include the cost of sorting selected groups into cache order before QSA gather",
@@ -210,8 +215,8 @@ def main() -> None:
             times.append((time.perf_counter() - start) * 1000)
         return result, times
 
-    native_result, native_times = measure(native)
-    batched_result, batched_times = measure(batched)
+    native_result, native_times = (None, None) if args.serving_only else measure(native)
+    batched_result, batched_times = (None, None) if args.serving_only else measure(batched)
     serving_result, serving_times = measure(serving_batched)
     sorted_result, sorted_times = measure(serving_sorted) if args.sort_groups else (None, None)
     bounded_results = {tile: measure(lambda tile=tile: serving_bounded(tile)) for tile in args.tile_sizes}
@@ -322,6 +327,66 @@ def main() -> None:
             gathered_nz, stage_times["custom_value_nz_gather_ms"] = measure(
                 lambda: qsa_gather_value_nz_310(value_cache, tile_selection, block_table, head_dim=head_dim)
             )
+            if args.test_transposed_nz_keys:
+                padded_tokens = gathered_nz.shape[-2]
+                parallel_keys = torch_npu.empty_with_format(
+                    size=(tile_tokens, num_kv_heads, head_dim, padded_tokens),
+                    dtype=key_cache.dtype,
+                    device=key_cache.device,
+                    acl_format=29,
+                )
+                parallel_values = torch_npu.empty_with_format(
+                    size=(tile_tokens, num_kv_heads, padded_tokens, head_dim),
+                    dtype=value_cache.dtype,
+                    device=value_cache.device,
+                    acl_format=29,
+                )
+                key_stream = torch.npu.Stream()
+                value_stream = torch.npu.Stream()
+
+                def sequential_custom_gather() -> tuple[torch.Tensor, torch.Tensor]:
+                    qsa_gather_key_transposed_nz_310(
+                        key_cache,
+                        tile_selection,
+                        block_table,
+                        head_dim=head_dim,
+                        output=parallel_keys,
+                    )
+                    qsa_gather_value_nz_310(
+                        value_cache,
+                        tile_selection,
+                        block_table,
+                        head_dim=head_dim,
+                        output=parallel_values,
+                    )
+                    return parallel_keys, parallel_values
+
+                def parallel_custom_gather() -> tuple[torch.Tensor, torch.Tensor]:
+                    current_stream = torch.npu.current_stream()
+                    key_stream.wait_stream(current_stream)
+                    value_stream.wait_stream(current_stream)
+                    with torch.npu.stream(key_stream):
+                        qsa_gather_key_transposed_nz_310(
+                            key_cache,
+                            tile_selection,
+                            block_table,
+                            head_dim=head_dim,
+                            output=parallel_keys,
+                        )
+                    with torch.npu.stream(value_stream):
+                        qsa_gather_value_nz_310(
+                            value_cache,
+                            tile_selection,
+                            block_table,
+                            head_dim=head_dim,
+                            output=parallel_values,
+                        )
+                    current_stream.wait_stream(key_stream)
+                    current_stream.wait_stream(value_stream)
+                    return parallel_keys, parallel_values
+
+                _, stage_times["custom_kv_sequential_gather_ms"] = measure(sequential_custom_gather)
+                _, stage_times["custom_kv_parallel_gather_ms"] = measure(parallel_custom_gather)
             gathered_nd = torch_npu.npu_format_cast(gathered_nz, 0)[:, :, : args.groups * compress_ratio]
             stage_times["custom_value_nz_max_abs_difference"] = (
                 (gathered_nd.float() - values_transposed.float()).abs().max().item()
@@ -335,21 +400,22 @@ def main() -> None:
             stage_times["custom_value_nz_output_max_abs_difference"] = (
                 (custom_result.float() - torch.matmul(probabilities, values_transposed).float()).abs().max().item()
             )
-    difference = batched_result.float() - native_result.float()
-    serving_difference = serving_result.float() - native_result.float()
+    difference = None if args.serving_only else batched_result.float() - native_result.float()
+    serving_difference = None if args.serving_only else serving_result.float() - native_result.float()
     sorted_difference = sorted_result.float() - serving_result.float() if sorted_result is not None else None
-    nz_key_difference = nz_key_result.float() - native_result.float() if nz_key_result is not None else None
+    comparison_result = serving_result if native_result is None else native_result
+    nz_key_difference = nz_key_result.float() - comparison_result.float() if nz_key_result is not None else None
     transposed_nz_key_difference = (
-        transposed_nz_key_result.float() - native_result.float() if transposed_nz_key_result is not None else None
+        transposed_nz_key_result.float() - comparison_result.float() if transposed_nz_key_result is not None else None
     )
     bounded_metrics = {}
     for tile, (bounded_result, bounded_times) in bounded_results.items():
-        bounded_difference = bounded_result.float() - native_result.float()
+        bounded_difference = bounded_result.float() - comparison_result.float()
         bounded_metrics[tile] = {
             "ms": bounded_times,
             "max_abs_difference": bounded_difference.abs().max().item(),
             "relative_rms_difference": (
-                bounded_difference.square().mean().sqrt() / native_result.float().square().mean().sqrt()
+                bounded_difference.square().mean().sqrt() / comparison_result.float().square().mean().sqrt()
             ).item(),
         }
     print(
@@ -360,6 +426,7 @@ def main() -> None:
                 "cache_tokens": args.cache_tokens,
                 "visible_tokens": visible_tokens,
                 "qk_scale": args.qk_scale,
+                "serving_only": args.serving_only,
                 "native_ms": native_times,
                 "batched_ms": batched_times,
                 "serving_batched_ms": serving_times,
@@ -367,16 +434,20 @@ def main() -> None:
                 "sorted_groups_max_abs_difference": sorted_difference.abs().max().item()
                 if sorted_difference is not None
                 else None,
-                "serving_max_abs_difference": serving_difference.abs().max().item(),
+                "serving_max_abs_difference": serving_difference.abs().max().item()
+                if serving_difference is not None
+                else None,
                 "serving_relative_rms_difference": (
                     serving_difference.square().mean().sqrt() / native_result.float().square().mean().sqrt()
-                ).item(),
+                ).item()
+                if serving_difference is not None
+                else None,
                 "nz_key_ms": nz_key_times,
                 "nz_key_max_abs_difference": nz_key_difference.abs().max().item()
                 if nz_key_difference is not None
                 else None,
                 "nz_key_relative_rms_difference": (
-                    nz_key_difference.square().mean().sqrt() / native_result.float().square().mean().sqrt()
+                    nz_key_difference.square().mean().sqrt() / comparison_result.float().square().mean().sqrt()
                 ).item()
                 if nz_key_difference is not None
                 else None,
@@ -385,16 +456,19 @@ def main() -> None:
                 if transposed_nz_key_difference is not None
                 else None,
                 "transposed_nz_key_relative_rms_difference": (
-                    transposed_nz_key_difference.square().mean().sqrt() / native_result.float().square().mean().sqrt()
+                    transposed_nz_key_difference.square().mean().sqrt()
+                    / comparison_result.float().square().mean().sqrt()
                 ).item()
                 if transposed_nz_key_difference is not None
                 else None,
                 "bounded_by_tile": bounded_metrics,
                 "stage_profile": stage_times,
-                "max_abs_difference": difference.abs().max().item(),
+                "max_abs_difference": difference.abs().max().item() if difference is not None else None,
                 "relative_rms_difference": (
                     difference.square().mean().sqrt() / native_result.float().square().mean().sqrt()
-                ).item(),
+                ).item()
+                if difference is not None
+                else None,
             }
         )
     )

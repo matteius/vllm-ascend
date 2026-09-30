@@ -27,8 +27,8 @@ ge::graphStatus Tiling(gert::TilingContext *context)
     auto platformInfo = context->GetPlatformInfo();
     OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
     auto platform = platform_ascendc::PlatformAscendC(platformInfo);
-    const uint32_t coreCount = platform.GetCoreNumAiv();
-    OP_CHECK_IF(coreCount == 0, OP_LOGE(context, "AIV core count is zero"), return ge::GRAPH_FAILED);
+    const uint32_t coreCount = platform.GetCoreNumAic();
+    OP_CHECK_IF(coreCount == 0, OP_LOGE(context, "AIC core count is zero"), return ge::GRAPH_FAILED);
 
     const auto query = context->GetInputShape(QUERY)->GetStorageShape();
     const auto cache = context->GetInputShape(KEY_CACHE)->GetStorageShape();

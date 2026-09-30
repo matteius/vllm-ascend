@@ -1,0 +1,25 @@
+{
+  "concurrency": 1,
+  "max_tokens_per_stream": 256,
+  "total_completion_tokens": 256,
+  "aggregate_e2e_tok_s": 30.066441563581357,
+  "aggregate_decode_tok_s": 31.180120821290785,
+  "median_stream_decode_tok_s": 31.180120821290785,
+  "max_running": 1.0,
+  "max_waiting": 0.0,
+  "streams": [
+    {
+      "stream": 0,
+      "prompt_tokens": 25,
+      "completion_tokens": 256,
+      "started": 413219.698810675,
+      "first": 413220.034947566,
+      "last": 413228.213235311,
+      "finished": 413228.213286838,
+      "ttft_s": 0.33613689098274335,
+      "decode_s": 8.178287744987756,
+      "client_decode_tok_s": 31.180120821290785,
+      "e2e_s": 8.514476163021754
+    }
+  ]
+}
