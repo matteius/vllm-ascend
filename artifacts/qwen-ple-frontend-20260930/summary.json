@@ -1,0 +1,80 @@
+{
+  "scope": "Qwen4Exp PLE frontend stage microbenchmark; live TP4 server idle; not whole-model throughput",
+  "stable_service": {
+    "port": 8001,
+    "model": "qwen38-w4-pipeline-c1-dispatch"
+  },
+  "results": [
+    {
+      "tokens": 1,
+      "device_hash_and_d2h_ms": 1.058141600030164,
+      "direct_host_hash_ms": 0.023760833331228543,
+      "optimized_hot_gather_ms": 0.3052345998488211,
+      "pageable_h2d_ms": 0.03416226682020351,
+      "fp16_projection_ms": 0.3553845999704208,
+      "old_frontend_ms": 1.4451787334110122,
+      "optimized_frontend_ms": 0.4672826667956542,
+      "frontend_reduction_pct": 67.66609859441117,
+      "dynamic_w8a8_projection_ms": 0.20097809998939434,
+      "projection_reduction_pct": 43.56249861837648,
+      "dynamic_w8a8_relative_l2": 0.0058257426135241985,
+      "dynamic_w8a8_cosine": 0.9999831318855286
+    },
+    {
+      "tokens": 3,
+      "device_hash_and_d2h_ms": 1.0064783666166477,
+      "direct_host_hash_ms": 0.03581106648198329,
+      "optimized_hot_gather_ms": 0.5612038999970537,
+      "pageable_h2d_ms": 0.031831200127877914,
+      "fp16_projection_ms": 0.35664000000300194,
+      "old_frontend_ms": 1.7130846999255784,
+      "optimized_frontend_ms": 0.7205815333387969,
+      "frontend_reduction_pct": 57.936607958141174,
+      "dynamic_w8a8_projection_ms": 0.2025170331762638,
+      "projection_reduction_pct": 43.47037754977857,
+      "dynamic_w8a8_relative_l2": 0.005330510903149843,
+      "dynamic_w8a8_cosine": 0.9999862313270569
+    }
+  ],
+  "projection_policy": "float16 remains the default; w8a8_dynamic requires explicit ascend_expert_quantization.ple_projection_execution metadata",
+  "whole_model_exact_c1": {
+    "tokens_per_request": 512,
+    "repeats": 5,
+    "median_client_decode_tok_s": 26.988352694780936,
+    "range_client_decode_tok_s": [
+      26.474516315530533,
+      30.90216380418447
+    ],
+    "median_mtp_acceptance": 0.719047619047619,
+    "model": "qwen38-w4-pipeline-c1-dispatch",
+    "port": 8001
+  },
+  "whole_model_w8a8_c1": {
+    "tokens_per_request": 512,
+    "repeats": 5,
+    "median_client_decode_tok_s": 27.160608926572344,
+    "range_client_decode_tok_s": [
+      26.241357152002177,
+      32.567888111232534
+    ],
+    "median_mtp_acceptance": 0.6712328767123288,
+    "median_target_step_ms": 85.1762191936736,
+    "exact_median_target_step_ms": 89.47986516924665,
+    "target_step_reduction_pct": 4.80962501165253,
+    "model": "qwen38-w4-pipeline-c1-dispatch",
+    "port": 8001
+  },
+  "whole_model_w8a8_c4": {
+    "tokens_per_request": 512,
+    "concurrency": 4,
+    "repeats": 6,
+    "median_aggregate_tok_s": 57.9618557892741,
+    "steady_state_last_three_median_aggregate_tok_s": 58.572050514760576,
+    "range_aggregate_tok_s": [
+      53.16162976397528,
+      59.394768686975056
+    ],
+    "model": "qwen38-w4-pipeline-c1-dispatch",
+    "port": 8001
+  }
+}

@@ -146,10 +146,7 @@ def _single_rank_tp():
             stack.enter_context(patch(f"{avmod}.lmhead_tp_enable", return_value=False))
             stack.enter_context(patch(f"{avmod}.embedding_tp_enable", return_value=False))
             stack.enter_context(
-                patch(
-                    f"{avmod}.get_ascend_config",
-                    return_value=SimpleNamespace(enable_reduce_sample=False),
-                )
+                patch(f"{avmod}.enable_pcp_embedding_lmhead_weight_sharding", return_value=False)
             )
             stack.enter_context(
                 patch(f"{avmod}.get_tp_group", return_value=SimpleNamespace(world_size=1, rank_in_group=0))
@@ -230,11 +227,17 @@ def test_model_forwards_serving_ngram_context_to_ple():
     positions = torch.tensor([9], dtype=torch.int64)
     query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
     ngram_context = torch.tensor([[15, 16]], dtype=torch.int32)
+    input_ids_cpu = input_ids.clone()
+    query_start_loc_cpu = query_start_loc.clone()
+    ngram_context_cpu = ngram_context.clone()
     output = model(
         input_ids,
         positions,
         query_start_loc=query_start_loc,
         ngram_context=ngram_context,
+        input_ids_cpu=input_ids_cpu,
+        query_start_loc_cpu=query_start_loc_cpu,
+        ngram_context_cpu=ngram_context_cpu,
     )
 
     assert torch.equal(output, torch.ones(1, 2))
@@ -242,6 +245,9 @@ def test_model_forwards_serving_ngram_context_to_ple():
     _args, kwargs = model.model.call
     assert kwargs["query_start_loc"] is query_start_loc
     assert kwargs["ngram_context"] is ngram_context
+    assert kwargs["input_ids_cpu"] is input_ids_cpu
+    assert kwargs["query_start_loc_cpu"] is query_start_loc_cpu
+    assert kwargs["ngram_context_cpu"] is ngram_context_cpu
 
 
 def test_ple_decode_hash_uses_previous_tokens():
