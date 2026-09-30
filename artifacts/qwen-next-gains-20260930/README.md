@@ -93,8 +93,23 @@ about 10.04 ms and 311.7 ms, versus 7.91 ms and 237.8 ms for the established
 matrix path. A 128-query tile and double-buffer variant also regressed.
 
 Host compilation, focused lint, and isolated stream-owner/request-boundary
-checks pass. The full pytest harness on this workstation cannot collect
-because its Python environment lacks `fla_npu`; NPU validation of the new
-parallel-gather path is deferred at the user's request. The NPU nightly test
-now covers the parallel stream path and a 65-token partial final tile for the
-next hardware validation pass.
+checks pass. Subsequent 310P validation passed all 20 selected prefill,
+multi-request decode, and changing-input graph-replay cases; 79 unrelated
+cases were deselected. This includes the 65-token partial final tile.
+
+The two-stream gather path was bitwise identical but did not improve device
+time. Sequential versus parallel medians were 7.814/7.869 ms at 64 tokens,
+8.065/8.212 ms at 65 tokens, and 242.630/242.545 ms at 2,048 tokens. Query
+tiles of 32, 64, 128, and 256 were likewise tied at roughly 250 ms for the 2K
+chunk. The retained stream implementation is therefore correctness-qualified,
+but stream overlap and fewer tile launches do not explain the cold-prefill
+gap on 310P.
+
+At 2,048 queries and 10,000 visible groups, the exact bounded index-selection
+path measured 61.476 ms: 24.934 ms for wide-matmul scoring and 37.682 ms for
+stable sorting. Raw `topk` measured 21.110 ms and happened to return the same
+indices on the random probe, but it does not guarantee the required
+score-descending/index-ascending tie break. It is not enabled silently. The
+next exact target is a fused or lexicographic device selector that preserves
+that contract. Machine-readable results are in
+`qsa-prefill-npu-validation.json`.

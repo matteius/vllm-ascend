@@ -1,0 +1,50 @@
+{
+  "commit": "d67514384",
+  "hardware": "Ascend 310P3",
+  "focused_tests": {
+    "passed": 20,
+    "deselected": 79,
+    "seconds": 41.79,
+    "coverage": [
+      "batched prefill parity",
+      "65-token partial tile",
+      "multi-request grouped decode parity",
+      "changing-input graph replay"
+    ]
+  },
+  "parallel_gather_median_ms": {
+    "64_tokens": {
+      "sequential": 7.8144,
+      "parallel": 7.8693,
+      "change_percent": 0.70
+    },
+    "65_tokens": {
+      "sequential": 8.0653,
+      "parallel": 8.2121,
+      "change_percent": 1.82
+    },
+    "2048_tokens": {
+      "sequential": 242.6301,
+      "parallel": 242.5451,
+      "change_percent": -0.04
+    }
+  },
+  "query_tile_median_ms_at_2048_tokens": {
+    "32": 250.8644,
+    "64": 249.6829,
+    "128": 251.1828,
+    "256": 249.6333
+  },
+  "index_selection_median_ms_at_2048_tokens_10000_visible_groups": {
+    "bounded_exact_path": 61.4760,
+    "wide_matmul_score": 24.9341,
+    "stable_argsort": 37.6822,
+    "raw_topk": 21.1100,
+    "raw_topk_equal_on_random_probe": true,
+    "raw_topk_guarantees_stable_tie_break": false
+  },
+  "numerics": {
+    "parallel_gather_max_abs_difference": 0.0,
+    "all_query_tile_max_abs_difference": 0.0
+  }
+}
