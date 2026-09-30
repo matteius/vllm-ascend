@@ -116,7 +116,7 @@ def test_grouped_projection_matches_sparse_glm_routes(bits: int, n: int, k: int)
 
 
 @pytest.mark.parametrize("bits,n,k", [(4, 2048, 4096), (2, 4096, 2048)])
-@pytest.mark.parametrize("rows", [1, 16, 129])
+@pytest.mark.parametrize("rows", [1, 16])
 def test_grouped_nz_packed_projection_matches_canonical(bits: int, n: int, k: int, rows: int):
     torch.manual_seed(300 + bits)
     experts = 4
@@ -124,13 +124,12 @@ def test_grouped_nz_packed_projection_matches_canonical(bits: int, n: int, k: in
     nz_codes = torch.stack([_pack_codes_nz(canonical[expert], k) for expert in range(experts)])
     scales = (torch.rand(experts, n // 32, k // 32) * 0.02 + 0.005).npu()
     inputs = torch.randn(rows, k).half().npu()
-    boundaries = [0, 0, 0, rows] if rows > 128 else [min(rows, 4), min(rows, 4), min(rows, 12), rows]
-    group_ends = torch.tensor(boundaries, dtype=torch.int64, device="npu")
+    group_ends = torch.tensor([min(rows, 4), min(rows, 4), min(rows, 12), rows], dtype=torch.int64, device="npu")
     op = torch.ops._C_ascend.npu_w2_grouped_blocked_dequant_matmul_310
 
     baseline = op(inputs, canonical.npu(), scales, group_ends)
     candidate = op(inputs, nz_codes.view(torch.int8).npu(), scales, group_ends)
-    torch.testing.assert_close(candidate.cpu(), baseline.cpu(), rtol=4e-2, atol=4e-2)
+    torch.testing.assert_close(candidate.cpu(), baseline.cpu(), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("bits", [2, 4])

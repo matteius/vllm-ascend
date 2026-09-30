@@ -29,7 +29,7 @@ extern "C" __global__ __aicore__ void w2_grouped_blocked_dequant_matmul_v310(
                       codes + expert * n * packedK,
                       blockScale + expert * scaleStride * sizeof(float),
                       y + start * n * sizeof(half), user, end - start, n, k,
-                      td->codesPerByte, td->nzPacked != 0, td->nzPacked != 0);
+                      td->codesPerByte, td->nzPacked != 0);
       op.Process();
       AscendC::PipeBarrier<PIPE_ALL>();
     }

@@ -79,10 +79,13 @@ public:
     using DispatchPolicyTla = Gemm::MmadPingpongTlaMulti<ArchTag, true, false>;
     using L1TileShapeTla = tla::Shape<tla::Int<128>, tla::Int<128>, tla::Int<128>>;
     using L0TileShapeTla = L1TileShapeTla;
+    using ResidentTileShapeTla = tla::Shape<tla::Int<128>, tla::Int<W2_L1_TILE_N>, tla::Int<128>>;
     using TileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<
         ArchTag, half, layout::RowMajor, half, layout::zN, half, layout::RowMajor>;
     using BlockMmad = Gemm::Block::BlockMmadTla<
         DispatchPolicyTla, L1TileShapeTla, L0TileShapeTla, half, half, half, void, TileCopy>;
+    using ResidentBlockMmad = Gemm::Block::BlockMmadTla<
+        DispatchPolicyTla, ResidentTileShapeTla, ResidentTileShapeTla, half, half, half, void, TileCopy>;
     static_assert(W2_L1_WEIGHT_BYTES + W2_L1_A_STAGES * W2_L1_A_STAGE_BYTES <= ArchTag::L1_SIZE,
                   "GLM W2/W4 decoded tile and activation stages must fit L1");
     static_assert(W2_L1_A_STAGES * W2_L1_A_STAGE_BYTES <= ArchTag::L0A_SIZE &&
@@ -213,7 +216,7 @@ private:
         CopyA copyA;
         typename TileCopy::CopyL1ToL0A copyL0A;
         typename TileCopy::CopyL1ToL0B copyL0B;
-        typename BlockMmad::TileMmad tileMmad;
+        typename ResidentBlockMmad::TileMmad tileMmad;
         const uint32_t mActual = T_ == 1 ? W2_FRACTAL_SIZE : (uint32_t)T_;
         const uint32_t mAligned = AlignUpU<uint32_t>(mActual, W2_FRACTAL_SIZE);
         uint32_t cubeK = W2_L1_MAX_CUBE_K;
@@ -379,6 +382,12 @@ private:
 
     __aicore__ inline void DecodeTile(int64_t codeOffset)
     {
+        // The resident-L1 path reuses cU8_ promptly after a bulk DMA.
+        // Complete the previous vector read before that DMA reuses it.
+        if (useL1_) {
+            SetFlag<HardEvent::V_MTE2>(EVENT_ID0);
+            WaitFlag<HardEvent::V_MTE2>(EVENT_ID0);
+        }
         // Copy one packed row at a time. A strided 2-D GM-to-UB DataCopy looks
         // attractive here, but dav_m200 rejects that descriptor at runtime
         // with an MTE "burst num" exception even when every row and stride is
