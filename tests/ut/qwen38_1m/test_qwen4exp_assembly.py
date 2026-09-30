@@ -146,10 +146,7 @@ def _single_rank_tp():
             stack.enter_context(patch(f"{avmod}.lmhead_tp_enable", return_value=False))
             stack.enter_context(patch(f"{avmod}.embedding_tp_enable", return_value=False))
             stack.enter_context(
-                patch(
-                    f"{avmod}.get_ascend_config",
-                    return_value=SimpleNamespace(enable_reduce_sample=False),
-                )
+                patch(f"{avmod}.enable_pcp_embedding_lmhead_weight_sharding", return_value=False)
             )
             stack.enter_context(
                 patch(f"{avmod}.get_tp_group", return_value=SimpleNamespace(world_size=1, rank_in_group=0))

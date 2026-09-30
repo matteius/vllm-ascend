@@ -403,13 +403,20 @@ def _dispatch_vllm_config(*, is_hybrid=True, ple_layer_ids=(1,)):
     )
 
 
+def _compatibility_profile():
+    return SimpleNamespace(supports=lambda _capability: False)
+
+
 def test_dispatch_routes_ple_hybrid_to_qwen4exp_state_on_310p():
     from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 
     sentinel = MagicMock(name="Ascend310PQwen4ExpModelState")
     model = SimpleNamespace()  # no get_model_state_cls
     with (
-        patch("vllm_ascend.worker.v2.model_states.is_310p", return_value=True),
+        patch(
+            "vllm_ascend.worker.v2.model_states.get_current_hardware_profile",
+            side_effect=_compatibility_profile,
+        ),
         patch.object(model_state_mod, "Ascend310PQwen4ExpModelState", sentinel),
     ):
         result = init_asecnd_model_state(_dispatch_vllm_config(), model, None, _CPU)
@@ -427,7 +434,10 @@ def test_dispatch_tolerates_not_implemented_hook_then_registers():
     model = SimpleNamespace(get_model_state_cls=_raises)
     sentinel = MagicMock(name="Ascend310PQwen4ExpModelState")
     with (
-        patch("vllm_ascend.worker.v2.model_states.is_310p", return_value=True),
+        patch(
+            "vllm_ascend.worker.v2.model_states.get_current_hardware_profile",
+            side_effect=_compatibility_profile,
+        ),
         patch.object(model_state_mod, "Ascend310PQwen4ExpModelState", sentinel),
     ):
         result = init_asecnd_model_state(_dispatch_vllm_config(), model, None, _CPU)
@@ -439,7 +449,6 @@ def test_dispatch_model_hook_wins_when_it_returns_a_class():
 
     winner = MagicMock(name="WinnerState")
     model = SimpleNamespace(get_model_state_cls=lambda: winner)
-    with patch("vllm_ascend.worker.v2.model_states.is_310p", return_value=True):
-        result = init_asecnd_model_state(_dispatch_vllm_config(), model, None, _CPU)
+    result = init_asecnd_model_state(_dispatch_vllm_config(), model, None, _CPU)
     assert result is winner.return_value
     winner.assert_called_once()
