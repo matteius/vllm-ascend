@@ -46,7 +46,10 @@ def init_asecnd_model_state(
     # 310P Qwen4Exp PLE n-gram model state (T1.3). The n-gram context buffers
     # only exist on the 310P Triton-free hybrid path; ``ple_layer_ids`` on the
     # text config is the authoritative PLE marker (see model_state module).
-    if is_310p() and vllm_config.model_config.is_hybrid:
+    if (
+        not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES)
+        and vllm_config.model_config.is_hybrid
+    ):
         text_config = getattr(vllm_config.model_config, "hf_text_config", None)
         if getattr(text_config, "ple_layer_ids", None):
             from vllm_ascend._310p.worker.v2.model_state import (

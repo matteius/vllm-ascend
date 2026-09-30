@@ -30,13 +30,15 @@ from torch import nn
 from torch.nn import functional as F
 
 from .dtype_policy import ASCEND_QWEN4EXP_DTYPE_POLICY, Qwen4ExpDtypePolicy
-from .ops.ple import ple_gate, ple_short_conv
+from .lm_head_w8a8 import dynamic_w8a8_linear, quantize_linear_weight
+from .ops.ple import ple_decode_310, ple_gate, ple_short_conv
 
 if TYPE_CHECKING:
     from .ngram_embedding import AscendPLEEmbeddingMethod
 
 # The PLE short convolution uses the SiLU activation, matching the fork layer.
 _PLE_CONV_ACTIVATION = "silu"
+_ASCEND_310P_DEVICE_TOKEN = "310P"
 
 
 class AscendQwen4ExpPLELayer(nn.Module):
@@ -80,6 +82,10 @@ class AscendQwen4ExpPLELayer(nn.Module):
         self.norm_accumulation_dtype = dtype_policy.cast_site("ple_norm_accumulation")
         self.params_dtype = params_dtype if params_dtype is not None else self.projection_dtype
         self.ple_method = ple_method
+        quant_metadata = getattr(config, "ascend_expert_quantization", None)
+        self.projection_execution = (
+            quant_metadata.get("ple_projection_execution", "float16") if quant_metadata else "float16"
+        )
 
         self.hidden_size = int(config.hidden_size)
         self.hc_count = int(config.hc_count)
@@ -113,6 +119,7 @@ class AscendQwen4ExpPLELayer(nn.Module):
             torch.zeros(sum(self.output_sizes), self.ple_embed_dim, dtype=self.params_dtype),
             requires_grad=False,
         )
+        self.register_buffer("kv_proj_weight_scale", None, persistent=False)
         # Grouped RMSNorm weights are stored as the additive term ``w`` so the
         # norm applies ``(1 + w)`` (fork zeros-init -> identity scale).
         norm_shape = (self.hc_hidden_size,)
@@ -125,16 +132,43 @@ class AscendQwen4ExpPLELayer(nn.Module):
             requires_grad=False,
         )
         self.register_buffer("_decode_conv_weight", None, persistent=False)
+        self._native_decode_enabled = False
 
     def prepare_decode_conv_weight(self) -> None:
         """Materialize the sole active MTP2 decode tap outside graph replay."""
         if self.conv_weight.device.type != "npu":
             return
         self._decode_conv_weight = self.conv_weight.detach()[:, -1].to(self.norm_accumulation_dtype).contiguous()
+        self._native_decode_enabled = _ASCEND_310P_DEVICE_TOKEN in torch.npu.get_device_name().upper()
+
+    def prepare_projection_weight(self) -> None:
+        """Replace the loaded FP16 projection with its explicit W8 runtime form."""
+        if self.projection_execution == "float16":
+            return
+        if self.projection_execution != "w8a8_dynamic":
+            raise ValueError(f"unsupported PLE projection execution: {self.projection_execution}")
+        if self.kv_proj_weight_scale is not None:
+            raise RuntimeError("dynamic-W8A8 PLE projection was already prepared")
+        source_device = self.kv_proj_weight.device
+        quantized_weight, weight_scale = quantize_linear_weight(self.kv_proj_weight.detach().cpu())
+        if source_device.type == "npu":
+            from vllm_ascend.utils import maybe_trans_nz
+
+            runtime_weight = maybe_trans_nz(quantized_weight.to(source_device)).transpose(0, 1)
+            weight_scale = weight_scale.to(source_device)
+        else:
+            runtime_weight = quantized_weight.transpose(0, 1).contiguous()
+        self.kv_proj_weight.data = runtime_weight
+        self.kv_proj_weight_scale = weight_scale
 
     # -- gather ------------------------------------------------------------- #
 
-    def gather_embeddings(self, ngram_ids: torch.Tensor, output_dtype: torch.dtype) -> torch.Tensor:
+    def gather_embeddings(
+        self,
+        ngram_ids: torch.Tensor,
+        output_dtype: torch.dtype,
+        output_device: torch.device | None = None,
+    ) -> torch.Tensor:
         """Batched PLE row gather -> ``[T, ple_embed_dim]`` embeddings.
 
         ``ngram_ids`` is ``[T, num_ngram_heads]`` of global table row indices.
@@ -153,7 +187,9 @@ class AscendQwen4ExpPLELayer(nn.Module):
         # One batched gather over all (token, head) rows -- batched lookup only.
         # The host PLE table method (lazy mmap / pinned host) returns CPU rows;
         # move them onto the request's device before the on-device projection.
-        rows = self.ple_method.gather_rows(ngram_ids.reshape(-1)).to(ngram_ids.device)
+        rows = self.ple_method.gather_rows(ngram_ids.reshape(-1)).to(
+            ngram_ids.device if output_device is None else output_device
+        )
         per_head_dim = rows.shape[-1]
         if per_head_dim != self.per_head_dim:
             raise ValueError(
@@ -164,22 +200,34 @@ class AscendQwen4ExpPLELayer(nn.Module):
 
     # -- projection --------------------------------------------------------- #
 
+    def project_merged(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Return the contiguous merged key/value projection."""
+        if self.projection_execution == "w8a8_dynamic":
+            if self.kv_proj_weight_scale is None:
+                raise RuntimeError("dynamic-W8A8 PLE projection was not prepared after loading")
+            return dynamic_w8a8_linear(embeddings, self.kv_proj_weight, self.kv_proj_weight_scale)
+        weight = self.kv_proj_weight.to(embeddings.dtype)
+        return F.linear(embeddings, weight)
+
     def project(self, embeddings: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Merged key/value projection, split into ``(key, value)``."""
-        weight = self.kv_proj_weight.to(embeddings.dtype)
-        kv = F.linear(embeddings, weight)
-        key, value = kv.split(self.output_sizes, dim=-1)
-        return key, value
+        return self.project_merged(embeddings).split(self.output_sizes, dim=-1)
 
     # -- forward ------------------------------------------------------------ #
 
-    def forward(self, hidden_states: torch.Tensor, ngram_ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        ngram_ids: torch.Tensor,
+        output_buffer: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Run the PLE injection for one decoder layer.
 
         Args:
             hidden_states: ``[T, hc_hidden]`` hc-expanded hidden state (the gate
                 query and the outer residual).
             ngram_ids: ``[T, num_ngram_heads]`` global PLE table row indices.
+            output_buffer: optional stable tensor written by graph callbacks.
 
         Returns:
             ``[T, hc_hidden]`` PLE output (gated + short-conv + outer residual).
@@ -193,8 +241,24 @@ class AscendQwen4ExpPLELayer(nn.Module):
                 "PLE expects ngram_ids and hidden_states to share the token "
                 f"dimension, got {ngram_ids.shape[0]} and {hidden_states.shape[0]}"
             )
-        embeddings = self.gather_embeddings(ngram_ids, hidden_states.dtype)
-        key, value = self.project(embeddings)
+        embeddings = self.gather_embeddings(ngram_ids, hidden_states.dtype, hidden_states.device)
+        projected = self.project_merged(embeddings)
+        if (
+            self._native_decode_enabled
+            and hidden_states.shape[0] <= self.short_conv_dilation
+            and self._decode_conv_weight is not None
+        ):
+            return ple_decode_310(
+                projected,
+                hidden_states,
+                self.norm_key_weight,
+                self.norm_query_weight,
+                self.norm_conv_weight,
+                self._decode_conv_weight,
+                self.rms_norm_eps,
+                output=output_buffer,
+            )
+        key, value = projected.split(self.output_sizes, dim=-1)
         gated, conv_input = ple_gate(
             key,
             value,
@@ -205,7 +269,7 @@ class AscendQwen4ExpPLELayer(nn.Module):
             self.rms_norm_eps,
             accum_dtype=self.norm_accumulation_dtype,
         )
-        output = ple_short_conv(
+        result = ple_short_conv(
             conv_input,
             gated,
             hidden_states,
@@ -215,7 +279,11 @@ class AscendQwen4ExpPLELayer(nn.Module):
             accum_dtype=self.norm_accumulation_dtype,
             current_weight=self._decode_conv_weight,
         )
-        return output.to(hidden_states.dtype)
+        result = result.to(hidden_states.dtype)
+        if output_buffer is not None:
+            output_buffer.copy_(result)
+            return output_buffer
+        return result
 
 
 __all__ = ["AscendQwen4ExpPLELayer"]

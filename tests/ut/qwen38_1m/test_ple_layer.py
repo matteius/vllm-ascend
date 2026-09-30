@@ -56,6 +56,7 @@ from vllm_ascend.models.qwen4_exp.ngram_embedding import (
     AscendPLETransport,
     create_ple_embedding_method,
 )
+from vllm_ascend.models.qwen4_exp.ops.ple import ple_decode_310
 from vllm_ascend.models.qwen4_exp.ple_layer import AscendQwen4ExpPLELayer
 
 # Host RAM the byte-budget check is told to assume, so tiny synthetic tables
@@ -75,8 +76,8 @@ _PLE_EMBED_DIM = _NUM_NGRAM_HEADS * _PER_HEAD_DIM
 _TABLE_ROWS = 64
 
 
-def _config() -> SimpleNamespace:
-    return SimpleNamespace(
+def _config(*, projection_execution: str = "float16") -> SimpleNamespace:
+    config = SimpleNamespace(
         hidden_size=_HIDDEN_SIZE,
         hc_count=_HC_COUNT,
         ple_embed_dim=_PLE_EMBED_DIM,
@@ -85,6 +86,9 @@ def _config() -> SimpleNamespace:
         heads_per_ngram=_HEADS_PER_NGRAM,
         rms_norm_eps=_EPS,
     )
+    if projection_execution != "float16":
+        config.ascend_expert_quantization = {"ple_projection_execution": projection_execution}
+    return config
 
 
 def _f64_policy() -> Qwen4ExpDtypePolicy:
@@ -161,6 +165,27 @@ def _load_known_weights(layer: AscendQwen4ExpPLELayer, dtype: torch.dtype) -> No
     layer.norm_query_weight.data = (0.1 * _rand((hc_hidden,), 73)).to(dtype)
     layer.norm_conv_weight.data = (0.1 * _rand((hc_hidden,), 74)).to(dtype)
     layer.conv_weight.data = _rand((hc_hidden, layer.conv_kernel_size), 75).to(dtype)
+
+
+def test_dynamic_w8a8_projection_is_explicit_and_prepared_once():
+    layer = AscendQwen4ExpPLELayer(
+        config=_config(projection_execution="w8a8_dynamic"),
+        layer_idx=0,
+        params_dtype=torch.float16,
+    )
+    weight = _rand((sum(layer.output_sizes), layer.ple_embed_dim), 76, torch.float32).half()
+    inputs = _rand((3, layer.ple_embed_dim), 77, torch.float32).half()
+    layer.kv_proj_weight.data.copy_(weight)
+    expected = torch.nn.functional.linear(inputs, weight)
+
+    layer.prepare_projection_weight()
+    actual = layer.project_merged(inputs)
+
+    assert layer.kv_proj_weight.dtype == torch.int8
+    assert layer.kv_proj_weight_scale is not None
+    torch.testing.assert_close(actual, expected, rtol=0.03, atol=0.06)
+    with pytest.raises(RuntimeError, match="already prepared"):
+        layer.prepare_projection_weight()
 
 
 def _reference_output(
@@ -291,6 +316,28 @@ def test_device_dtype_policy_path():
             os.unlink(shm_path)
 
 
+def test_forward_reuses_caller_output_buffer() -> None:
+    policy = _f64_policy()
+    table = _known_table(_TABLE_ROWS, _PER_HEAD_DIM, torch.float64)
+    method, shm_path = _mmap_method(table, policy)
+    try:
+        layer = _build_layer(method, policy, params_dtype=torch.float64)
+        _load_known_weights(layer, torch.float64)
+        hidden_states = _rand((3, layer.hc_hidden_size), 153)
+        ngram_ids = _ngram_ids(3, 154)
+        expected = layer.forward(hidden_states, ngram_ids)
+        output = torch.full_like(hidden_states, float("nan"))
+
+        actual = layer.forward(hidden_states, ngram_ids, output_buffer=output)
+
+        assert actual is output
+        torch.testing.assert_close(actual, expected)
+    finally:
+        method.close()
+        if os.path.exists(shm_path):
+            os.unlink(shm_path)
+
+
 # ---------------------------------------------------------------------------
 # Guardrails.
 # ---------------------------------------------------------------------------
@@ -298,6 +345,23 @@ def test_forward_requires_ple_method():
     layer = AscendQwen4ExpPLELayer(config=_config(), layer_idx=0, ple_method=None, params_dtype=torch.float64)
     with pytest.raises(RuntimeError, match="PLE embedding method"):
         layer.forward(_rand((2, layer.hc_hidden_size), 1), _ngram_ids(2, 2))
+
+
+def test_native_decode_entry_point_rejects_cpu_inputs() -> None:
+    projected = torch.zeros((1, 12), dtype=torch.float16)
+    hidden = torch.zeros((1, 8), dtype=torch.float16)
+    norm = torch.zeros(8, dtype=torch.float16)
+    current_weight = torch.zeros(8, dtype=torch.float32)
+    with pytest.raises(RuntimeError, match="NPU-only"):
+        ple_decode_310(
+            projected,
+            hidden,
+            norm,
+            norm,
+            norm,
+            current_weight,
+            _EPS,
+        )
 
 
 def test_forward_rejects_shape_mismatch():

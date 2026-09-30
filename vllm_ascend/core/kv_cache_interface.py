@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
 import torch
@@ -11,8 +12,10 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
@@ -45,6 +48,34 @@ def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
         assert len(storage_block_sizes) == 1, "All specs in one KV cache group must use the same storage block size."
         return storage_block_sizes.pop()
     return physical_size(kv_cache_spec)
+
+
+def is_circular_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
+    """Resolve fixed-block addressing through uniform cache wrappers."""
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        specs = tuple(kv_cache_spec.kv_cache_specs.values())
+        return bool(specs) and all(is_circular_kv_cache_spec(spec) for spec in specs)
+    return isinstance(kv_cache_spec, CircularBufferSpec) or bool(getattr(kv_cache_spec, "is_circular", False))
+
+
+def is_prefix_cacheable(kv_cache_spec: KVCacheSpec) -> bool:
+    """Resolve prefix-cache participation through uniform cache wrappers."""
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        return all(is_prefix_cacheable(spec) for spec in kv_cache_spec.kv_cache_specs.values())
+    return bool(getattr(kv_cache_spec, "prefix_cacheable", True)) and bool(
+        getattr(kv_cache_spec, "participates_in_prefix_caching", True)
+    )
+
+
+def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
+    """Return whether a mixed state-cache pool uses explicit page strides."""
+    specs = list(kv_cache_specs)
+    state_specs = [spec for spec in specs if isinstance(spec, MambaSpec)]
+    if not state_specs:
+        return False
+    if not any(getattr(spec, "page_size_padded", None) is not None for spec in state_specs):
+        return False
+    return any(getattr(spec, "indexes_kv_by_block_stride", False) for spec in specs)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -312,6 +343,12 @@ class AscendIndexerKPoolStateSpec(AscendSlidingWindowMLASpec):
             max_model_len=max_model_len,
         )
         return max_blocks * self.page_size_bytes
+
+
+# The merged upstream runner calls this cache role a tail.  Keep the local
+# state-spec implementation and fields as one interface unit with the retained
+# GLM KPool backend while satisfying the newer runner's type import.
+AscendIndexerKPoolTailSpec = AscendIndexerKPoolStateSpec
 
 
 def register_ascend_kv_cache_specs() -> None:

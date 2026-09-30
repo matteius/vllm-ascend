@@ -19,8 +19,9 @@ Run with ``--noconftest``:
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -61,6 +62,91 @@ def test_ple_injection_uses_stub_without_checkpoint_dir():
     inj._ensure_ple_method(torch.device("cpu"))
     assert isinstance(inj.ple.ple_method, AscendPLEPinnedHostEmbeddingMethod)
     assert inj.ple.ple_method.num_embeddings == inj._STUB_TABLE_ROWS
+
+
+def test_ple_graph_callback_writes_directly_to_stable_output() -> None:
+    cfg = _tiny_moe_config(num_layers=1, num_experts=8, top_k=3)
+    inj = _PLEInjection(config=cfg, layer_idx=0, dtype_policy=ASCEND_QWEN4EXP_DTYPE_POLICY)
+    hidden = torch.randn(2, inj.ple.hc_hidden_size, dtype=torch.float16)
+    input_ids = torch.tensor([7, 11], dtype=torch.int64)
+    input_ids_cpu = input_ids.clone()
+    query_start_loc_cpu = torch.tensor([0, 2], dtype=torch.int32)
+    ngram_context_cpu = torch.full((1, 2), cfg.eos_token_id, dtype=torch.int32)
+    expected = torch.randn_like(hidden)
+
+    class FakeCapture:
+        _capturing = True
+        callback = None
+
+        def add_eager(self, callback) -> None:
+            self.callback = callback
+
+    def forward_eager(*args, output_buffer=None, **kwargs):
+        assert output_buffer is not None
+        output_buffer.copy_(expected)
+        return output_buffer
+
+    capture = FakeCapture()
+    fake_utils = ModuleType("vllm_ascend.utils")
+    fake_utils.weak_ref_tensor = lambda tensor: tensor
+    with (
+        patch("vllm_ascend.models.qwen4_exp.model.BreakableCUDAGraphCapture.current", return_value=capture),
+        patch.dict(sys.modules, {"vllm_ascend.utils": fake_utils}),
+        patch.object(inj, "_forward_eager", side_effect=forward_eager) as eager,
+    ):
+        output = inj(
+            hidden,
+            input_ids,
+            input_ids_cpu=input_ids_cpu,
+            query_start_loc_cpu=query_start_loc_cpu,
+            ngram_context_cpu=ngram_context_cpu,
+        )
+        assert capture.callback is not None
+        assert not eager.called
+        capture.callback()
+
+    assert eager.call_count == 1
+    assert eager.call_args.kwargs["output_buffer"] is output
+    assert eager.call_args.kwargs["input_ids_cpu"] is input_ids_cpu
+    assert eager.call_args.kwargs["query_start_loc_cpu"] is query_start_loc_cpu
+    assert eager.call_args.kwargs["ngram_context_cpu"] is ngram_context_cpu
+    torch.testing.assert_close(output, expected)
+
+
+def test_ple_host_hash_inputs_bypass_device_ids() -> None:
+    cfg = _tiny_moe_config(num_layers=1, num_experts=8, top_k=3)
+    cfg.ngram_vocab_size_base = 257
+    cfg.seed = 1234
+    inj = _PLEInjection(config=cfg, layer_idx=0, dtype_policy=ASCEND_QWEN4EXP_DTYPE_POLICY)
+    hidden = torch.randn(2, inj.ple.hc_hidden_size, dtype=torch.float16)
+    device_ids = torch.tensor([101, 102], dtype=torch.int64)
+    host_ids = torch.tensor([7, 11], dtype=torch.int64)
+    host_start = torch.tensor([0, 2], dtype=torch.int32)
+    host_context = torch.full((1, 2), cfg.eos_token_id, dtype=torch.int32)
+
+    with patch.object(inj, "_real_ngram_ids", wraps=inj._real_ngram_ids) as hash_ids:
+        result = inj._forward_eager(
+            hidden,
+            device_ids,
+            input_ids_cpu=host_ids,
+            query_start_loc_cpu=host_start,
+            ngram_context_cpu=host_context,
+        )
+
+    assert result.shape == hidden.shape
+    assert hash_ids.call_args.args[0] is host_ids
+    assert hash_ids.call_args.args[1] is host_start
+    assert hash_ids.call_args.args[2] is host_context
+
+
+def test_ple_host_hash_inputs_are_all_or_nothing() -> None:
+    cfg = _tiny_moe_config(num_layers=1, num_experts=8, top_k=3)
+    cfg.ngram_vocab_size_base = 257
+    cfg.seed = 1234
+    inj = _PLEInjection(config=cfg, layer_idx=0, dtype_policy=ASCEND_QWEN4EXP_DTYPE_POLICY)
+    hidden = torch.randn(1, inj.ple.hc_hidden_size, dtype=torch.float16)
+    with pytest.raises(ValueError, match="provided together"):
+        inj._forward_eager(hidden, torch.tensor([7]), input_ids_cpu=torch.tensor([7]))
 
 
 def test_ple_injection_builds_lazy_transport_with_checkpoint_dir():

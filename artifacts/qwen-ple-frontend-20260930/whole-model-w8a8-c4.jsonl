@@ -1,0 +1,7 @@
+{"tokens": 32, "elapsed_s": 3.3103884939991985, "aggregate_tok_s": 38.666156625431704, "completion_tokens": [32, 32, 32, 32], "text_sha256": []}
+{"tokens": 512, "elapsed_s": 38.524025864004216, "aggregate_tok_s": 53.16162976397528, "completion_tokens": [512, 512, 512, 512], "text_sha256": [], "repeat": 0}
+{"tokens": 512, "elapsed_s": 37.26765095000155, "aggregate_tok_s": 54.953825846109964, "completion_tokens": [512, 512, 512, 512], "text_sha256": [], "repeat": 1}
+{"tokens": 512, "elapsed_s": 34.593570452001586, "aggregate_tok_s": 59.20175261589694, "completion_tokens": [512, 512, 512, 512], "text_sha256": [], "repeat": 2}
+{"tokens": 512, "elapsed_s": 34.48115120699367, "aggregate_tok_s": 59.394768686975056, "completion_tokens": [512, 512, 512, 512], "repeat": 3}
+{"tokens": 512, "elapsed_s": 35.709514982001565, "aggregate_tok_s": 57.351661063787624, "completion_tokens": [512, 512, 512, 512], "repeat": 4}
+{"tokens": 512, "elapsed_s": 34.96548237599927, "aggregate_tok_s": 58.572050514760576, "completion_tokens": [512, 512, 512, 512], "repeat": 5}

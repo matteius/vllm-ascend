@@ -487,6 +487,7 @@ def _format_eager_linear_weights_npu(
         if isinstance(module, _GDNAttention) and module.conv_weight.device.type == "npu":
             gdn_layers.append(module)
         if isinstance(module, AscendQwen4ExpPLELayer) and module.conv_weight.device.type == "npu":
+            module.prepare_projection_weight()
             ple_layers.append(module)
         for name, param in module.named_parameters(recurse=False):
             if (
@@ -2299,20 +2300,32 @@ class _PLEInjection(nn.Module):
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
         ngram_context: torch.Tensor | None = None,
+        output_buffer: torch.Tensor | None = None,
+        input_ids_cpu: torch.Tensor | None = None,
+        query_start_loc_cpu: torch.Tensor | None = None,
+        ngram_context_cpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         self._ensure_ple_method(hidden_states.device)
         if self.ngram is not None:
+            host_inputs = (input_ids_cpu, query_start_loc_cpu, ngram_context_cpu)
+            if any(tensor is not None for tensor in host_inputs) and not all(
+                tensor is not None for tensor in host_inputs
+            ):
+                raise ValueError("PLE host hash inputs must be provided together")
+            hash_input_ids = input_ids_cpu if input_ids_cpu is not None else input_ids
+            hash_start_loc = query_start_loc_cpu if query_start_loc_cpu is not None else query_start_loc
+            hash_context = ngram_context_cpu if ngram_context_cpu is not None else ngram_context
             # Real hasher: full padded-vocab ids for the lazy-shard table, or
             # reduced to the synthetic stub table on the host dummy-boot path.
             ngram_ids = self._real_ngram_ids(
-                input_ids,
-                query_start_loc,
-                ngram_context,
+                hash_input_ids,
+                hash_start_loc,
+                hash_context,
                 reduce=self.checkpoint_dir is None,
             )
         else:
             ngram_ids = self._stub_ngram_ids(input_ids)
-        return self.ple(hidden_states, ngram_ids)
+        return self.ple(hidden_states, ngram_ids, output_buffer=output_buffer)
 
     def forward(
         self,
@@ -2320,10 +2333,21 @@ class _PLEInjection(nn.Module):
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
         ngram_context: torch.Tensor | None = None,
+        input_ids_cpu: torch.Tensor | None = None,
+        query_start_loc_cpu: torch.Tensor | None = None,
+        ngram_context_cpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         capture = BreakableCUDAGraphCapture.current()
         if capture is None or not capture._capturing:
-            return self._forward_eager(hidden_states, input_ids, query_start_loc, ngram_context)
+            return self._forward_eager(
+                hidden_states,
+                input_ids,
+                query_start_loc,
+                ngram_context,
+                input_ids_cpu=input_ids_cpu,
+                query_start_loc_cpu=query_start_loc_cpu,
+                ngram_context_cpu=ngram_context_cpu,
+            )
 
         # The checkpoint's n-gram table is demand-paged on the host. Hashing,
         # gathering, and the following host-to-device copy must run on every
@@ -2337,9 +2361,23 @@ class _PLEInjection(nn.Module):
         weak_input_ids = weak_ref_tensor(input_ids)
         weak_start_loc = weak_ref_tensor(query_start_loc)
         weak_context = weak_ref_tensor(ngram_context)
+        # These are stable runner-owned host buffers. Keep direct references so
+        # the replay callback hashes current CPU tokens without a device sync.
+        host_input_ids = input_ids_cpu
+        host_start_loc = query_start_loc_cpu
+        host_context = ngram_context_cpu
 
         def run_ple_eager() -> None:
-            weak_output.copy_(self._forward_eager(weak_hidden, weak_input_ids, weak_start_loc, weak_context))
+            self._forward_eager(
+                weak_hidden,
+                weak_input_ids,
+                weak_start_loc,
+                weak_context,
+                output_buffer=weak_output,
+                input_ids_cpu=host_input_ids,
+                query_start_loc_cpu=host_start_loc,
+                ngram_context_cpu=host_context,
+            )
 
         capture.add_eager(run_ple_eager)
         return output
@@ -2458,10 +2496,21 @@ class AscendQwen4ExpDecoderLayer(nn.Module):
         query_start_loc: torch.Tensor | None = None,
         ngram_context: torch.Tensor | None = None,
         qsa_rope_cache: _QSARopeStepCache | None = None,
+        input_ids_cpu: torch.Tensor | None = None,
+        query_start_loc_cpu: torch.Tensor | None = None,
+        ngram_context_cpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # PLE injects into the multi-stream state before the attention block.
         if self.ple is not None:
-            hidden_states = self.ple(hidden_states, input_ids, query_start_loc, ngram_context)
+            hidden_states = self.ple(
+                hidden_states,
+                input_ids,
+                query_start_loc,
+                ngram_context,
+                input_ids_cpu=input_ids_cpu,
+                query_start_loc_cpu=query_start_loc_cpu,
+                ngram_context_cpu=ngram_context_cpu,
+            )
 
         block_input, residual = self.attn_hyper_connection.mix(hidden_states)
         if self.uses_qsa:
@@ -2627,6 +2676,9 @@ class AscendQwen4ExpModel(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         query_start_loc: torch.Tensor | None = None,
         ngram_context: torch.Tensor | None = None,
+        input_ids_cpu: torch.Tensor | None = None,
+        query_start_loc_cpu: torch.Tensor | None = None,
+        ngram_context_cpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
@@ -2653,6 +2705,9 @@ class AscendQwen4ExpModel(nn.Module):
                 query_start_loc,
                 ngram_context,
                 qsa_rope_cache,
+                input_ids_cpu,
+                query_start_loc_cpu,
+                ngram_context_cpu,
             )
 
         # Retain the multi-stream state for the MTP drafter (scheme A). The
@@ -3451,6 +3506,9 @@ class AscendQwen4ExpForCausalLM(
             inputs_embeds,
             query_start_loc=kwargs.get("query_start_loc"),
             ngram_context=kwargs.get("ngram_context"),
+            input_ids_cpu=kwargs.get("input_ids_cpu"),
+            query_start_loc_cpu=kwargs.get("query_start_loc_cpu"),
+            ngram_context_cpu=kwargs.get("ngram_context_cpu"),
         )
 
 

@@ -12,8 +12,8 @@ INT8_SYMMETRIC_MAX = 127
 QUANT_MATMUL_ALIGNMENT = 16
 
 
-def quantize_lm_head_weight(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize an ``[vocab, hidden]`` weight per output channel."""
+def quantize_linear_weight(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize an ``[outputs, inputs]`` weight per output channel."""
     weight_fp32 = weight.to(torch.float32)
     absmax = weight_fp32.abs().amax(dim=1)
     scale = torch.where(absmax == 0, torch.ones_like(absmax), absmax / INT8_SYMMETRIC_MAX)
@@ -22,6 +22,46 @@ def quantize_lm_head_weight(weight: torch.Tensor) -> tuple[torch.Tensor, torch.T
         INT8_SYMMETRIC_MAX,
     )
     return quantized.to(torch.int8), scale
+
+
+def quantize_lm_head_weight(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Backward-compatible name for LM-head callers and benchmark tooling."""
+    return quantize_linear_weight(weight)
+
+
+def dynamic_w8a8_linear(
+    x: torch.Tensor,
+    runtime_weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Apply one per-token dynamic-W8A8 projection on host or NPU."""
+    if x.device.type != "npu":
+        x_fp32 = x.to(torch.float32)
+        absmax = x_fp32.abs().amax(dim=-1, keepdim=True)
+        input_scale = torch.where(absmax == 0, torch.ones_like(absmax), absmax / INT8_SYMMETRIC_MAX)
+        quantized_x = torch.round(x_fp32 / input_scale).clamp(
+            -INT8_SYMMETRIC_MAX,
+            INT8_SYMMETRIC_MAX,
+        )
+        output = quantized_x @ runtime_weight.to(torch.float32)
+        return (output * input_scale * weight_scale.to(torch.float32)).to(x.dtype)
+
+    import torch_npu
+
+    quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
+    needs_unsqueeze = quantized_x.dim() == 3 and quantized_x.shape[1] == 1
+    if needs_unsqueeze:
+        quantized_x = quantized_x.squeeze(dim=1)
+        pertoken_scale = pertoken_scale.squeeze(dim=1)
+    output = torch_npu.npu_quant_matmul(
+        quantized_x,
+        runtime_weight,
+        weight_scale,
+        pertoken_scale=pertoken_scale,
+        bias=None,
+        output_dtype=x.dtype,
+    )
+    return output.unsqueeze(dim=1) if needs_unsqueeze else output
 
 
 class Qwen4ExpDynamicW8A8LMHeadMethod(QuantizeMethodBase):
@@ -35,7 +75,7 @@ class Qwen4ExpDynamicW8A8LMHeadMethod(QuantizeMethodBase):
             raise RuntimeError("dynamic-W8A8 LM head was already prepared")
         if layer.weight.dtype not in (torch.float16, torch.bfloat16, torch.float32):
             raise ValueError("dynamic-W8A8 LM head requires a floating-point checkpoint weight")
-        quantized_weight, weight_scale = quantize_lm_head_weight(layer.weight.data)
+        quantized_weight, weight_scale = quantize_linear_weight(layer.weight.data)
         if quantized_weight.device.type == "npu":
             from vllm_ascend.utils import maybe_trans_nz
 
@@ -59,33 +99,7 @@ class Qwen4ExpDynamicW8A8LMHeadMethod(QuantizeMethodBase):
     ) -> torch.Tensor:
         if bias is not None:
             raise ValueError("dynamic-W8A8 LM head does not support bias")
-        if x.device.type != "npu":
-            x_fp32 = x.to(torch.float32)
-            absmax = x_fp32.abs().amax(dim=-1, keepdim=True)
-            input_scale = torch.where(absmax == 0, torch.ones_like(absmax), absmax / INT8_SYMMETRIC_MAX)
-            quantized_x = torch.round(x_fp32 / input_scale).clamp(
-                -INT8_SYMMETRIC_MAX,
-                INT8_SYMMETRIC_MAX,
-            )
-            output = quantized_x @ layer.weight.to(torch.float32)
-            return (output * input_scale * layer.weight_scale.to(torch.float32)).to(x.dtype)
-
-        import torch_npu
-
-        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
-        needs_unsqueeze = quantized_x.dim() == 3 and quantized_x.shape[1] == 1
-        if needs_unsqueeze:
-            quantized_x = quantized_x.squeeze(dim=1)
-            pertoken_scale = pertoken_scale.squeeze(dim=1)
-        output = torch_npu.npu_quant_matmul(
-            quantized_x,
-            layer.weight.data,
-            layer.weight_scale,
-            pertoken_scale=pertoken_scale,
-            bias=None,
-            output_dtype=x.dtype,
-        )
-        return output.unsqueeze(dim=1) if needs_unsqueeze else output
+        return dynamic_w8a8_linear(x, layer.weight.data, layer.weight_scale)
 
 
 def enable_dynamic_w8a8_lm_head(
