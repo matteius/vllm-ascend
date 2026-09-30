@@ -1,0 +1,55 @@
+{
+  "candidate": "qwen38-w4-ple-fusion-candidate",
+  "hardware": "2x Atlas 300I Duo (4x Ascend 310P3)",
+  "configuration": {
+    "tensor_parallel_size": 4,
+    "expert_parallel": true,
+    "mtp_speculative_tokens": 2,
+    "max_model_len": 262144,
+    "max_num_seqs": 4,
+    "gpu_memory_utilization": 0.965
+  },
+  "operator": {
+    "t1_fused_ms": 0.01265696,
+    "t1_speedup": 47.0533,
+    "t3_fused_ms": 0.01509018,
+    "t3_speedup": 39.3364,
+    "max_abs_error": 0.000244140625,
+    "changing_input_graph_tests": "2 passed"
+  },
+  "coherence_smoke": {
+    "prompt": "A farmer has 17 rows of 19 apple trees. How many trees are there? Explain briefly.",
+    "answer": "323",
+    "completion_tokens": 53,
+    "elapsed_s": 2.043202013010159
+  },
+  "c1": {
+    "warmup_tok_s": 29.05731002269857,
+    "runs_tok_s": [
+      30.078806577293836,
+      29.58970137808261,
+      30.759615590480795,
+      29.8241424834877,
+      28.51414567793536
+    ],
+    "median_tok_s": 29.8241424834877,
+    "mean_tok_s": 29.75328234145606,
+    "peak_tok_s": 30.759615590480795,
+    "retained_baseline_median_tok_s": 29.86104432648593
+  },
+  "c4": {
+    "warmup_aggregate_tok_s": 56.57608233017966,
+    "runs_aggregate_tok_s": [
+      58.040659906790644,
+      57.9607192165886,
+      58.19929403019505
+    ],
+    "median_aggregate_tok_s": 58.040659906790644,
+    "mean_aggregate_tok_s": 58.06689105119143,
+    "retained_baseline_median_tok_s": 59.52331078172743
+  },
+  "relative_change_percent": {
+    "c1_median": -0.12357854130874424,
+    "c4_median": -2.49087434059857
+  }
+}

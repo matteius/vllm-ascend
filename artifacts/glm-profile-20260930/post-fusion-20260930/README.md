@@ -1,0 +1,105 @@
+# GLM post-fusion 310P profile (30 September 2026)
+
+The measured server used the checkpoint, TP4 launch, 16,384-token context,
+NZ-packed W2/W4 expert bank, fused mHC Sinkhorn, MLA writer, and FP16 mHC state
+from `../serve-fp16-mhc.sh`. A separate launch added a torch NPU profiler with
+16 active iterations, zero delay, and output under
+`/srv/ai/src/glm-round-20260930/glm-profile-codex-20260930/npu` on Threadripper.
+The same server stayed loaded for all four client runs. Each client stream used
+a 25-token prompt and 32 output tokens with EOS ignored.
+
+| Run | Streams | Unprofiled decode | Profiled decode |
+| --- | ---: | ---: | ---: |
+| Matched short request | 1 | 2.049 tok/s | 1.855 tok/s |
+| Matched short request | 4 | 4.023 tok/s aggregate | 3.777 tok/s aggregate |
+
+Exact client timestamps are in `baseline-s1.json`, `baseline-s4.json`,
+`profiled-s1.json`, and `profiled-s4.json`. The four-stream baseline reached
+four running requests. These short runs reproduce the earlier 2.043 and
+4.155 tok/s results within run-to-run variation. Profiled rates include
+tracing overhead and are not serving baselines.
+
+The Ascend parser completed four of eight rank captures before NPU use was
+deferred for Qwen tests: ranks 1 and 3 of the one-stream capture, and ranks 2
+and 3 of the four-stream capture. The raw captures for all eight ranks remain
+at the Threadripper path above. The parser and GLM server were stopped; all
+four NPUs reported no running processes. No post-trace model change or NPU
+test was made.
+
+| Capture | Rank | Task span | Grouped expert tasks | Collective tasks | Collective wait | Collective transit |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 stream | 1 | 10.50 s | 3.45 s | 2.81 s | 2.67 s | 21 ms |
+| 1 stream | 3 | 10.50 s | 3.67 s | 2.31 s | 2.17 s | 22 ms |
+| 4 streams | 2 | 19.99 s | 10.16 s | 3.89 s | 3.71 s | 46 ms |
+| 4 streams | 3 | 19.99 s | 10.07 s | 3.71 s | 3.53 s | 57 ms |
+
+These sums are task attribution; task overlap and rank synchronization mean
+they cannot be added to predict end-to-end latency. The four-stream capture
+includes three prefill iterations with 200, 208, and 416 routed rows. The
+one-stream capture includes one 200-row prefill iteration. Filtering each
+rank's timeline after the last prefill grouped task gives this approximate
+decode-only breakdown:
+
+| Capture / rank | Decode iterations | Remaining task span | Grouped expert tasks | Collectives | Large cache slices |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 stream / rank 1 | 15 | 8.01 s | 1.93 s (129 ms/step) | 2.45 s (163 ms/step) | 0.44 s |
+| 4 streams / rank 3 | 13 | 11.67 s | 5.11 s (393 ms/step) | 2.81 s (216 ms/step) | 0.39 s |
+
+The grouped operator's decode activation shape changes from eight to 32
+routed rows. On rank 3, its median task grows from about 1.0 to 3.0 ms.
+Four-stream grouped work consumes roughly 44% of the post-prefill device
+task span, so the packed expert projection remains the first kernel target
+at useful concurrency. The 1,472 collective calls per capture mostly wait
+for rank arrival; their data transit is tens of milliseconds. A full-rank
+arrival-skew analysis is still needed before attributing those waits to an
+individual rank or expert schedule.
+
+The trace also contains 330 slow `aclnnContiguous_SliceAiCore_Slice` tasks on
+rank 1, with input shape `[342,64,384,16]` and about 1.34 ms median each.
+They total 0.44 s in the decode portion (about 30 ms/step) and deserve a
+separate cache-layout investigation. The grouped projection and collective
+wait are larger targets. The previous resident-L1 grouped candidate was
+slower in isolated tests and remains disabled.
+
+## Source follow-up while the NPUs are reserved
+
+The grouped task maps to the 310P W2/W4 grouped Cube operator in
+`csrc/gmm/w2_grouped_blocked_dequant_matmul_v310`. Its kernel reads the
+device-resident cumulative expert ends, scans every local expert, decodes
+packed weight tiles into its reusable NZ workspace, and runs the Cube matmul.
+The trace measures the complete grouped task, so it does not separate the
+expert scan, dequantization, workspace traffic, and Cube math. Any claimed
+speedup from changing one of those stages needs an isolated operator trace.
+
+The 64-to-32-channel slices match two 512-wide views of a physically padded
+1024-wide NZ page, once per key and value view in each of 11 sparse layers.
+The 310P decode path passes those views to `npu_qsa_sparse_attention_310`;
+the QSA kernel currently computes the page address from the *logical* cache
+channel count. A direct use of the padded backing therefore needs a physical
+page stride in the operator contract and tiling data, plus a logical head
+count independent of that stride. Merely dropping `contiguous` or passing
+the full page would address the wrong rows. The trace shape and call path
+support this explanation, but the exact caller of CANN's copy still needs a
+runtime stack trace or targeted operator capture when hardware is free. A
+read-only inspection of rank 1's saved `trace_view.json` found a pair of
+1.33 ms and 1.37 ms slice tasks immediately after `AscendCL@aclnnContiguous`;
+no `aten::contiguous` event was nearby. This narrows the copy to CANN's
+contiguity handling, but does not identify which cache view triggered it.
+
+The merged local model runner also referred to missing padded-layout and
+GLM view helpers and used undefined cache-layout locals. The source repair
+restores the cache capability helpers, initializes the DeepSeek-V4 stride
+mapping, and keeps GLM on its existing page-strided reshape path. The V2
+cache-spec conversion now preserves GLM's model marker, physical stride
+marker, and compression ratio; its historical tail view is limited to the
+historical tail role. These are startup/correctness repairs with no measured
+decode-speed result.
+
+When NPU testing resumes, first complete the other four rank parses. Then
+benchmark a new grouped-projection candidate at eight and 32 routed rows,
+covering W4 gate/up and W2 down, before a full model reload. The candidate
+must pass exact FP16 parity, including empty local groups and repeated
+experts; follow with matched end-to-end one- and four-stream runs. A direct
+small-batch packed-code projection is a plausible prototype because each
+active expert receives few rows, but this trace does not establish that it
+will beat the current Cube path.
