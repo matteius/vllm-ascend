@@ -70,7 +70,7 @@
 #include "attention/qsa_index_cache_update_v310/qsa_index_cache_update_310_torch_adpt.h"
 #include "attention/mla_cache_write_v310/mla_cache_write_310_torch_adpt.h"
 #include "attention/mhc_sinkhorn_v310/mhc_sinkhorn_310_torch_adpt.h"
-#include "attention/qwen4exp_ple_decode_v310/qwen4exp_ple_decode_310_torch_adpt.h"
+#include "attention/qwen4_exp_ple_decode_v310/qwen4exp_ple_decode_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/msa_index_score/msa_index_score_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
@@ -2902,7 +2902,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
              &vllm_ascend::mhc_sinkhorn_310);
 
     ops.def(
-        "qwen4exp_ple_decode_310(Tensor key, Tensor value, Tensor hidden, "
+        "qwen4exp_ple_decode_310(Tensor projected, Tensor hidden, "
         "Tensor norm_key_weight, Tensor norm_query_weight, Tensor norm_conv_weight, "
         "Tensor current_conv_weight, Tensor(a!) output, float norm_eps=1e-6) -> ()");
     ops.impl("qwen4exp_ple_decode_310", torch::kPrivateUse1,

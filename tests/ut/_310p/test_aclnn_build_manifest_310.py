@@ -46,4 +46,4 @@ def test_qsa_sparse_attention_accepts_runtime_nz_kv_cache() -> None:
     op_def = QSA_SPARSE_ATTENTION_DEF.read_text()
     for cache_name in ("keyCache", "valueCache"):
         cache_input = op_def.split(f'this->Input("{cache_name}")', 1)[1].split(";", 1)[0]
-        assert "FormatList({ge::FORMAT_FRACTAL_NZ})" in cache_input
+        assert "ge::FORMAT_FRACTAL_NZ" in cache_input

@@ -873,8 +873,7 @@ at::Tensor mhc_sinkhorn_310_meta(
 }
 
 void qwen4exp_ple_decode_310_meta(
-    const at::Tensor &key,
-    const at::Tensor &value,
+    const at::Tensor &projected,
     const at::Tensor &hidden,
     const at::Tensor &norm_key_weight,
     const at::Tensor &norm_query_weight,
@@ -883,8 +882,7 @@ void qwen4exp_ple_decode_310_meta(
     at::Tensor &output,
     double norm_eps)
 {
-    (void)key;
-    (void)value;
+    (void)projected;
     (void)hidden;
     (void)norm_key_weight;
     (void)norm_query_weight;
