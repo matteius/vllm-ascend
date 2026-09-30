@@ -58,7 +58,6 @@
 #include "gmm/qwen_w4_a8_int4_down_reduce_v310/qwen_w4_a8_int4_down_reduce_310_torch_adpt.h"
 #include "gmm/qwen_w4_a8_pack_v310/qwen_w4_a8_pack_310_torch_adpt.h"
 #include "gmm/qwen_w4_a8_swiglu_pack_v310/qwen_w4_a8_swiglu_pack_310_torch_adpt.h"
-#include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_kda/recurrent_kda_torch_adpt.h"
 #include "attention/chunk_kda_fwd/chunk_kda_fwd_torch_adpt.h"
 #include "attention/kda_gate_cumsum/kda_gate_cumsum_torch_adpt.h"
