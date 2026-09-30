@@ -969,7 +969,7 @@ def test_model_state_only_refreshes_seq_lens_for_full_runtime() -> None:
         torch.testing.assert_close(capture_seq_lens, input_batch.seq_lens)
 
 
-def test_worker_selects_v2_runner_on_310p() -> None:
+def test_worker_selects_v2_runner_and_preserves_shared_cache_budget_on_310p() -> None:
     atb_ops = MagicMock()
     atb_ops._register_atb_extensions = MagicMock()
     profiler = MagicMock()
@@ -983,12 +983,22 @@ def test_worker_selects_v2_runner_on_310p() -> None:
             "torch_npu.profiler": profiler,
         },
     ):
-        from vllm_ascend._310p.worker_310p import NPUWorker310
+        import vllm_ascend._310p.worker_310p as worker_module
 
-    worker = object.__new__(NPUWorker310)
+    worker = object.__new__(worker_module.NPUWorker310)
     worker.vllm_config = SimpleNamespace()
     worker.use_v2_model_runner = True
     worker.device = torch.device("cpu")
     with patch("vllm_ascend._310p.worker.v2.model_runner.NPUModelRunner310V2") as runner_cls:
         worker.model_runner = worker._create_model_runner()
     runner_cls.assert_called_once_with(worker.vllm_config, worker.device)
+
+    worker.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: object())
+    )
+    worker.get_kv_cache_spec = MagicMock(return_value={"layer": object()})
+    with (
+        patch.object(worker_module, "get_kv_cache_groups", return_value=[object()]),
+        patch.object(worker_module, "get_310p_shared_cache_slots", return_value={"mamba": 0}),
+    ):
+        assert worker._scale_kv_cache_memory_for_multi_group(12345) == 12345
