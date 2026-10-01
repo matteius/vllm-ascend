@@ -125,12 +125,17 @@ allocation. For the qualified compact-state layout:
 ```
 
 Those blocks consume about 15.4 GiB of physical attention pages per rank plus
-an approximately 1.87-GB, 64-slot recurrent-state pool. The recurrent-state
-tensor shape is accuracy-qualified and must not be enlarged from apparent NPU
-headroom without a long-context coherency test. The first NPU-to-CPU spill and
-CPU-to-NPU restore each emit an explicit warning. Cache transforms such as
-offload and KV parallelism must still run even when the maximum-token forward
-is skipped.
+an approximately 1.87-GB, 64-slot recurrent-state pool. The graph-visible
+recurrent-state tensor shape is accuracy-qualified and must not be enlarged.
+After graph capture and HCCL initialization complete, the runner fills otherwise
+unused NPU memory with a separate LRU checkpoint archive while retaining a
+4-GiB prefill/runtime reserve. Deferring this allocation is required because
+HCCL may create its communicator during graph warmup. The archive does not
+change any kernel-visible slot or block-table shape. Startup logs report its
+capacity. The first NPU-to-CPU spill after both device tiers fill and the first
+later CPU-to-NPU restore each emit an explicit warning. Cache transforms such
+as offload and KV parallelism must still run even when the maximum-token
+forward is skipped.
 
 The retained launcher defaults to the complete
 `qwen38-head-unified-runtime-20261001` snapshot. Do not assemble a serving

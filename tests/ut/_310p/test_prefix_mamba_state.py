@@ -11,13 +11,15 @@ from vllm_ascend._310p.prefix_mamba_state import (
     PrefixMambaStateTier,
     get_mamba_postprocess_block_ids,
     prefix_mamba_active_columns,
+    prefix_mamba_device_archive_slots,
     prefix_mamba_slot_count,
+    prefix_mamba_state_bytes_per_slot,
 )
 
 
-def _tier(num_slots: int = 3) -> tuple[PrefixMambaStateTier, torch.Tensor]:
+def _tier(num_slots: int = 3, archive_slots: int = 0) -> tuple[PrefixMambaStateTier, torch.Tensor]:
     states = torch.zeros((num_slots, 2), dtype=torch.float16)
-    return PrefixMambaStateTier([(states,)], num_slots), states
+    return PrefixMambaStateTier([(states,)], num_slots, archive_slots), states
 
 
 def test_spill_and_restore_preserves_prefix_checkpoint() -> None:
@@ -36,6 +38,69 @@ def test_spill_and_restore_preserves_prefix_checkpoint() -> None:
     assert restored.tolist() == [[0, 2, 1]]
     torch.testing.assert_close(states[2], torch.full((2,), 7, dtype=torch.float16))
     torch.testing.assert_close(states[1], torch.full((2,), 9, dtype=torch.float16))
+
+
+def test_device_archive_defers_host_spill_and_preserves_lru_states() -> None:
+    tier, states = _tier(archive_slots=2)
+    mapped = tier.remap_table(np.array([[101, 102]], dtype=np.int32), 2)
+    states[mapped[0, 0]].fill_(7)
+    states[mapped[0, 1]].fill_(8)
+
+    tier.remap_table(np.array([[103, 102]], dtype=np.int32), 2)
+    assert list(tier._device_archive_resident) == [101]
+    assert not tier._host
+
+    restored = tier.remap_table(np.array([[101, 103]], dtype=np.int32), 2)
+    torch.testing.assert_close(states[restored[0, 0]], torch.full((2,), 7, dtype=torch.float16))
+    assert list(tier._device_archive_resident) == [102]
+    assert not tier._host
+
+    tier.remap_table(np.array([[104, 103]], dtype=np.int32), 2)
+    assert set(tier._device_archive_resident) == {101, 102}
+    tier.remap_table(np.array([[105, 103]], dtype=np.int32), 2)
+    assert set(tier._device_archive_resident) == {101, 104}
+    assert set(tier._host) == {102}
+
+
+def test_copy_on_write_uses_device_archive_before_host() -> None:
+    tier, states = _tier(archive_slots=2)
+    mapped = tier.remap_table(np.array([[101, 102]], dtype=np.int32), 2)
+    states[mapped[0, 0]].fill_(7)
+    tier.remap_table(np.array([[103, 102]], dtype=np.int32), 2)
+
+    tier.copy(101, 201)
+
+    assert set(tier._device_archive_resident) == {101, 201}
+    assert not tier._host
+    restored = tier.remap_table(np.array([[201, 103]], dtype=np.int32), 2)
+    torch.testing.assert_close(states[restored[0, 0]], torch.full((2,), 7, dtype=torch.float16))
+
+
+def test_device_archive_budget_preserves_reserve_and_capacity_limit() -> None:
+    assert prefix_mamba_device_archive_slots(10_000, 2_000, 100, 200) == 80
+    assert prefix_mamba_device_archive_slots(10_000, 2_000, 100, 50) == 50
+    assert prefix_mamba_device_archive_slots(1_000, 2_000, 100, 50) == 0
+    with pytest.raises(ValueError, match="archive budget"):
+        prefix_mamba_device_archive_slots(1_000, 0, 0, 50)
+
+
+def test_device_archive_can_be_deferred_until_after_tier_creation() -> None:
+    tier, states = _tier()
+    assert not tier._device_archive
+    assert not tier._swap_tensors
+
+    tier.allocate_device_archive(2)
+
+    assert tier.device_archive_slots == 2
+    assert tier._device_archive[0].shape == (2, *states.shape[1:])
+    with pytest.raises(RuntimeError, match="already allocated"):
+        tier.allocate_device_archive(1)
+
+
+def test_state_bytes_per_slot_includes_every_layer_and_state() -> None:
+    fp16 = torch.zeros((3, 4), dtype=torch.float16)
+    fp32 = torch.zeros((3, 2), dtype=torch.float32)
+    assert prefix_mamba_state_bytes_per_slot([(fp16, fp32), (fp16,)]) == 24
 
 
 def test_reused_block_id_discards_old_checkpoint() -> None:

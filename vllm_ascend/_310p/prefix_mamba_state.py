@@ -32,6 +32,24 @@ def prefix_mamba_slot_count(max_num_reqs: int, num_speculative_tokens: int) -> i
     return max(PREFIX_MAMBA_MIN_SLOTS, 1 + max_num_reqs * 2 * (1 + num_speculative_tokens))
 
 
+def prefix_mamba_state_bytes_per_slot(layer_states: Sequence[Sequence[torch.Tensor]]) -> int:
+    """Return the bytes needed to retain one checkpoint for a Mamba group."""
+    return sum(state[0].numel() * state[0].element_size() for states in layer_states for state in states)
+
+
+def prefix_mamba_device_archive_slots(
+    free_device_bytes: int,
+    reserve_bytes: int,
+    bytes_per_checkpoint: int,
+    maximum_slots: int,
+) -> int:
+    """Fill spare device memory with checkpoints before using host memory."""
+    if free_device_bytes < 0 or reserve_bytes < 0 or bytes_per_checkpoint <= 0 or maximum_slots < 0:
+        raise ValueError("Invalid prefix Mamba device archive budget")
+    available_bytes = max(0, free_device_bytes - reserve_bytes)
+    return min(maximum_slots, available_bytes // bytes_per_checkpoint)
+
+
 class LiveMambaRequestSlots:
     """Stable per-request lanes when prefix caching is disabled.
 
@@ -130,32 +148,117 @@ def get_mamba_postprocess_block_ids(input_batch: Any, group_id: int, req_idx: in
 
 
 class PrefixMambaStateTier:
-    """Map scheduler block IDs to a bounded set of device state slots."""
+    """Map scheduler block IDs to graph slots and a device archive."""
 
-    def __init__(self, layer_states: Sequence[Sequence[torch.Tensor]], num_slots: int) -> None:
+    def __init__(
+        self,
+        layer_states: Sequence[Sequence[torch.Tensor]],
+        num_slots: int,
+        device_archive_slots: int = 0,
+    ) -> None:
         if num_slots < 2:
             raise ValueError("Prefix Mamba state tier needs a null slot and at least one live slot")
+        if device_archive_slots < 0:
+            raise ValueError("Prefix Mamba device archive slot count cannot be negative")
         self.layer_states = tuple(tuple(states) for states in layer_states)
         self.num_slots = num_slots
         self._resident: OrderedDict[int, int] = OrderedDict()
+        self._device_archive_resident: OrderedDict[int, int] = OrderedDict()
         self._host: dict[int, tuple[torch.Tensor, ...]] = {}
         self._unused_slots = list(range(num_slots - 1, 0, -1))
+        self._unused_device_archive_slots: list[int] = []
         self._spill_count = 0
         self._restore_count = 0
-        self._bytes_per_slot = sum(
-            state[0].numel() * state[0].element_size() for states in self.layer_states for state in states
-        )
+        self._device_archive_hit_count = 0
+        self._bytes_per_slot = prefix_mamba_state_bytes_per_slot(self.layer_states)
+        self._device_archive: tuple[torch.Tensor, ...] = ()
+        self._swap_tensors: tuple[torch.Tensor, ...] = ()
+        self.device_archive_slots = 0
         for states in self.layer_states:
             for state in states:
                 if state.shape[0] != num_slots:
                     raise ValueError("All compact Mamba states must have the same slot count")
                 state[0].zero_()
+        if device_archive_slots:
+            self.allocate_device_archive(device_archive_slots)
+
+    def allocate_device_archive(self, num_slots: int) -> None:
+        """Allocate the second device tier after graph/HCCL initialization."""
+        if num_slots < 0:
+            raise ValueError("Prefix Mamba device archive slot count cannot be negative")
+        if self.device_archive_slots:
+            raise RuntimeError("Prefix Mamba device archive is already allocated")
+        if not num_slots:
+            return
+        if self._device_archive_resident or self._host:
+            raise RuntimeError("Prefix Mamba device archive must be allocated before serving requests")
+        self._device_archive = tuple(
+            torch.empty(
+                (num_slots, *state.shape[1:]),
+                dtype=state.dtype,
+                device=state.device,
+            )
+            for states in self.layer_states
+            for state in states
+        )
+        self._swap_tensors = tuple(torch.empty_like(state[0]) for states in self.layer_states for state in states)
+        self._unused_device_archive_slots = list(range(num_slots - 1, -1, -1))
+        self.device_archive_slots = num_slots
 
     def _slot_tensors(self, slot: int) -> tuple[torch.Tensor, ...]:
         return tuple(state[slot] for states in self.layer_states for state in states)
 
-    def _snapshot(self, slot: int) -> tuple[torch.Tensor, ...]:
-        return tuple(tensor.detach().to("cpu", copy=True) for tensor in self._slot_tensors(slot))
+    def _device_archive_tensors(self, slot: int) -> tuple[torch.Tensor, ...]:
+        return tuple(state[slot] for state in self._device_archive)
+
+    @staticmethod
+    def _copy_tensors(targets: Sequence[torch.Tensor], sources: Sequence[torch.Tensor]) -> None:
+        for target, source in zip(targets, sources):
+            target.copy_(source)
+
+    @staticmethod
+    def _snapshot(tensors: Sequence[torch.Tensor]) -> tuple[torch.Tensor, ...]:
+        return tuple(tensor.detach().to("cpu", copy=True) for tensor in tensors)
+
+    def _release_device_archive(self, block_id: int) -> int | None:
+        slot = self._device_archive_resident.pop(block_id, None)
+        if slot is not None:
+            self._unused_device_archive_slots.append(slot)
+        return slot
+
+    def _spill_to_host(self, block_id: int, tensors: Sequence[torch.Tensor]) -> None:
+        self._host[block_id] = self._snapshot(tensors)
+        self._spill_count += 1
+        if self._spill_count == 1:
+            logger.warning(
+                "Prefix Mamba device tiers exhausted: primary_slots=%d, "
+                "archive_slots=%d, checkpoint_bytes=%d. Spilling checkpoints "
+                "NPU->CPU; subsequent prefix hits may restore CPU->NPU.",
+                self.num_slots - 1,
+                self.device_archive_slots,
+                self._bytes_per_slot,
+            )
+
+    def _store_on_device_or_host(
+        self,
+        block_id: int,
+        tensors: Sequence[torch.Tensor],
+        protected: set[int],
+    ) -> None:
+        if self._unused_device_archive_slots:
+            archive_slot = self._unused_device_archive_slots.pop()
+        else:
+            archive_victim = next(
+                (old_id for old_id in self._device_archive_resident if old_id not in protected),
+                None,
+            )
+            if archive_victim is None:
+                self._spill_to_host(block_id, tensors)
+                return
+            archive_slot = self._device_archive_resident.pop(archive_victim)
+            self._spill_to_host(archive_victim, self._device_archive_tensors(archive_slot))
+        self._copy_tensors(self._device_archive_tensors(archive_slot), tensors)
+        self._device_archive_resident[block_id] = archive_slot
 
     def invalidate(self, block_ids: Sequence[int]) -> None:
         """Forget bytes belonging to newly allocated (possibly reused) IDs."""
@@ -163,6 +266,7 @@ class PrefixMambaStateTier:
             if block_id <= 0:
                 continue
             self._host.pop(block_id, None)
+            self._release_device_archive(block_id)
             slot = self._resident.get(block_id)
             if slot is not None:
                 for tensor in self._slot_tensors(slot):
@@ -174,16 +278,26 @@ class PrefixMambaStateTier:
             return
         source_slot = self._resident.get(source_id)
         if source_slot is not None:
-            snapshot = self._snapshot(source_slot)
+            source = self._slot_tensors(source_slot)
+        elif (archive_slot := self._device_archive_resident.get(source_id)) is not None:
+            self._device_archive_resident.move_to_end(source_id)
+            source = self._device_archive_tensors(archive_slot)
         else:
-            snapshot = self._host.get(source_id)
-        if snapshot is None:
+            source = self._host.get(source_id)
+        if source is None:
             raise RuntimeError(f"Mamba state copy source block {source_id} is not resident or spilled")
-        self._host[target_id] = tuple(tensor.clone() for tensor in snapshot)
+        self._host.pop(target_id, None)
         target_slot = self._resident.get(target_id)
         if target_slot is not None:
-            for target, source in zip(self._slot_tensors(target_slot), snapshot):
-                target.copy_(source)
+            self._release_device_archive(target_id)
+            self._copy_tensors(self._slot_tensors(target_slot), source)
+            return
+        archive_slot = self._device_archive_resident.get(target_id)
+        if archive_slot is not None:
+            self._device_archive_resident.move_to_end(target_id)
+            self._copy_tensors(self._device_archive_tensors(archive_slot), source)
+            return
+        self._store_on_device_or_host(target_id, source, {source_id})
 
     def _admit(self, block_id: int, protected: set[int]) -> int:
         if (slot := self._resident.get(block_id)) is not None:
@@ -196,16 +310,25 @@ class PrefixMambaStateTier:
             if victim_id is None:
                 raise RuntimeError(f"Mamba prefix step needs more than {self.num_slots - 1} live state blocks")
             slot = self._resident.pop(victim_id)
-            self._host[victim_id] = self._snapshot(slot)
-            self._spill_count += 1
-            if self._spill_count == 1:
-                logger.warning(
-                    "Prefix Mamba NPU tier exhausted: resident_slots=%d, "
-                    "checkpoint_bytes=%d. Spilling checkpoints NPU->CPU; "
-                    "subsequent prefix hits may restore CPU->NPU.",
-                    self.num_slots - 1,
-                    self._bytes_per_slot,
-                )
+            incoming_archive_slot = self._device_archive_resident.pop(block_id, None)
+            if incoming_archive_slot is not None:
+                incoming = self._device_archive_tensors(incoming_archive_slot)
+                self._copy_tensors(self._swap_tensors, incoming)
+                self._copy_tensors(incoming, self._slot_tensors(slot))
+                self._copy_tensors(self._slot_tensors(slot), self._swap_tensors)
+                self._device_archive_resident[victim_id] = incoming_archive_slot
+                self._device_archive_hit_count += 1
+                self._resident[block_id] = slot
+                return slot
+            self._store_on_device_or_host(victim_id, self._slot_tensors(slot), protected)
+        archive_slot = self._device_archive_resident.pop(block_id, None)
+        if archive_slot is not None:
+            snapshot = self._device_archive_tensors(archive_slot)
+            self._copy_tensors(self._slot_tensors(slot), snapshot)
+            self._unused_device_archive_slots.append(archive_slot)
+            self._device_archive_hit_count += 1
+            self._resident[block_id] = slot
+            return slot
         snapshot = self._host.pop(block_id, None)
         if snapshot is None:
             for tensor in self._slot_tensors(slot):
@@ -218,8 +341,7 @@ class PrefixMambaStateTier:
                     self._bytes_per_slot,
                     self._spill_count,
                 )
-            for target, source in zip(self._slot_tensors(slot), snapshot):
-                target.copy_(source)
+            self._copy_tensors(self._slot_tensors(slot), snapshot)
         self._resident[block_id] = slot
         return slot
 

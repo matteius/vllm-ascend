@@ -54,7 +54,9 @@ from vllm_ascend._310p.prefix_mamba_state import (
     LiveMambaRequestSlots,
     PrefixMambaStateTier,
     prefix_mamba_active_columns,
+    prefix_mamba_device_archive_slots,
     prefix_mamba_slot_count,
+    prefix_mamba_state_bytes_per_slot,
     supports_compact_live_mamba_state,
 )
 from vllm_ascend._310p.qwen4exp_mtp import (
@@ -80,6 +82,7 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
+_PREFIX_MAMBA_DEVICE_ARCHIVE_RESERVE_BYTES = 4 * (1 << 30)
 
 
 def _iter_kv_cache_tensors(kv_caches: Iterable[Any]) -> Iterator[torch.Tensor]:
@@ -1242,10 +1245,22 @@ class NPUModelRunner310(NPUModelRunner):
                 if isinstance(layer_specs[name], AttentionSpec)
                 for tensor in _iter_kv_cache_tensors((cache,))
             ) + tuple(self._qsa_index_caches.values())
+            tier_states = {
+                group_idx: [kv_caches[name] for name in group.layer_names]
+                for group_idx, group in enumerate(kv_cache_config.kv_cache_groups)
+                if isinstance(group.kv_cache_spec, MambaSpec)
+            }
+            self._prefix_mamba_archive_bytes_per_checkpoint = sum(
+                prefix_mamba_state_bytes_per_slot(states) for states in tier_states.values()
+            )
+            self._prefix_mamba_archive_maximum_slots = max(
+                0,
+                kv_cache_config.num_blocks - (self.num_compact_mamba_blocks - 1),
+            )
             for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
                 if isinstance(group.kv_cache_spec, MambaSpec):
                     self._prefix_mamba_tiers[group_idx] = PrefixMambaStateTier(
-                        [kv_caches[name] for name in group.layer_names],
+                        tier_states[group_idx],
                         self.num_compact_mamba_blocks,
                     )
         # Set up cross-layer KV cache sharing
@@ -1265,6 +1280,41 @@ class NPUModelRunner310(NPUModelRunner):
             layer = self.compilation_config.static_forward_context[layer_name]
             layer.qsa_index_cache = index_cache
         return kv_caches
+
+    def allocate_prefix_mamba_device_archive(self) -> None:
+        """Use post-capture NPU headroom for prefix states before host spill."""
+        tiers = getattr(self, "_prefix_mamba_tiers", {})
+        bytes_per_checkpoint = getattr(self, "_prefix_mamba_archive_bytes_per_checkpoint", 0)
+        if not tiers or not bytes_per_checkpoint:
+            return
+        if any(tier.device_archive_slots for tier in tiers.values()):
+            return
+        free_device_bytes, _ = torch.npu.mem_get_info()
+        archive_slots = prefix_mamba_device_archive_slots(
+            free_device_bytes,
+            _PREFIX_MAMBA_DEVICE_ARCHIVE_RESERVE_BYTES,
+            bytes_per_checkpoint,
+            self._prefix_mamba_archive_maximum_slots,
+        )
+        for tier in tiers.values():
+            tier.allocate_device_archive(archive_slots)
+        logger.info_once(
+            "Prefix Mamba device archive: primary_slots=%d, archive_slots=%d, "
+            "checkpoint_bytes=%d, archive_bytes=%.2f GiB, post_capture_free=%.2f GiB, "
+            "reserve=%.2f GiB. Host spill starts only after both device tiers fill.",
+            self.num_compact_mamba_blocks - 1,
+            archive_slots,
+            bytes_per_checkpoint,
+            archive_slots * bytes_per_checkpoint / (1 << 30),
+            free_device_bytes / (1 << 30),
+            _PREFIX_MAMBA_DEVICE_ARCHIVE_RESERVE_BYTES / (1 << 30),
+            scope="local",
+        )
+
+    def capture_model(self) -> int:
+        graph_memory_bytes = super().capture_model()
+        self.allocate_prefix_mamba_device_archive()
+        return graph_memory_bytes
 
     def _allocate_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
