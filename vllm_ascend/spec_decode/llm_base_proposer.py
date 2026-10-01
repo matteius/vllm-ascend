@@ -688,7 +688,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         att_backend: Any,
         multi_steps_attn_metadata: list[dict[str, Any]],
     ) -> None:
-        if not use_updatable_graph(att_backend):
+        if (
+            not use_updatable_graph(att_backend)
+            or not hasattr(self._runnable, "update_draft_model_metadata")
+            or not hasattr(self._runnable, "set_attn_backend")
+        ):
             return
 
         update_params = []

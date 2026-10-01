@@ -74,6 +74,17 @@ def test_skips_metadata_update_for_non_updatable_graph() -> None:
     proposer._runnable.set_attn_backend.assert_not_called()
 
 
+def test_skips_metadata_update_without_outer_graph_wrapper() -> None:
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer._runnable = lambda: None
+
+    with patch(
+        "vllm_ascend.spec_decode.llm_base_proposer.use_updatable_graph",
+        return_value=True,
+    ):
+        proposer._maybe_update_metadata(object(), [])
+
+
 def test_forwards_and_records_update_stream() -> None:
     proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
     proposer._runnable = MagicMock()
