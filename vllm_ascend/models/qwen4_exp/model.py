@@ -132,6 +132,11 @@ from .ngram_embedding import (
     AscendQwen4ExpNGramEmbedding,
 )
 from .ops.qsa_batched_attention_310 import QSAPrefillGatherStreams, qsa_batched_prefill_310
+from .ops.qsa_group_major_attention_310 import (
+    QSA_GROUP_MAJOR_DEFAULT_QUERY_TILE,
+    QSA_GROUP_MAJOR_MAX_QUERY_TILE,
+    qsa_group_major_prefill_310,
+)
 from .ops.qsa_index_cache_310 import qsa_index_cache_update_310
 from .ops.qsa_indexer import (
     QSA_SELECTION_POLICIES,
@@ -1207,6 +1212,10 @@ class _GDNAttention(nn.Module, MambaBase):
 
 _QSARopeStepCache = dict[tuple[object, ...], tuple[torch.Tensor, torch.Tensor]]
 _QSA_SELECTION_CONFIG_KEY = "ascend_qsa_selection"
+_QSA_PREFILL_CONFIG_KEY = "ascend_qsa_prefill"
+_QSA_PREFILL_BATCHED_GATHER = "batched_gather"
+_QSA_PREFILL_GROUP_MAJOR_UNION = "group_major_union"
+_QSA_PREFILL_BACKENDS = frozenset((_QSA_PREFILL_BATCHED_GATHER, _QSA_PREFILL_GROUP_MAJOR_UNION))
 
 
 def _qsa_selection_policy(config: object) -> str:
@@ -1223,6 +1232,27 @@ def _qsa_selection_policy(config: object) -> str:
     if not isinstance(policy, str) or policy not in QSA_SELECTION_POLICIES:
         raise ValueError(f"QSA selection policy must be one of {sorted(QSA_SELECTION_POLICIES)}, got {policy!r}")
     return policy
+
+
+def _qsa_prefill_policy(config: object) -> tuple[str, int]:
+    """Resolve the explicit QSA prefill schedule before graph capture."""
+    metadata = getattr(config, _QSA_PREFILL_CONFIG_KEY, None)
+    if metadata is None:
+        return _QSA_PREFILL_BATCHED_GATHER, QSA_GROUP_MAJOR_DEFAULT_QUERY_TILE
+    if not isinstance(metadata, dict):
+        raise ValueError(f"{_QSA_PREFILL_CONFIG_KEY} must be a dictionary")
+    unknown = set(metadata) - {"backend", "query_tile"}
+    if unknown:
+        raise ValueError(f"unsupported {_QSA_PREFILL_CONFIG_KEY} fields: {sorted(unknown)}")
+    backend = metadata.get("backend", _QSA_PREFILL_BATCHED_GATHER)
+    if not isinstance(backend, str) or backend not in _QSA_PREFILL_BACKENDS:
+        raise ValueError(f"QSA prefill backend must be one of {sorted(_QSA_PREFILL_BACKENDS)}, got {backend!r}")
+    query_tile = metadata.get("query_tile", QSA_GROUP_MAJOR_DEFAULT_QUERY_TILE)
+    if isinstance(query_tile, bool) or not isinstance(query_tile, int):
+        raise ValueError("QSA group-major query_tile must be an integer")
+    if query_tile < 1 or query_tile > QSA_GROUP_MAJOR_MAX_QUERY_TILE:
+        raise ValueError(f"QSA group-major query_tile must be in [1, {QSA_GROUP_MAJOR_MAX_QUERY_TILE}]")
+    return backend, query_tile
 
 
 def _step_rope_cos_sin(
@@ -1300,6 +1330,7 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
         self.params_dtype = dtype_policy.qsa_main_dtype
         self.prefill_gather_streams = prefill_gather_streams
         self.qsa_selection_policy = _qsa_selection_policy(config)
+        self.qsa_prefill_backend, self.qsa_group_major_query_tile = _qsa_prefill_policy(config)
         expert_quant = w4_config(config)
         self.reuse_query_rope = expert_quant is None or expert_quant["backend"] in CUBE_DEVICE_ROUTED_BACKENDS
         # QSA arithmetic is independent of expert quantization. Both W8 and
@@ -1857,11 +1888,18 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
             use_batched_decode = self._can_use_batched_qsa_decode(metadata, seq_len, selection.group_indices.shape[1])
             query_lens_cpu = getattr(metadata, "query_lens_cpu", None)
             if (use_batched_prefill or use_batched_decode) and self._has_qsa_request_boundaries(metadata):
-                sparse_attention = qsa_batched_prefill_310
+                sparse_attention = (
+                    qsa_group_major_prefill_310
+                    if use_batched_prefill and self.qsa_prefill_backend == _QSA_PREFILL_GROUP_MAJOR_UNION
+                    else qsa_batched_prefill_310
+                )
             sparse_kwargs = {}
-            if sparse_attention is qsa_batched_prefill_310:
+            if sparse_attention in (qsa_batched_prefill_310, qsa_group_major_prefill_310):
                 if query_lens_cpu is not None:
                     sparse_kwargs["query_lens"] = query_lens_cpu.tolist()
+            if sparse_attention is qsa_group_major_prefill_310:
+                sparse_kwargs["query_tile"] = self.qsa_group_major_query_tile
+            if sparse_attention is qsa_batched_prefill_310:
                 if use_batched_prefill and self.prefill_gather_streams is not None:
                     sparse_kwargs["gather_streams"] = self.prefill_gather_streams.get()
             if sparse_attention is qsa_batched_prefill_310 and use_batched_decode:

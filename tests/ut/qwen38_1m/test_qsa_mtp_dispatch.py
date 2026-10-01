@@ -9,7 +9,13 @@ import pytest
 import torch
 
 from vllm_ascend.models.qwen4_exp.dtype_policy import ASCEND_QWEN4EXP_DTYPE_POLICY
-from vllm_ascend.models.qwen4_exp.model import _qsa_selection_policy, _QSAAttention
+from vllm_ascend.models.qwen4_exp.model import (
+    _QSA_PREFILL_BATCHED_GATHER,
+    _QSA_PREFILL_GROUP_MAJOR_UNION,
+    _qsa_prefill_policy,
+    _qsa_selection_policy,
+    _QSAAttention,
+)
 from vllm_ascend.models.qwen4_exp.ops.qsa_batched_attention_310 import QSAPrefillGatherStreams, _request_slices
 from vllm_ascend.models.qwen4_exp.ops.qsa_indexer import (
     QSA_SELECTION_FAST_TOPK,
@@ -46,6 +52,33 @@ def test_qsa_selection_policy_rejects_invalid_metadata(metadata) -> None:
         _qsa_selection_policy(config)
 
 
+def test_qsa_prefill_policy_defaults_to_retained_backend() -> None:
+    assert _qsa_prefill_policy(SimpleNamespace()) == (_QSA_PREFILL_BATCHED_GATHER, 8)
+    config = SimpleNamespace(ascend_qsa_prefill={})
+    assert _qsa_prefill_policy(config) == (_QSA_PREFILL_BATCHED_GATHER, 8)
+
+
+def test_qsa_prefill_policy_accepts_explicit_group_major_tile() -> None:
+    config = SimpleNamespace(ascend_qsa_prefill={"backend": _QSA_PREFILL_GROUP_MAJOR_UNION, "query_tile": 16})
+    assert _qsa_prefill_policy(config) == (_QSA_PREFILL_GROUP_MAJOR_UNION, 16)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        _QSA_PREFILL_GROUP_MAJOR_UNION,
+        {"backend": "unknown"},
+        {"query_tile": 0},
+        {"query_tile": 17},
+        {"query_tile": True},
+        {"extra": True},
+    ],
+)
+def test_qsa_prefill_policy_rejects_invalid_metadata(metadata) -> None:
+    with pytest.raises(ValueError, match="ascend_qsa_prefill|QSA prefill|query_tile"):
+        _qsa_prefill_policy(SimpleNamespace(ascend_qsa_prefill=metadata))
+
+
 @pytest.mark.parametrize("backend", [None, "eager_dequant", "cube_310", "cube_310_tiled", *CUBE_DEVICE_ROUTED_BACKENDS])
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
 def test_batched_qsa_limit_and_group_list_cover_w8_and_routed_w4(backend, tp_size):
@@ -78,6 +111,8 @@ def test_batched_qsa_limit_and_group_list_cover_w8_and_routed_w4(backend, tp_siz
     limit = 8 if backend is None or backend in CUBE_DEVICE_ROUTED_BACKENDS else 2
     assert module.reuse_query_rope is (limit == 8)
     assert module.qsa_selection_policy == QSA_SELECTION_STABLE_ARGSORT
+    assert module.qsa_prefill_backend == _QSA_PREFILL_BATCHED_GATHER
+    assert module.qsa_group_major_query_tile == 8
     assert module._batched_qsa_max_decode_tokens == limit
     expected = torch.arange(1, limit * module.num_kv_heads + 1, dtype=torch.int64)
     expected *= module.num_heads // module.num_kv_heads
