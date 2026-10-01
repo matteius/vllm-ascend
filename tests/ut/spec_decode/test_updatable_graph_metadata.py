@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -94,3 +95,18 @@ def test_forwards_and_records_update_stream() -> None:
 
     proposer._runnable.set_update_stream.assert_called_once_with(update_stream)
     assert proposer.update_stream is update_stream
+
+
+def test_cache_only_group_resolves_backend_in_config_context() -> None:
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.vllm_config = object()
+    group = SimpleNamespace(backend=MagicMock())
+    group.backend.get_impl_cls.return_value = None
+
+    with patch(
+        "vllm_ascend.spec_decode.llm_base_proposer.set_current_vllm_config",
+        return_value=nullcontext(),
+    ) as config_context:
+        assert proposer._is_cache_only_draft_attn_group(group)
+
+    config_context.assert_called_once_with(proposer.vllm_config)
