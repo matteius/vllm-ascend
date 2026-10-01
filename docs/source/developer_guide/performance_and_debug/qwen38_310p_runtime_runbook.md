@@ -53,14 +53,18 @@ looked valid in isolation.
 
 The qualified launcher places a coherent package containing both the retained
 W4 operators and the FP32 recurrent-state operator first in
-`ASCEND_CUSTOM_OPP_PATH` and `LD_LIBRARY_PATH`. A retained package may follow it
-only to provide operators absent from the coherent package.
+`ASCEND_CUSTOM_OPP_PATH` and `LD_LIBRARY_PATH`. The embedded package follows it
+because its QSA host API matches the current `logical_kv_heads` ABI. The older
+retained package is last and may provide only operators absent from both newer
+packages. Putting the retained package before the embedded package selects its
+older QSA signature; the shifted arguments then make graph capture report a
+null output tensor.
 
 `vllm_ascend` bootstraps its embedded `_cann_ops_custom` vendor by prepending it
 when that path is absent. The launcher must therefore include the embedded
-vendor explicitly after the coherent and retained vendors. Merely exporting the
-two external paths lets bootstrap move the stale embedded host library to the
-front and silently restore its FP16-only recurrent schema.
+vendor explicitly after the coherent vendor and before the retained fallback.
+Merely exporting the two external paths lets bootstrap move the embedded host
+library to the front and silently restore its FP16-only recurrent schema.
 
 Before starting a server, verify:
 
@@ -161,6 +165,8 @@ claim a cold-prefill improvement from a request that reused a live prefix cache.
   graph capture.
 - Omitting the embedded vendor from the explicit path let plugin bootstrap
   prepend it and shadow the coherent recurrent host API.
+- Putting the retained package before the embedded vendor selected the older
+  QSA host ABI, shifting `logical_kv_heads` into the output-tensor position.
 - Mixed prefill/decode full graphs violated GDN's decode-only constraint.
 - Treating logical `--kv-cache-memory` bytes as physical allocation produced
   false capacity conclusions.

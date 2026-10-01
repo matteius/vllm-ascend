@@ -162,10 +162,12 @@ export PYTHONPATH="${RUNTIME_ROOT}:/srv/ai/src/vllm-opensensor:${PYTHONPATH:-}"
 # Keep each critical W4 and recurrent operator's host API and kernels in one
 # package. Mixing the FP32 recurrent kernels with the retained FP16 host API
 # made graph capture validate the state tensor against the wrong dtype. The
-# plugin bootstrap prepends PACKAGED_OPP only when it is absent, so listing it
-# last here prevents the embedded FP16 library from shadowing COHERENT_OPP.
-export ASCEND_CUSTOM_OPP_PATH="${COHERENT_OPP}:${RETAINED_OPP}:${PACKAGED_OPP}${ASCEND_CUSTOM_OPP_PATH:+:${ASCEND_CUSTOM_OPP_PATH}}"
-export LD_LIBRARY_PATH="${COHERENT_OPP}/op_api/lib:${RETAINED_OPP}/op_api/lib:${PACKAGED_OPP}/op_api/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+# embedded package must precede the retained fallback because its QSA host API
+# matches the current logical_kv_heads ABI; the retained QSA API predates that
+# argument. Plugin bootstrap prepends PACKAGED_OPP only when it is absent, so
+# listing it explicitly also prevents it from shadowing COHERENT_OPP.
+export ASCEND_CUSTOM_OPP_PATH="${COHERENT_OPP}:${PACKAGED_OPP}:${RETAINED_OPP}${ASCEND_CUSTOM_OPP_PATH:+:${ASCEND_CUSTOM_OPP_PATH}}"
+export LD_LIBRARY_PATH="${COHERENT_OPP}/op_api/lib:${PACKAGED_OPP}/op_api/lib:${RETAINED_OPP}/op_api/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export VLLM_ASCEND_KV_CACHE_FRACTION="$KV_CACHE_FRACTION"
 export VLLM_USE_BREAKABLE_CUDAGRAPH=1
