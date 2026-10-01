@@ -34,6 +34,16 @@ from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 class NPUWorker310(NPUWorker):
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
+        # Qwen4Exp's compact-state runner materializes only a fixed number of
+        # recurrent-state slots, while the scheduler still addresses virtual
+        # Mamba blocks.  Let the parent translate the physical attention
+        # budget into that logical planner budget before considering the
+        # generic cross-group sharing shortcut below.  Returning the raw
+        # budget here strands most of the attention cache whenever the Mamba
+        # page is larger than an attention page (especially with FP32 state).
+        if getattr(self.model_runner, "supports_compact_mamba_state", False):
+            return super()._scale_kv_cache_memory_for_multi_group(available_memory)
+
         kv_cache_spec = self.get_kv_cache_spec()
         layout_resolver = getattr(self.vllm_config.cache_config, "get_resolved_kv_cache_layout", None)
         if isinstance(kv_cache_spec, dict) and callable(layout_resolver):

@@ -1002,3 +1002,35 @@ def test_worker_selects_v2_runner_and_preserves_shared_cache_budget_on_310p() ->
         patch.object(worker_module, "get_310p_shared_cache_slots", return_value={"mamba": 0}),
     ):
         assert worker._scale_kv_cache_memory_for_multi_group(12345) == 12345
+
+
+def test_worker_delegates_compact_state_budget_before_shared_slot_shortcut() -> None:
+    atb_ops = MagicMock()
+    atb_ops._register_atb_extensions = MagicMock()
+    profiler = MagicMock()
+    profiler.dynamic_profile = MagicMock()
+    with patch.dict(
+        sys.modules,
+        {
+            "torch_npu.op_plugin": MagicMock(),
+            "torch_npu.op_plugin.atb": MagicMock(),
+            "torch_npu.op_plugin.atb._atb_ops": atb_ops,
+            "torch_npu.profiler": profiler,
+        },
+    ):
+        import vllm_ascend._310p.worker_310p as worker_module
+
+    worker = object.__new__(worker_module.NPUWorker310)
+    worker.model_runner = SimpleNamespace(supports_compact_mamba_state=True)
+    with (
+        patch.object(
+            worker_module.NPUWorker,
+            "_scale_kv_cache_memory_for_multi_group",
+            return_value=54321,
+        ) as parent_scale,
+        patch.object(worker_module, "get_310p_shared_cache_slots") as shared_slots,
+    ):
+        assert worker._scale_kv_cache_memory_for_multi_group(12345) == 54321
+
+    parent_scale.assert_called_once_with(12345)
+    shared_slots.assert_not_called()

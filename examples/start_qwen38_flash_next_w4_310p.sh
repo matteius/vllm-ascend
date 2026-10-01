@@ -4,9 +4,8 @@
 # Qwen3.8-Flash-Next native W4A8 on two Atlas 300I Duo cards (four NPUs,
 # TP4/EP), with MTP2 and full decode ACL graphs.
 #
-# Retained September 29 candidate. The 196,608-token default leaves a safe
-# workspace margin with FP32 recurrent state; this hardware profile cannot fit
-# 262,144 tokens at the validated 0.965/0.80 memory limits.
+# Retained September 29 candidate. Compact recurrent-state accounting keeps
+# the validated 262,144-token context while preserving workspace headroom.
 # packed INT4 expert weights, per-group INT8
 # activations, a c1-only streamed-weight schedule for the qualified 30-route
 # decode shape, and the resident-weight schedule for c2-c4. Compile-time
@@ -33,7 +32,7 @@ AFFINITY_HELPER=${QWEN38_AFFINITY_HELPER:-/srv/ai/src/qwen38-w4-hardware-2026092
 PORT=${PORT:-8001}
 SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-qwen38-w4-pipeline-c1-dispatch}
 NUM_SPEC_TOKENS=${NUM_SPEC_TOKENS:-2}
-MAX_MODEL_LEN=${MAX_MODEL_LEN:-196608}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-262144}
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-4}
 MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-2048}
 GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.965}
