@@ -59,6 +59,7 @@ from torch import nn
 from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 from vllm.config import get_current_vllm_config_or_none
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -139,6 +140,7 @@ from .ops.qsa_group_major_attention_310 import (
 )
 from .ops.qsa_index_cache_310 import qsa_index_cache_update_310
 from .ops.qsa_indexer import (
+    QSA_SELECTION_FAST_TOPK,
     QSA_SELECTION_POLICIES,
     QSA_SELECTION_STABLE_ARGSORT,
     QSAGroupSelection,
@@ -1217,20 +1219,42 @@ _QSA_PREFILL_GROUP_MAJOR_UNION = "group_major_union"
 _QSA_PREFILL_BACKENDS = frozenset((_QSA_PREFILL_BATCHED_GATHER, _QSA_PREFILL_GROUP_MAJOR_UNION))
 
 
-def _qsa_selection_policy(config: object) -> str:
-    """Resolve the per-model QSA tie policy before graph capture."""
+def _qsa_selection_policies(config: object) -> tuple[str, str]:
+    """Resolve decode and prefill QSA selection before graph capture.
+
+    Prefill defaults to the bounded selector because a stable sort over every
+    visible group needs multi-gigabyte temporary storage for a 2K-token chunk.
+    Decode retains exact stable selection. An explicit ``policy`` continues to
+    apply to both phases unless ``prefill_policy`` overrides it.
+    """
     metadata = getattr(config, _QSA_SELECTION_CONFIG_KEY, None)
     if metadata is None:
-        return QSA_SELECTION_STABLE_ARGSORT
+        return QSA_SELECTION_STABLE_ARGSORT, QSA_SELECTION_FAST_TOPK
     if not isinstance(metadata, dict):
         raise ValueError(f"{_QSA_SELECTION_CONFIG_KEY} must be a dictionary")
-    unknown = set(metadata) - {"policy"}
+    unknown = set(metadata) - {"policy", "prefill_policy"}
     if unknown:
         raise ValueError(f"unsupported {_QSA_SELECTION_CONFIG_KEY} fields: {sorted(unknown)}")
-    policy = metadata.get("policy", QSA_SELECTION_STABLE_ARGSORT)
-    if not isinstance(policy, str) or policy not in QSA_SELECTION_POLICIES:
-        raise ValueError(f"QSA selection policy must be one of {sorted(QSA_SELECTION_POLICIES)}, got {policy!r}")
-    return policy
+    decode_policy = metadata.get("policy", QSA_SELECTION_STABLE_ARGSORT)
+    prefill_policy = metadata.get(
+        "prefill_policy",
+        decode_policy if "policy" in metadata else QSA_SELECTION_FAST_TOPK,
+    )
+    for phase, policy in (("decode", decode_policy), ("prefill", prefill_policy)):
+        if not isinstance(policy, str) or policy not in QSA_SELECTION_POLICIES:
+            raise ValueError(
+                f"QSA selection policy for {phase} must be one of {sorted(QSA_SELECTION_POLICIES)}, got {policy!r}"
+            )
+    return decode_policy, prefill_policy
+
+
+def _qsa_step_selection_policy(
+    decode_policy: str,
+    prefill_policy: str,
+    metadata: object,
+) -> str:
+    """Use bounded selection for any scheduler step containing prefill."""
+    return prefill_policy if getattr(metadata, "num_prefills", 0) > 0 else decode_policy
 
 
 def _qsa_prefill_policy(config: object) -> tuple[str, int]:
@@ -1328,7 +1352,14 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
         self.compute_dtype = dtype_policy.accumulation_dtype
         self.params_dtype = dtype_policy.qsa_main_dtype
         self.prefill_gather_streams = prefill_gather_streams
-        self.qsa_selection_policy = _qsa_selection_policy(config)
+        self.qsa_selection_policy, self.qsa_prefill_selection_policy = _qsa_selection_policies(config)
+        logger.info_once(
+            "QSA selection policies: prefill=%s, decode=%s. "
+            "The bounded prefill policy avoids full-width stable-sort workspace.",
+            self.qsa_prefill_selection_policy,
+            self.qsa_selection_policy,
+            scope="local",
+        )
         self.qsa_prefill_backend, self.qsa_group_major_query_tile = _qsa_prefill_policy(config)
         expert_quant = w4_config(config)
         self.reuse_query_rope = expert_quant is None or expert_quant["backend"] in CUBE_DEVICE_ROUTED_BACKENDS
@@ -1859,7 +1890,11 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
                         max_visible_groups=current_max_groups,
                         max_matmul_decode_tokens=self._batched_qsa_max_decode_tokens,
                         query_lens=current_query_lens,
-                        selection_policy=self.qsa_selection_policy,
+                        selection_policy=_qsa_step_selection_policy(
+                            self.qsa_selection_policy,
+                            self.qsa_prefill_selection_policy,
+                            current_metadata,
+                        ),
                     )
                     copy_group_selection_into(weak_selection, current)
 
@@ -1878,7 +1913,11 @@ class _QSAAttention(nn.Module, AttentionLayerBase):
                     max_visible_groups=max_visible_groups,
                     max_matmul_decode_tokens=self._batched_qsa_max_decode_tokens,
                     query_lens=query_lens,
-                    selection_policy=self.qsa_selection_policy,
+                    selection_policy=_qsa_step_selection_policy(
+                        self.qsa_selection_policy,
+                        self.qsa_prefill_selection_policy,
+                        metadata,
+                    ),
                 )
             sparse_attention = qsa_sparse_attention_310
             use_batched_prefill = (

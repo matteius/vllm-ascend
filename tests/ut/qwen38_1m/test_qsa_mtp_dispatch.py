@@ -13,7 +13,8 @@ from vllm_ascend.models.qwen4_exp.model import (
     _QSA_PREFILL_BATCHED_GATHER,
     _QSA_PREFILL_GROUP_MAJOR_UNION,
     _qsa_prefill_policy,
-    _qsa_selection_policy,
+    _qsa_selection_policies,
+    _qsa_step_selection_policy,
     _QSAAttention,
 )
 from vllm_ascend.models.qwen4_exp.ops.qsa_batched_attention_310 import QSAPrefillGatherStreams, _request_slices
@@ -26,15 +27,43 @@ from vllm_ascend.models.qwen4_exp.ops.qsa_indexer import (
 from vllm_ascend.models.qwen4_exp.w4_moe import CUBE_DEVICE_ROUTED_BACKENDS, FORMAT
 
 
-def test_qsa_selection_policy_defaults_to_exact_stable_sort() -> None:
-    assert _qsa_selection_policy(SimpleNamespace()) == QSA_SELECTION_STABLE_ARGSORT
+def test_qsa_selection_policy_defaults_to_bounded_prefill_and_exact_decode() -> None:
+    expected = (QSA_SELECTION_STABLE_ARGSORT, QSA_SELECTION_FAST_TOPK)
+    assert _qsa_selection_policies(SimpleNamespace()) == expected
     config = SimpleNamespace(ascend_qsa_selection={})
-    assert _qsa_selection_policy(config) == QSA_SELECTION_STABLE_ARGSORT
+    assert _qsa_selection_policies(config) == expected
 
 
 def test_qsa_selection_policy_accepts_explicit_fast_topk() -> None:
     config = SimpleNamespace(ascend_qsa_selection={"policy": QSA_SELECTION_FAST_TOPK})
-    assert _qsa_selection_policy(config) == QSA_SELECTION_FAST_TOPK
+    assert _qsa_selection_policies(config) == (QSA_SELECTION_FAST_TOPK, QSA_SELECTION_FAST_TOPK)
+
+
+def test_qsa_selection_policy_accepts_explicit_prefill_override() -> None:
+    config = SimpleNamespace(
+        ascend_qsa_selection={
+            "policy": QSA_SELECTION_FAST_TOPK,
+            "prefill_policy": QSA_SELECTION_STABLE_ARGSORT,
+        }
+    )
+    assert _qsa_selection_policies(config) == (QSA_SELECTION_FAST_TOPK, QSA_SELECTION_STABLE_ARGSORT)
+
+
+def test_qsa_step_selection_policy_uses_prefill_policy_for_mixed_step() -> None:
+    decode_policy = QSA_SELECTION_STABLE_ARGSORT
+    prefill_policy = QSA_SELECTION_FAST_TOPK
+    assert (
+        _qsa_step_selection_policy(decode_policy, prefill_policy, SimpleNamespace(num_prefills=1, num_decodes=0))
+        == prefill_policy
+    )
+    assert (
+        _qsa_step_selection_policy(decode_policy, prefill_policy, SimpleNamespace(num_prefills=1, num_decodes=1))
+        == prefill_policy
+    )
+    assert (
+        _qsa_step_selection_policy(decode_policy, prefill_policy, SimpleNamespace(num_prefills=0, num_decodes=2))
+        == decode_policy
+    )
 
 
 @pytest.mark.parametrize(
@@ -42,6 +71,7 @@ def test_qsa_selection_policy_accepts_explicit_fast_topk() -> None:
     [
         QSA_SELECTION_FAST_TOPK,
         {"policy": [QSA_SELECTION_FAST_TOPK]},
+        {"prefill_policy": [QSA_SELECTION_FAST_TOPK]},
         {"policy": "unvalidated"},
         {"policy": QSA_SELECTION_STABLE_ARGSORT, "extra": True},
     ],
@@ -49,7 +79,7 @@ def test_qsa_selection_policy_accepts_explicit_fast_topk() -> None:
 def test_qsa_selection_policy_rejects_invalid_metadata(metadata) -> None:
     config = SimpleNamespace(ascend_qsa_selection=metadata)
     with pytest.raises(ValueError, match="ascend_qsa_selection|QSA selection policy"):
-        _qsa_selection_policy(config)
+        _qsa_selection_policies(config)
 
 
 def test_qsa_prefill_policy_defaults_to_retained_backend() -> None:
@@ -111,6 +141,7 @@ def test_batched_qsa_limit_and_group_list_cover_w8_and_routed_w4(backend, tp_siz
     limit = 8 if backend is None or backend in CUBE_DEVICE_ROUTED_BACKENDS else 2
     assert module.reuse_query_rope is (limit == 8)
     assert module.qsa_selection_policy == QSA_SELECTION_STABLE_ARGSORT
+    assert module.qsa_prefill_selection_policy == QSA_SELECTION_FAST_TOPK
     assert module.qsa_prefill_backend == _QSA_PREFILL_BATCHED_GATHER
     assert module.qsa_group_major_query_tile == 8
     assert module._batched_qsa_max_decode_tokens == limit
