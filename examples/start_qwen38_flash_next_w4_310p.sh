@@ -26,6 +26,7 @@ PYTHON_BIN=${QWEN38_PYTHON_BIN:-/srv/ai/venvs/qwen38-w4-test-ce1862/bin/python}
 HARDWARE_ENV=${QWEN38_HARDWARE_ENV:-/srv/ai/src/qwen38-w4-hardware-20260927/qwen38-w4-hardware-env.sh}
 COHERENT_OPP=${QWEN38_COHERENT_OPP:-/srv/ai/src/qwen38-coherent-opp-20261001/vendors/qwen38_coherent_transformer}
 RETAINED_OPP=${QWEN38_RETAINED_OPP:-/srv/ai/src/native-int4-w4a8.KiuhBN/opp-retained-good-20260928}
+PACKAGED_OPP=${RUNTIME_ROOT}/vllm_ascend/_cann_ops_custom/vendors/custom_transformer
 AFFINITY_HELPER=${QWEN38_AFFINITY_HELPER:-/srv/ai/src/qwen38-w4-hardware-20260927/qwen38-w4-kilo-affinity-r8.py}
 
 # 8,400 planner blocks from the qualified FP32-state layout.  This reserves
@@ -145,7 +146,7 @@ if [[ "${1:-}" == --show ]]; then
   exit 0
 fi
 
-for required_dir in "$MODEL" "$RUNTIME_ROOT" "$COHERENT_OPP" "$RETAINED_OPP"; do
+for required_dir in "$MODEL" "$RUNTIME_ROOT" "$COHERENT_OPP" "$RETAINED_OPP" "$PACKAGED_OPP"; do
   [[ -d "$required_dir" ]] || { echo "Required directory is missing: $required_dir" >&2; exit 1; }
 done
 [[ -x "$PYTHON_BIN" ]] || { echo "Python is missing or not executable: $PYTHON_BIN" >&2; exit 1; }
@@ -159,10 +160,12 @@ done
 source "$HARDWARE_ENV"
 export PYTHONPATH="${RUNTIME_ROOT}:/srv/ai/src/vllm-opensensor:${PYTHONPATH:-}"
 # Keep each critical W4 and recurrent operator's host API and kernels in one
-# package.  Mixing the FP32 recurrent kernels with the retained FP16 host API
-# made graph capture validate the state tensor against the wrong dtype.
-export ASCEND_CUSTOM_OPP_PATH="${COHERENT_OPP}:${RETAINED_OPP}:${ASCEND_CUSTOM_OPP_PATH:-}"
-export LD_LIBRARY_PATH="${COHERENT_OPP}/op_api/lib:${RETAINED_OPP}/op_api/lib:${LD_LIBRARY_PATH:-}"
+# package. Mixing the FP32 recurrent kernels with the retained FP16 host API
+# made graph capture validate the state tensor against the wrong dtype. The
+# plugin bootstrap prepends PACKAGED_OPP only when it is absent, so listing it
+# last here prevents the embedded FP16 library from shadowing COHERENT_OPP.
+export ASCEND_CUSTOM_OPP_PATH="${COHERENT_OPP}:${RETAINED_OPP}:${PACKAGED_OPP}${ASCEND_CUSTOM_OPP_PATH:+:${ASCEND_CUSTOM_OPP_PATH}}"
+export LD_LIBRARY_PATH="${COHERENT_OPP}/op_api/lib:${RETAINED_OPP}/op_api/lib:${PACKAGED_OPP}/op_api/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export VLLM_ASCEND_KV_CACHE_FRACTION="$KV_CACHE_FRACTION"
 export VLLM_USE_BREAKABLE_CUDAGRAPH=1

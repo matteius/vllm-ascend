@@ -56,6 +56,12 @@ W4 operators and the FP32 recurrent-state operator first in
 `ASCEND_CUSTOM_OPP_PATH` and `LD_LIBRARY_PATH`. A retained package may follow it
 only to provide operators absent from the coherent package.
 
+`vllm_ascend` bootstraps its embedded `_cann_ops_custom` vendor by prepending it
+when that path is absent. The launcher must therefore include the embedded
+vendor explicitly after the coherent and retained vendors. Merely exporting the
+two external paths lets bootstrap move the stale embedded host library to the
+front and silently restore its FP16-only recurrent schema.
+
 Before starting a server, verify:
 
 1. `nm -D` shows every required W4 and recurrent host symbol in the first host
@@ -153,6 +159,8 @@ claim a cold-prefill improvement from a request that reused a live prefix cache.
   stalled and the expert-filter jump look accidental.
 - Mixing overlapping custom OPP packages caused dtype and stream failures at
   graph capture.
+- Omitting the embedded vendor from the explicit path let plugin bootstrap
+  prepend it and shadow the coherent recurrent host API.
 - Mixed prefill/decode full graphs violated GDN's decode-only constraint.
 - Treating logical `--kv-cache-memory` bytes as physical allocation produced
   false capacity conclusions.
