@@ -166,6 +166,15 @@ throughput as the sum of completion tokens divided by the concurrent wall time.
 Save speculative draft and accepted-token counters with the result. Never
 claim a cold-prefill improvement from a request that reused a live prefix cache.
 
+On the qualified r2 runtime, an exact uncached 23,000-token prompt took
+68.24 seconds to first token with 2,048-token chunks and 68.51 seconds with
+2,560-token chunks. Both runs preserved 4.08 concurrent 262,144-token requests,
+but the larger prompt microbatch produced no cold-prefill gain. Keep 2,048 as
+the default until a repeated sweep demonstrates a material improvement. The
+`--warm-prefixes` capacity probe also reported `cached_tokens: 0` in this hybrid
+Mamba configuration. Treat a warmup as cached only when the response usage or
+server prefix-cache metrics prove a hit.
+
 ## Known bad turns
 
 - Replacing the default loader with a generic parallel iterator lost the EP
@@ -182,3 +191,7 @@ claim a cold-prefill improvement from a request that reused a live prefix cache.
 - Treating logical `--kv-cache-memory` bytes as physical allocation produced
   false capacity conclusions.
 - Looking only at rank 0 hid the slowest-rank startup bottleneck.
+- Assuming a larger prompt microbatch would improve prefill added no measured
+  gain at 2,560 tokens; benchmark the physical batch instead of inferring it.
+- Calling a request warm without checking `cached_tokens` mislabeled a second
+  full prefill as a prefix-cache measurement.
