@@ -388,6 +388,11 @@ Before merging, verify:
 
 ## Quick Start for Contributors
 
+For Qwen3.8 Flash-Next W4 work on four Ascend 310P devices, read the
+[runtime runbook](docs/source/developer_guide/performance_and_debug/qwen38_310p_runtime_runbook.md)
+before changing the launcher, shard loader, cache accounting, custom OPP stack,
+or ACL graph settings.
+
 1. Install development dependencies: `pip install -e .[dev]`
 2. Run tests: `pytest tests/`
 3. Check linting: `ruff check vllm_ascend/`

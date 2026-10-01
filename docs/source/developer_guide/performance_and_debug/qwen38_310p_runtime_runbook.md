@@ -1,0 +1,159 @@
+# Qwen3.8 Flash-Next W4 on 310P: Runtime Runbook
+
+This runbook records the operating rules for the experimental Qwen3.8
+Flash-Next W4A8 runtime on four Ascend 310P devices. Read it before changing
+the launcher, checkpoint loader, cache accounting, custom operators, or ACL
+graph settings. The paths and measured values below describe the qualified
+development host; they are evidence for this runtime, not general vLLM Ascend
+defaults.
+
+## Sources of truth
+
+- Develop from the repository's current main branch and deploy that exact tree.
+  Confirm the runtime path printed by the server before interpreting a result.
+- Keep `examples/start_qwen38_flash_next_w4_310p.sh` and
+  `~/start_qwen38_flashnext_mtp_graph.sh` byte-for-byte equivalent after a
+  launcher change.
+- Do not stage the whole working tree. Several agents can share it, so add only
+  the files owned by the current task and use signed commits.
+- Stop NPU processes immediately when device use is deferred. Host-only review,
+  builds, and documentation can continue without importing NPU packages.
+
+## Read the shard progress correctly
+
+The target checkpoint has 1,610 safetensors files. With TP4/EP4 and
+`--enable-ep-weight-filter`, every rank reads the shared dense tensors in the
+first approximately 48 files. Those files dominate cold disk time. After that
+boundary, each rank rejects non-local expert tensors before disk I/O, so the
+progress bar can jump from about 3% to 50% and then to 100%.
+
+The MTP draft model reuses target weights and crosses its first 48 entries in
+roughly 5-10 seconds. Do not compare that draft progress with the target's cold
+first 48 files. A healthy target load may appear stalled for several minutes
+and then jump at shard 49.
+
+Keep the default safetensors iterator. The generic multi-threaded iterator does
+not preserve the local-expert filter and can make every rank read the whole
+expert bank. Auto-prefetch is intentionally disabled on this host: the
+169.19-GiB checkpoint is larger than 90% of the approximately 136-GiB available
+RAM, and EXT4 is not treated as a network filesystem. Forcing a full prefetch
+would add memory pressure rather than fix the dense-shard bottleneck.
+
+Measure startup by the slowest rank's `Model runner load_model total time`.
+Rank 0 finishing early does not make the service ready; the remaining ranks and
+collective barriers still determine wall-clock startup.
+
+## Keep custom operators coherent
+
+The host API and kernels for an operator must come from the same custom OPP
+package. Path order alone cannot safely combine two packages that both define
+the same operator. We previously loaded an FP16 recurrent host API with an FP32
+recurrent kernel, which failed during graph capture even though both packages
+looked valid in isolation.
+
+The qualified launcher places a coherent package containing both the retained
+W4 operators and the FP32 recurrent-state operator first in
+`ASCEND_CUSTOM_OPP_PATH` and `LD_LIBRARY_PATH`. A retained package may follow it
+only to provide operators absent from the coherent package.
+
+Before starting a server, verify:
+
+1. `nm -D` shows every required W4 and recurrent host symbol in the first host
+   library.
+2. The recurrent operator configuration contains both FP16 and FP32 state
+   variants.
+3. Library resolution after sourcing the hardware environment points to that
+   same package.
+4. `bash -n` passes for the launcher and its `--show` output contains the
+   intended model, cache, graph, and TP/EP settings.
+
+Do not diagnose an asynchronous failure from the top Python frame alone. An
+error reported at an all-reduce can originate in the preceding attention or
+recurrent operator. `ASCEND_LAUNCH_BLOCKING=1` is useful for one diagnostic run,
+but unset it for performance measurements.
+
+## Cache accounting and memory profiling
+
+Memory profiling remains necessary when the model, operators, dtype, graph
+mode, cache layout, or workspace changes. The qualified fixed-cache path may
+skip the maximum-token profile forward only when the user supplied an explicit
+`--kv-cache-memory` value and that exact configuration has already passed a
+real profile run.
+
+The fixed value is expressed in logical planner bytes. It is not the raw NPU
+allocation. For the qualified compact-state layout:
+
+```text
+8,400 planner blocks x 10,556,416 logical bytes/block = 88,673,894,400 bytes
+```
+
+Those blocks consume about 15.4 GiB of physical attention pages per rank plus
+an approximately 1.87-GB fixed recurrent-state pool. Cache transforms such as
+offload and KV parallelism must still run even when the maximum-token forward
+is skipped.
+
+The 4 x 256K claim means the engine reports at least 1,048,576 cache tokens and
+maximum concurrency of at least 4.00 for a 262,144-token request. Setting
+`--max-model-len 262144` alone does not establish capacity.
+
+The Mamba page-size messages are arithmetic and normally complete immediately.
+A long delay before them is usually a lagging rank at model load. A long delay
+after them and before the cache result was the maximum-token memory profile
+forward. The profile metadata previously omitted GDN attention, so that
+forward did not warm the cold-prefill route.
+
+## Graph-capture constraints
+
+GDN supports decode-only full graph capture in this runtime. Use
+`FULL_DECODE_ONLY` with the qualified capture sizes `[1, 2, 3, 6]`. Mixed
+prefill/decode full capture generated requests whose token count exceeded the
+decode graph size and failed the GDN assertion.
+
+Decode graph capture must also exercise the FP32 recurrent state successfully.
+An error saying that `params.state` supports only FP16 indicates an incoherent
+host API/kernel package, not a reason to cast the model state down to FP16.
+
+## Validation sequence
+
+Run the following gates in order and retain the logs:
+
+1. Host checks: launcher syntax and `--show`, Python compilation, focused unit
+   tests, custom OPP symbols/configuration, and library resolution.
+2. Stop the existing service and verify that no process owns an NPU.
+3. Start the full TP4/EP4 server. Record target and draft load times for every
+   rank; confirm the expert filter and the post-shard-48 jump.
+4. Confirm the fixed-cache skip message, at least 1,048,576 cache tokens,
+   concurrency at least 4.00, successful decode graph capture, and `/v1/models`
+   readiness.
+5. Run generation and tool-call smoke tests.
+6. Measure a genuinely cold unique long prefix, then the same warm prefix.
+   Prefix caching speeds reuse; it does not turn the first request into a warm
+   request.
+7. Measure serial 512-token decode and a four-request concurrent throughput
+   run. Report TTFT independently from decode and end-to-end throughput.
+
+Useful clients are:
+
+- `tools/qwen38_decode_study/smoke.py`
+- `tools/qwen38_decode_study/long_prefix.py`
+- `tools/qwen38_decode_study/benchmark.py`
+- `tools/qwen4exp/benchmark_capacity.py`
+
+For streaming results, compute serial decode as
+`(completion_tokens - 1) / (last_token_time - first_token_time)`. Compute total
+throughput as the sum of completion tokens divided by the concurrent wall time.
+Save speculative draft and accepted-token counters with the result. Never
+claim a cold-prefill improvement from a request that reused a live prefix cache.
+
+## Known bad turns
+
+- Replacing the default loader with a generic parallel iterator lost the EP
+  skip and increased I/O and memory use.
+- Treating shard progress as linear made the expected dense-shard phase look
+  stalled and the expert-filter jump look accidental.
+- Mixing overlapping custom OPP packages caused dtype and stream failures at
+  graph capture.
+- Mixed prefill/decode full graphs violated GDN's decode-only constraint.
+- Treating logical `--kv-cache-memory` bytes as physical allocation produced
+  false capacity conclusions.
+- Looking only at rank 0 hid the slowest-rank startup bottleneck.
