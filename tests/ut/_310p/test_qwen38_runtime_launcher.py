@@ -33,3 +33,11 @@ def test_matching_qsa_abi_precedes_retained_fallback():
     packaged_index = launcher.index("${PACKAGED_OPP}:${RETAINED_OPP}")
     qsa_abi_comment_index = launcher.index("QSA host API")
     assert qsa_abi_comment_index < packaged_index
+
+
+def test_coherent_opp_supports_the_qualified_prefill_chunk():
+    launcher = LAUNCHER.read_text()
+
+    assert "qwen38-coherent-opp-20261001-r2" in launcher
+    assert "20,480 rows" in launcher
+    assert "MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-2048}" in launcher

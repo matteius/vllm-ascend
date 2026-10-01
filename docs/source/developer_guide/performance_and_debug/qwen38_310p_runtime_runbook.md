@@ -66,6 +66,17 @@ vendor explicitly after the coherent vendor and before the retained fallback.
 Merely exporting the two external paths lets bootstrap move the embedded host
 library to the front and silently restore its FP16-only recurrent schema.
 
+The W4 host tilers must also cover the routed rows produced by one prefill
+chunk. Qwen routes each token to eight experts, so the qualified 2,048-token
+chunk requires capacity for 16,384 routed rows. A stale custom OPP capped both
+the matmul and activation-pack tilers at 5,120 rows: decode graph capture and
+short prompts passed, but the first chunk of a cold 23K prompt failed with
+`Failed to execute tiling function`. The r2 coherent package raises both
+bounds to 20,480. Rebuild the host tilers whenever
+`MAX_NUM_BATCHED_TOKENS * top_k` exceeds the packaged bound, and validate with
+a prompt longer than one chunk. A decode-only startup test cannot establish
+prefill support.
+
 Before starting a server, verify:
 
 1. `nm -D` shows every required W4 and recurrent host symbol in the first host
