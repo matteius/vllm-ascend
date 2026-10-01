@@ -1,0 +1,9 @@
+{
+  "repeats": 128,
+  "prompt_tokens": 2066,
+  "completion_tokens": 16,
+  "ttft_s": 45.05354050005553,
+  "e2e_s": 52.09723529702751,
+  "decode_s": 7.043637728958856,
+  "text": "The user is testing me with repeated phrases and asking me to \"answer with the"
+}

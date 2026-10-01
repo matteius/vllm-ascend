@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import types
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -64,6 +65,28 @@ _REAL_GEOMETRY = {
 # ---------------------------------------------------------------------------
 # Router: glm_route_topk
 # ---------------------------------------------------------------------------
+
+
+def test_router_compute_dtype_matches_310p_and_host_reference():
+    assert M._router_compute_dtype("npu") == torch.float32
+    assert M._router_compute_dtype("cpu") == torch.float64
+
+
+def test_router_float32_path_keeps_selected_experts_and_weights():
+    torch.manual_seed(29)
+    logits = torch.randn(8, 288, dtype=torch.float16)
+    bias = torch.randn(288, dtype=torch.float32) * 0.1
+    for n_group, topk_group in ((1, 1), (8, 4)):
+        kwargs = {
+            "e_score_correction_bias": bias,
+            "n_group": n_group,
+            "topk_group": topk_group,
+        }
+        reference_ids, reference_weights = M.glm_route_topk(logits, 8, **kwargs)
+        with patch.object(M, "_router_compute_dtype", return_value=torch.float32):
+            candidate_ids, candidate_weights = M.glm_route_topk(logits, 8, **kwargs)
+        torch.testing.assert_close(candidate_ids, reference_ids)
+        torch.testing.assert_close(candidate_weights, reference_weights.float(), rtol=1e-6, atol=1e-7)
 
 
 def test_route_topk_shapes_and_norm():
@@ -132,6 +155,15 @@ def test_eager_combine_scales_routed_and_adds_shared():
     shared = torch.full((3, 8), 2.0)
     out = M.eager_moe_combine(routed, shared, 2.5, accumulation_dtype=torch.float32)
     assert torch.allclose(out, torch.full((3, 8), 2.5 + 2.0))
+
+
+def test_eager_combine_keeps_scale_as_scalar_op_attribute():
+    routed = torch.tensor([[1.5, -2.0]], dtype=torch.float16)
+    shared = torch.tensor([[3.0, 4.0]], dtype=torch.float16)
+    with patch.object(torch, "as_tensor", side_effect=AssertionError("device scalar copy")):
+        out = M.eager_moe_combine(routed, shared, 2.5, accumulation_dtype=torch.float32)
+    torch.testing.assert_close(out, torch.tensor([[6.75, -1.0]]))
+    assert out.dtype == torch.float32
 
 
 def test_eager_combine_without_shared():

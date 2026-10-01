@@ -150,5 +150,78 @@ GLM. The planner allocated four live KDA state slots while the runner left
 scheduler block IDs 9–11 unmapped. The candidate package now enables GLM
 remapping and checks this invariant before allocation; the repository runner
 has the same condition and early check. Twenty-two CPU planner and compact
-state tests pass. NPU use was deferred before another full serve, so there is
-no end-to-end throughput result for this candidate and port 8003 is down.
+state tests passed. A later full TP4 serve on port 8003 completed generation;
+its matched 25-prompt-token, 32-output-token runs measured 2.212 tok/s at one
+stream and 4.754 tok/s aggregate at four streams. The corresponding files are
+`compact-kda-s1.json` and `compact-kda-s4.json`. The 4-stream gain over the
+earlier 4.023 tok/s baseline combines the compact KDA and physical-page QSA
+changes, so it cannot be attributed to either change alone.
+
+A separate FULL_DECODE_ONLY graph trial failed during capture in the GLM
+K-pool indexer's `_write_pools`: boolean advanced indexing on `valid_state`
+called `aclnnNonzeroV2` while the stream was captured. The later `507015`
+stream synchronization errors were consequences of that failure. The same
+function also selects completed pools with a device-side boolean mask, so a
+single indexing-site edit would not establish graph compatibility. No graph
+throughput result exists.
+
+## Port 8001 serving check
+
+The eager TP4 server was reloaded on `0.0.0.0:8001` with the same checkpoint,
+context limit, and 0.965 NPU memory utilization. A 26-token arithmetic prompt
+completed without a device fault. It answered 42 but exposed a stray
+`</think>` marker in the content. Matched 25-prompt-token, 32-output-token
+runs measured 2.236 tok/s at one stream and 4.476 tok/s aggregate at four
+streams; see `compact-kda-port8001-s1.json` and
+`compact-kda-port8001-s4.json`. This is within the variation of the earlier
+port 8003 run. The four-stream run reached four active requests with none
+waiting. A 2,066-token prompt completed its prefill in 45.0 seconds and
+decoded 16 tokens in 7.0 seconds; see `context-port8001-2k.json`.
+An 8,232-token prompt completed prefill in 210.3 seconds (39.1 prompt tok/s)
+and decoded 32 tokens in 14.4 seconds (2.16 tok/s); see
+`context-port8001-8k.json`. The later 512-token prefill chunks were about
+13–14 seconds each. Decode latency did not grow materially between the short
+and 8K requests, while long-context prefill became much slower.
+
+These requests passed `chat_template_kwargs={"enable_thinking": false}`.
+Inspection of the checkpoint's `chat_template.jinja` shows that it does not
+read this key: it always starts generation with `<think>` and accepts
+`reasoning_effort` instead. The server was launched without a reasoning
+parser, so response `content` mixed reasoning with the final answer. The
+8K request's first 32 tokens were off topic, but they were not a completed
+answer; this evidence does not establish long-context answer quality. A
+short arithmetic response was correct yet exposed `</think>` in content.
+
+`serve-compact-kda-8001.sh` records the next launch configuration with
+`--reasoning-parser glm47`; `probe-coherence.py` records reasoning and final
+content separately and uses the supported `reasoning_effort` template key.
+Neither has been run on NPU. The source batch builds K-pool indices for every
+short-context query row at once when all completed pools fit the 512-pool
+budget, requests FP32 directly for the 310P expert router, and uses an op
+scalar for the routed/shared combine instead of allocating a device tensor
+for the multiplier. CPU K-pool parity and MoE tests pass; NPU correctness and
+speed remain to be measured. NPU testing was deferred before these source
+changes were deployed. The eager server subsequently received a shutdown
+signal and port 8001 is down. Its final log shows orderly teardown, not a new
+AICore exception.
+
+## Next decode optimization batch
+
+The grouped W2/W4 operator owns one Cube launch per projection across all
+experts. A core currently scans cumulative group ends in expert order and
+dequantizes each active expert's packed weight tiles into an NZ workspace.
+The prior binary search reduced scan work but changed the 8/32-row isolated
+medians by less than noise; a resident-L1 variant was slower. The next kernel
+candidate should target *work per active expert*: cache a packed tile in L1
+only when more than one routed row shares it, and keep the current workspace
+path for singleton groups. That needs a separate isolated kernel package and
+parity cases for W4 gate/up, W2 down, zero local routes, and repeated experts.
+The existing known-good kernel remains the serving default until the isolated
+8/32-row medians beat it and matched one-/four-stream runs confirm the gain.
+
+Before that kernel trial, a single parser-enabled serve should check the
+completed final answer at short and 8K contexts, followed by K-pool index
+parity, router IDs/weights, and combine output against this CPU-tested batch.
+The saved 8K response stopped after 32 reasoning tokens, so it cannot serve
+as an answer-quality verdict. A model reload or new throughput claim awaits
+NPU availability; this batch has not been deployed to Threadripper.

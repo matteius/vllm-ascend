@@ -8,6 +8,7 @@ from vllm.model_executor.custom_op import CustomOp
 
 from vllm_ascend.models.glm5next.kpool_ops import (
     compress_kpool,
+    dense_kpool_token_indices,
     expand_kpool_groups,
     score_and_select_kpool_tokens,
     select_kpool_groups,
@@ -184,18 +185,32 @@ class SparseAttnIndexerKpool(CustomOp):
         boundaries = indexer_metadata.cum_query_lens_cpu
         if boundaries is None:
             raise RuntimeError("GLM kpool needs host query boundaries from the scheduler")
-        query_ends = boundaries.tolist()
+        pool_budget = self.topk_tokens // index_kpool
+        pool_lengths = indexer_metadata.seq_lens_cpu.tolist()
+        if pool_lengths and max(pool_lengths) > indexer_metadata.block_table.shape[1] * block_size:
+            raise RuntimeError("GLM kpool block table is shorter than the request's pooled keys")
+        if pool_lengths and max(pool_lengths) <= pool_budget:
+            # All requests need every causal token. The existing selection
+            # would emit these same indices after scoring zero logits; build
+            # every row at once and avoid per-request device launches. Keep
+            # The host lengths include this step, including a pool completed
+            # by its final token.
+            dense = dense_kpool_token_indices(positions, self.topk_tokens, index_kpool)
+            if self.topk_indices_buffer.shape[1] > dense.shape[1]:
+                self.topk_indices_buffer[:num_tokens].fill_(-1)
+            self.topk_indices_buffer[:num_tokens, : dense.shape[1]].copy_(dense)
+            return self.topk_indices_buffer
+
         self.topk_indices_buffer[:num_tokens].fill_(-1)
+        query_ends = boundaries.tolist()
         for request, (start, end) in enumerate(zip(query_ends[:-1], query_ends[1:])):
             if start == end:
                 continue
-            num_pools = int(indexer_metadata.seq_lens_cpu[request])
-            if num_pools > indexer_metadata.block_table.shape[1] * block_size:
-                raise RuntimeError("GLM kpool block table is shorter than the request's pooled keys")
+            num_pools = int(pool_lengths[request])
             pool_ids = torch.arange(num_pools, device=cache.device, dtype=torch.long)
             page_ids = indexer_metadata.block_table[request, pool_ids // block_size].long()
             keys = cache[page_ids, pool_ids % block_size, 0]
-            if num_pools <= self.topk_tokens // index_kpool:
+            if num_pools <= pool_budget:
                 logits = torch.zeros(end - start, num_pools, device=cache.device)
                 selected, _, tail_starts, tail_counts = select_kpool_groups(
                     logits, positions[start:end], self.topk_tokens, index_kpool

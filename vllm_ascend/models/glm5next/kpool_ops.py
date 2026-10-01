@@ -101,6 +101,32 @@ def expand_kpool_groups(
     return torch.cat((expanded, tail), dim=1)
 
 
+def dense_kpool_token_indices(
+    positions: torch.Tensor,
+    topk_tokens: int,
+    pool_size: int,
+) -> torch.Tensor:
+    """Select every causal token when all completed pools fit the budget.
+
+    Keep the same fixed-width layout as ``expand_kpool_groups``: completed
+    pools occupy the prefix, and the incomplete pool occupies the final
+    ``pool_size - 1`` columns. This avoids score construction and top-k for
+    short contexts while preserving the sparse-attention index contract. The
+    caller verifies the length limit from host scheduler metadata.
+    """
+    if positions.ndim != 1 or pool_size <= 1 or topk_tokens <= 0 or topk_tokens % pool_size:
+        raise ValueError("GLM kpool dense selection needs 1-D positions and a divisible token budget")
+    sequence_lengths = positions.to(torch.int32) + 1
+    completed_tokens = torch.div(sequence_lengths, pool_size, rounding_mode="floor") * pool_size
+    prefix_offsets = torch.arange(topk_tokens, device=positions.device, dtype=torch.int32)
+    prefix = prefix_offsets[None, :].expand(positions.shape[0], -1)
+    prefix = prefix.masked_fill(prefix_offsets[None, :] >= completed_tokens[:, None], -1)
+    tail_offsets = torch.arange(pool_size - 1, device=positions.device, dtype=torch.int32)
+    tail = completed_tokens[:, None] + tail_offsets[None, :]
+    tail = tail.masked_fill(tail_offsets[None, :] >= sequence_lengths[:, None] - completed_tokens[:, None], -1)
+    return torch.cat((prefix, tail), dim=1)
+
+
 def score_and_select_kpool_tokens(
     queries: torch.Tensor,
     weights: torch.Tensor,

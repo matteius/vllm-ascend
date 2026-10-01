@@ -8,6 +8,7 @@ import torch
 
 from vllm_ascend.models.glm5next.kpool_ops import (
     compress_kpool,
+    dense_kpool_token_indices,
     expand_kpool_groups,
     hadamard128,
     score_and_select_kpool_tokens,
@@ -91,6 +92,17 @@ def test_topk_keeps_completed_pools_and_current_tail():
             dtype=torch.int32,
         ),
     )
+
+
+def test_dense_kpool_indices_match_zero_score_selection_through_budget_boundary():
+    positions = torch.tensor([0, 1, 2, 3, 4, 7, 8, 2047, 2050], dtype=torch.int32)
+    logits = torch.zeros(positions.numel(), 512)
+    selected, _, tail_starts, tail_counts = select_kpool_groups(logits, positions, 2048, 4)
+    expected = expand_kpool_groups(selected, tail_starts, tail_counts, 4)
+
+    actual = dense_kpool_token_indices(positions, 2048, 4)
+    torch.testing.assert_close(actual, expected)
+    assert actual.shape == (positions.numel(), 2051)
 
 
 def test_future_pool_cannot_change_earlier_selection():
@@ -209,9 +221,9 @@ def test_indexer_keeps_two_requests_in_separate_cache_pages():
     torch.nn.Module.__init__(indexer)
     indexer.k_cache = SimpleNamespace(kv_cache=key_cache, prefix="index")
     indexer.tail_cache = SimpleNamespace(kv_cache=state_cache, prefix="state")
-    indexer.topk_tokens = 4
+    indexer.topk_tokens = 8
     indexer.head_dim = 128
-    indexer.topk_indices_buffer = torch.full((8, 8), -1, dtype=torch.int32)
+    indexer.topk_indices_buffer = torch.full((8, 12), 99, dtype=torch.int32)
     indexer.skip_k_cache_insert = False
     metadata = {
         "index": SimpleNamespace(
@@ -226,9 +238,15 @@ def test_indexer_keeps_two_requests_in_separate_cache_pages():
         "state": SimpleNamespace(slot_mapping=torch.arange(8)),
     }
     positions = torch.arange(4, dtype=torch.int32).repeat(2)
-    with patch(
-        "vllm_ascend.models.glm5next.sparse_attn_indexer_kpool.get_forward_context",
-        return_value=SimpleNamespace(attn_metadata=metadata),
+    with (
+        patch(
+            "vllm_ascend.models.glm5next.sparse_attn_indexer_kpool.get_forward_context",
+            return_value=SimpleNamespace(attn_metadata=metadata),
+        ),
+        patch(
+            "vllm_ascend.models.glm5next.sparse_attn_indexer_kpool.dense_kpool_token_indices",
+            wraps=dense_kpool_token_indices,
+        ) as dense,
     ):
         selected = indexer.forward_oot(
             keys,
@@ -245,7 +263,9 @@ def test_indexer_keeps_two_requests_in_separate_cache_pages():
     expected_tokens = torch.arange(4, dtype=torch.int32)
     torch.testing.assert_close(selected[3, :4], expected_tokens)
     torch.testing.assert_close(selected[7, :4], expected_tokens)
-    assert selected[0, 4] == selected[4, 4] == 0
+    assert selected[0, 8] == selected[4, 8] == 0
+    assert torch.all(selected[:, 11] == -1)
+    assert dense.call_count == 1  # both requests share one batched write
 
 
 def test_glm_indexer_scales_head_weights_in_310p_supported_float32():

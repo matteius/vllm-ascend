@@ -1,0 +1,9 @@
+{
+  "repeats": 512,
+  "prompt_tokens": 8232,
+  "completion_tokens": 32,
+  "ttft_s": 210.30288230301812,
+  "e2e_s": 224.6746035150136,
+  "decode_s": 14.37165503698634,
+  "text": "This is a complex question about a hypothetical scenario where a student is caught cheating. The student is asking for help with their defense, and the question includes a \""
+}

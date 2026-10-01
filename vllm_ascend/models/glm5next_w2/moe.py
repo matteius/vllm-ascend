@@ -209,6 +209,13 @@ __all__ = [
 # ===========================================================================
 
 
+def _router_compute_dtype(device_type: str) -> torch.dtype:
+    # 310P has no native FP64 arithmetic. CANN already substitutes FP32 for
+    # these router operations, so request FP32 directly on NPU and retain the
+    # higher-precision host reference used by the CPU parity tests.
+    return torch.float32 if device_type == "npu" else torch.float64
+
+
 def glm_route_topk(
     router_logits: torch.Tensor,
     top_k: int,
@@ -235,9 +242,11 @@ def glm_route_topk(
     W2 router), the host-parity anchor.
 
     Returns:
-        ``(topk_ids[int64, [T, top_k]], topk_weights[float64, [T, top_k]])``.
+        ``(topk_ids[int64, [T, top_k]], topk_weights[[T, top_k]])``. Weights
+        use FP32 on NPU and FP64 for the CPU reference path.
     """
-    logits = router_logits.double()
+    compute_dtype = _router_compute_dtype(router_logits.device.type)
+    logits = router_logits.to(compute_dtype)
     if scoring_func == "sigmoid":
         scores = torch.sigmoid(logits)
     elif scoring_func == "softmax":
@@ -248,7 +257,7 @@ def glm_route_topk(
     num_tokens, num_experts = scores.shape
     scores_for_choice = scores
     if e_score_correction_bias is not None:
-        scores_for_choice = scores + e_score_correction_bias.double().view(1, -1)
+        scores_for_choice = scores + e_score_correction_bias.to(compute_dtype).view(1, -1)
 
     if n_group > 1:
         # DeepSeek-style group-limited routing: rank groups by the sum of their
@@ -502,7 +511,7 @@ class Glm5NextW2MoE(nn.Module):
         """GLM host router (see :func:`glm_route_topk`).
 
         Returns:
-            ``(topk_ids[int64, [T, top_k]], topk_weights[float64, [T, top_k]])``.
+            ``(topk_ids[int64, [T, top_k]], topk_weights[[T, top_k]])``.
         """
         return glm_route_topk(
             router_logits,

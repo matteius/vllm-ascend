@@ -148,7 +148,7 @@ def eager_moe_combine(
     The shipped ``DeepseekV4MoE`` finishes with
     ``muls_add_triton(routed, shared, routed_scaling_factor)`` -- a Triton
     ``x * scale + y`` kernel. This computes the identical value with a plain
-    :func:`torch.addcmul` (``shared + routed * scale``), and with just
+    :func:`torch.add` with a scalar ``alpha`` (``shared + routed * scale``), and with just
     ``routed * scale`` when the layer has no shared expert (mirroring the shipped
     ``final_hidden_states *= routed_scaling_factor`` branch).
 
@@ -162,9 +162,10 @@ def eager_moe_combine(
     if shared_output is None:
         return routed_acc * routed_scaling_factor
     shared_acc = shared_output.to(acc_dtype)
-    scale = torch.as_tensor(routed_scaling_factor, dtype=acc_dtype, device=routed_acc.device)
-    # muls_add_triton(routed, shared, scale) == routed * scale + shared.
-    return torch.addcmul(shared_acc, routed_acc, scale)
+    # Keep the multiplier as an op attribute. Materializing a device scalar
+    # here adds a host-to-NPU copy and can force stream synchronization on
+    # every MoE layer of every decode step.
+    return torch.add(shared_acc, routed_acc, alpha=routed_scaling_factor)
 
 
 class DeepseekV41W2MoE(nn.Module):
