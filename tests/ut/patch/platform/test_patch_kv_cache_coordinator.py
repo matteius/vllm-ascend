@@ -231,6 +231,55 @@ def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
 
 
 @pytest.mark.parametrize(
+    ("standalone", "prompt_tokens", "expected"),
+    [
+        # A partial final scheduler block has one common replay endpoint.
+        (True, 2864, (2816,)),
+        # An aligned prompt has distinct resend and extension endpoints.
+        (True, 2816, (2688, 2816)),
+        # Consumers retain upstream EAGLE peek-and-drop boundaries.
+        (False, 2816, (2560, 2688)),
+    ],
+)
+def test_replay_boundaries_follow_eagle_drop_policy(standalone, prompt_tokens, expected):
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.eagle_group_ids = {0}
+    coordinator.skips_eagle_block_drop = standalone
+    coordinator.scheduler_block_size = HASH_BLOCK_SIZE
+    request = SimpleNamespace(num_prompt_tokens=prompt_tokens)
+
+    assert coordinator.get_replay_boundaries(request) == expected
+
+
+def test_first_pass_retains_immediate_replay_mamba_boundary():
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.eagle_group_ids = {0}
+    coordinator.skips_eagle_block_drop = True
+    coordinator.scheduler_block_size = HASH_BLOCK_SIZE
+    request = SimpleNamespace(num_prompt_tokens=2864)
+    qwen_mamba_spec = MambaSpec(
+        block_size=HASH_BLOCK_SIZE,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+    boundaries = coordinator.get_replay_boundaries(request)
+    mask = mod.MambaManager.reachable_block_mask(
+        start_block=0,
+        end_block=22,
+        alignment_tokens=HASH_BLOCK_SIZE,
+        kv_cache_spec=qwen_mamba_spec,
+        use_eagle=False,
+        retention_interval=0,
+        reachable_boundaries=boundaries,
+    )
+
+    assert mask is not None
+    assert [idx for idx, retained in enumerate(mask) if retained] == [21]
+
+
+@pytest.mark.parametrize(
     "kv_transfer_config",
     [
         SimpleNamespace(is_kv_producer=True, is_kv_consumer=False),

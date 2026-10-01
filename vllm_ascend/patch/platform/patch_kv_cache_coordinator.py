@@ -242,6 +242,30 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         kv_transfer_config = getattr(kv_cache_config, "kv_transfer_config", None)
         self.skips_eagle_block_drop = _skips_eagle_block_drop(kv_transfer_config)
 
+    def get_replay_boundaries(self, request) -> tuple[int, ...]:
+        """Return every prompt boundary that this process can replay.
+
+        The upstream hybrid coordinator subtracts one scheduler block from
+        EAGLE replay boundaries because its lookup later matches that extra
+        block and drops it. Standalone instances and pure prefill producers
+        deliberately suppress that drop, so retaining the backed-off Mamba
+        state leaves the actual final prompt boundary without a checkpoint.
+        The first identical replay then sees only the full-attention prefix,
+        recomputes the prompt, and materializes the missing Mamba checkpoint;
+        only the third request gets a hybrid cache hit.
+
+        Keep both possible aligned endpoints for a block-aligned prompt: an
+        identical replay is capped at ``num_prompt_tokens - 1``, while a
+        longer sibling can reuse through ``num_prompt_tokens``.
+        """
+        if not self.eagle_group_ids or not self.skips_eagle_block_drop:
+            return super().get_replay_boundaries(request)
+
+        block_size = self.scheduler_block_size
+        resend = (request.num_prompt_tokens - 1) // block_size * block_size
+        extension = request.num_prompt_tokens // block_size * block_size
+        return tuple(sorted({resend, extension}))
+
     @property
     def _cache_hit_alignment_tokens(self) -> int:
         tail_alignment = getattr(self, "tail_pool_alignment", 1)
