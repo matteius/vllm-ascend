@@ -125,6 +125,8 @@ protected:
     RecurrentGatedDeltaRuleV310Info inputParams_;
     UbCalcContext ubCalcCtx_;
     ge::DataType inputDtype_{ge::DT_FLOAT16};
+    ge::DataType stateDtype_{ge::DT_FLOAT16};
+    int64_t stateElementBytes_{2};
 };
 
 } // namespace optiling

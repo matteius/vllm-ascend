@@ -105,7 +105,7 @@ ge::graphStatus RecurrentGatedDeltaRuleV310Tiling::DoOpTiling()
 
 ge::graphStatus RecurrentGatedDeltaRuleV310Tiling::DoLibApiTiling()
 {
-    tilingKey_ = 0;
+    tilingKey_ = stateDtype_ == ge::DT_FLOAT ? 1 : 0;
     return ge::GRAPH_SUCCESS;
 };
 
@@ -180,10 +180,11 @@ ge::graphStatus RecurrentGatedDeltaRuleV310Tiling::AnalyzeDtype()
     inputDtype_ = queryDtype;
 
     auto betaDtype = context_->GetInputDesc(BETA_INDEX)->GetDataType();
-    auto stateDtype = context_->GetInputDesc(STATE_INDEX)->GetDataType();
-    OP_CHECK_IF(betaDtype != queryDtype || stateDtype != queryDtype,
-                OP_LOGE(context_->GetNodeName(), "beta/state dtype should match query dtype"),
+    stateDtype_ = context_->GetInputDesc(STATE_INDEX)->GetDataType();
+    OP_CHECK_IF(betaDtype != queryDtype || (stateDtype_ != ge::DT_FLOAT16 && stateDtype_ != ge::DT_FLOAT),
+                OP_LOGE(context_->GetNodeName(), "beta must be float16; state must be float16 or float32"),
                 return ge::GRAPH_FAILED);
+    stateElementBytes_ = stateDtype_ == ge::DT_FLOAT ? 4 : 2;
 
     auto cuSeqlensDtype = context_->GetInputDesc(CUSEQLENS_INDEX)->GetDataType();
     auto ssmStateIndicesDtype = context_->GetInputDesc(SSM_STATE_INDICES_INDEX)->GetDataType();
@@ -517,7 +518,7 @@ int64_t RecurrentGatedDeltaRuleV310Tiling::CalcWorkingUbBytes(int64_t aNv, int64
 int64_t RecurrentGatedDeltaRuleV310Tiling::CalcVStepCoeff(int64_t aDk, uint32_t stateOutBufferNum,
                                                        uint32_t attnOutBufferNum) const
 {
-    int64_t coeff = (2 + static_cast<int64_t>(2 * stateOutBufferNum)) * aDk +
+    int64_t coeff = stateElementBytes_ * (1 + static_cast<int64_t>(stateOutBufferNum)) * aDk +
                     static_cast<int64_t>(4 * attnOutBufferNum); // stateIn/stateOut/attnOut queues
     coeff += (4 + 4 + 2) * aDk + 4 + 4;                           // stateInUb/broadTmpInUb/foldTmpUb/deltaInUb/attnInUb
     return coeff;
@@ -587,7 +588,7 @@ ge::graphStatus RecurrentGatedDeltaRuleV310Tiling::FinalizeVStepFromUb(int64_t u
         return ge::GRAPH_FAILED;
     }
 
-    int64_t queueCoeff = (2 + static_cast<int64_t>(2 * selected.stateOutBufferNum)) * aDk +
+    int64_t queueCoeff = stateElementBytes_ * (1 + static_cast<int64_t>(selected.stateOutBufferNum)) * aDk +
                          static_cast<int64_t>(4 * selected.attnOutBufferNum);
     int64_t ubRestBytes = ubSize - ubCalcCtx_.fixedUbBytes - queueCoeff * static_cast<int64_t>(selected.vStep);
     if (ubRestBytes < 0) {

@@ -199,6 +199,48 @@ def test_state_dtypes_from_policy():
     assert ssm_dtype == torch.float32
 
 
+def test_model_cache_spec_keeps_recurrent_state_in_fp32():
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    from vllm_ascend.models.qwen4_exp.model import (
+        _LAYER_TYPE_LINEAR,
+        AscendQwen4ExpForCausalLM,
+    )
+
+    conv_dtype, ssm_dtype = AscendQwen4ExpForCausalLM.get_gdn_mamba_state_dtype_from_config(
+        SimpleNamespace(cache_config=None)
+    )
+    assert conv_dtype == torch.float16
+    assert ssm_dtype == torch.float32
+
+    config = SimpleNamespace(
+        **vars(_QWEN4EXP_GDN_CONFIG),
+        hidden_size=2560,
+        num_attention_heads=24,
+        num_key_value_heads=2,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(mamba_cache_mode="align", use_kda_recoverssm=False),
+        model_config=SimpleNamespace(hf_text_config=config),
+        parallel_config=SimpleNamespace(tensor_parallel_size=4),
+        num_speculative_tokens=1,
+    )
+    model = object.__new__(AscendQwen4ExpForCausalLM)
+    torch.nn.Module.__init__(model)
+    model.config = config
+    model.dtype_policy = ASCEND_QWEN4EXP_DTYPE_POLICY
+    model.model = SimpleNamespace(layer_types=[_LAYER_TYPE_LINEAR], expert_sharding=(0, 4))
+
+    spec = model.get_kv_cache_spec(vllm_config)["model.layers.0.attention"]
+    assert isinstance(spec, MambaSpec)
+    assert spec.dtypes == (torch.float16, torch.float32)
+
+    model.vllm_config = vllm_config
+    grouped = model.get_kv_cache_groups()[0].kv_cache_spec
+    assert isinstance(grouped, MambaSpec)
+    assert grouped.dtypes == (torch.float16, torch.float32)
+
+
 def test_model_short_conv_fallback_carries_paged_state():
     from vllm_ascend.models.qwen4_exp.model import _GDNAttention
 

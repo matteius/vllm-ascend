@@ -729,8 +729,7 @@ class _GDNAttention(nn.Module, MambaBase):
         self.params_dtype = dtype_policy.main_dtype
         self.rms_norm_eps = float(getattr(config, "rms_norm_eps", 1e-6))
         self.mamba_conv_dtype = dtype_policy.mamba_conv_cache_dtype
-        # The 310P recurrent GDN operator accepts FP16 state only.
-        self.mamba_ssm_dtype = dtype_policy.main_dtype
+        self.mamba_ssm_dtype = dtype_policy.mamba_ssm_cache_dtype
         self.num_speculative_tokens = num_speculative_tokens
         self.params = _gdn_params_from_config(config)
         self.tp_rank, self.tp_size = (int(expert_sharding[0]), int(expert_sharding[1]))
@@ -2905,7 +2904,7 @@ class AscendQwen4ExpForCausalLM(
     @classmethod
     def get_gdn_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig) -> tuple[torch.dtype, torch.dtype]:
         policy = Qwen4ExpDtypePolicy.from_vllm_config(vllm_config)
-        return (policy.mamba_conv_cache_dtype, policy.main_dtype)
+        return (policy.mamba_conv_cache_dtype, policy.mamba_ssm_cache_dtype)
 
     @classmethod
     def get_ple_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig) -> tuple[torch.dtype, ...]:
@@ -3026,7 +3025,7 @@ class AscendQwen4ExpForCausalLM(
             if layer_type == _LAYER_TYPE_LINEAR and gdn_params is not None:
                 spec[name] = MambaSpec(
                     shapes=gdn_shapes,
-                    dtypes=(policy.mamba_conv_cache_dtype, policy.main_dtype),
+                    dtypes=(policy.mamba_conv_cache_dtype, policy.mamba_ssm_cache_dtype),
                     block_size=DEFAULT_ATTENTION_BLOCK_SIZE,
                     mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
                     **mamba_runtime_kwargs,
@@ -3075,7 +3074,7 @@ class AscendQwen4ExpForCausalLM(
             if layer_type == _LAYER_TYPE_LINEAR and gdn_params is not None:
                 mamba_layers[f"{name}.linear_attn"] = MambaSpec(
                     shapes=gdn_shapes,
-                    dtypes=(policy.mamba_conv_cache_dtype, policy.main_dtype),
+                    dtypes=(policy.mamba_conv_cache_dtype, policy.mamba_ssm_cache_dtype),
                     block_size=DEFAULT_ATTENTION_BLOCK_SIZE,
                     mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
                     **mamba_runtime_kwargs,

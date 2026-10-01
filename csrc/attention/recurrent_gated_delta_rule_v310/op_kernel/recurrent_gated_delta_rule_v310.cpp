@@ -30,7 +30,12 @@ recurrent_gated_delta_rule_v310(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_AD
                               ssmStateIndices, numAcceptedTokens, out, stateOut};
     if (TILING_KEY_IS(0)) {
         TPipe pipe;
-        RGDR<half, half> op(&tilingData);
+        RGDR<half, half, half> op(&tilingData);
+        op.Init(initParams, &pipe);
+        op.Process();
+    } else if (TILING_KEY_IS(1)) {
+        TPipe pipe;
+        RGDR<half, float, half> op(&tilingData);
         op.Init(initParams, &pipe);
         op.Process();
     }

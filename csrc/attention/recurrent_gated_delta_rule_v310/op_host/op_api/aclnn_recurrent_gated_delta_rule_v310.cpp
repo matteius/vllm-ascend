@@ -62,7 +62,7 @@ struct RecurrentGatedDeltaRuleV310Params {
 
 // support dtype
 static const std::initializer_list<DataType> QKV_TYPE_SUPPORT_LIST = {DataType::DT_FLOAT16};
-static const std::initializer_list<DataType> STATE_TYPE_SUPPORT_LIST = {DataType::DT_FLOAT16};
+static const std::initializer_list<DataType> STATE_TYPE_SUPPORT_LIST = {DataType::DT_FLOAT16, DataType::DT_FLOAT};
 static const std::initializer_list<DataType> BETA_TYPE_SUPPORT_LIST = {DataType::DT_FLOAT16};
 static const std::initializer_list<DataType> SEQ_LENS_TYPE_SUPPORT_LIST = {DataType::DT_INT32};
 static const std::initializer_list<DataType> SSM_TYPE_SUPPORT_LIST = {DataType::DT_INT32};

@@ -68,9 +68,8 @@ static ge::graphStatus InferShapeRecurrentGatedDeltaRuleV310(InferShapeContext *
 
 static ge::graphStatus InferDataTypeRecurrentGatedDeltaRuleV310(gert::InferDataTypeContext *context)
 {
-    auto dt = context->GetInputDataType(0);
-    context->SetOutputDataType(0, dt);
-    context->SetOutputDataType(1, dt);
+    context->SetOutputDataType(0, context->GetInputDataType(0));
+    context->SetOutputDataType(1, context->GetInputDataType(STATE_INDEX));
     return ge::GRAPH_SUCCESS;
 }
 

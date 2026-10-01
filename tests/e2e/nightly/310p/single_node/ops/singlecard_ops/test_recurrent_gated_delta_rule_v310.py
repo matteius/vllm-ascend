@@ -131,12 +131,13 @@ def golden(query, key, value, state, beta, scale, seq_lens, indices, g, nat):
         (4, 2, 4, 4, 64, 64, 32),
     ],
 )
-def test_recurrent_gated_delta_rule_v310(batch_size, mtp, nk, nv, dk, dv, num_slots):
+@pytest.mark.parametrize("state_dtype", [torch.float16, torch.float32])
+def test_recurrent_gated_delta_rule_v310(batch_size, mtp, nk, nv, dk, dv, num_slots, state_dtype):
     torch.manual_seed(42)
     scale = dk**-0.5
     seq_lens = torch.ones(batch_size, dtype=torch.int32) * mtp
     T = int(seq_lens.sum())
-    state = torch.rand(num_slots, nv, dv, dk, dtype=torch.float16)
+    state = torch.rand(num_slots, nv, dv, dk, dtype=state_dtype)
     indices = torch.randperm(num_slots, dtype=torch.int32)[:T]
     nat = torch.ones(batch_size, dtype=torch.int32)
     query = torch.nn.functional.normalize(torch.randn(T, nk, dk), dim=-1).to(torch.float16)
