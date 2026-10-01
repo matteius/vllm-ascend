@@ -71,6 +71,7 @@ class TestChunkGatedDeltaRuleFwdH310:
         [
             (1, 1, 1, 128, 128, 128),
             (1, 2, 2, 128, 128, 128),
+            (1, 16, 48, 128, 128, 128),
         ],
     )
     def test_h_state_correctness(self, B, Hg, HV, T, K, V):
@@ -105,6 +106,7 @@ class TestChunkGatedDeltaRuleFwdH310:
         [
             (1, 1, 1, 128, 128, 128),
             (1, 2, 2, 128, 128, 128),
+            (1, 16, 48, 128, 128, 128),
         ],
     )
     def test_v_new_correctness(self, B, Hg, HV, T, K, V):

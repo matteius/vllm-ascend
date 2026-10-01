@@ -77,6 +77,15 @@ bounds to 20,480. Rebuild the host tilers whenever
 a prompt longer than one chunk. A decode-only startup test cannot establish
 prefill support.
 
+Test chunked GDN with the model's production head geometry before accepting a
+rebuilt operator package. Qwen uses 16 gate/key heads and 48 value heads with
+128-dimensional heads. The small one- and two-head ACLNN cases did not expose
+a bad gate-vector copy: they passed while the production case produced about
+0.95 recurrent-state cosine and incoherent text. Compare both the chunk output
+and final state with the PyTorch reference for
+`(B, Hg, Hv, T, K, V) = (1, 16, 48, 128, 128, 128)`. A tiling-offset warning
+at that shape is a kernel failure even when decode startup succeeds.
+
 Before starting a server, verify:
 
 1. `nm -D` shows every required W4 and recurrent host symbol in the first host
@@ -195,3 +204,5 @@ server prefix-cache metrics prove a hit.
   gain at 2,560 tokens; benchmark the physical batch instead of inferring it.
 - Calling a request warm without checking `cached_tokens` mislabeled a second
   full prefill as a prefix-cache measurement.
+- Validating chunked GDN only at one or two heads missed a production-shape
+  gate-copy regression and allowed a numerically bad device object to ship.

@@ -143,10 +143,6 @@ public:
         AscendC::GlobalTensor<GElementInput> gInputThisSubBlock = gInput;
         AscendC::GlobalTensor<UElementInput> uInputThisSubBlock = uInput[offsetK];
         AscendC::GlobalTensor<float> wsInputThisSubBlock = wsInput[offsetK];
-        AscendC::DataCopyParams gCopyParams{
-            1, static_cast<uint16_t>(mActual * sizeof(GElementInput)), 0, 0};
-        AscendC::DataCopyPadParams gPadParams{false, 0, 0, 0};
-
         pingpongFlag = isFirst ? 0 : 4;
         AscendC::LocalTensor<UElementInput> uUbTensor = isFirst ? uUbTensor_ping : uUbTensor_pong;
         AscendC::LocalTensor<float> uUbFloatTensor = isFirst ? uUbFloatTensor_ping : uUbFloatTensor_pong;
@@ -161,12 +157,12 @@ public:
         if (!useKdaGatedPath) {
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + pingpongFlag);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + pingpongFlag);
+            // This path copies a complete, aligned chunk. DataCopyPad corrupts
+            // the gate window at Qwen's 16/48-head production geometry.
             if constexpr(std::is_same<GElementInput, float>::value) {
-                AscendC::DataCopyPad(
-                    gUbTensor, gInputThisSubBlock, gCopyParams, gPadParams);
+                AscendC::DataCopy(gUbTensor, gInputThisSubBlock, mActual);
             } else {
-                AscendC::DataCopyPad(
-                    gInputUbTensor, gInputThisSubBlock, gCopyParams, gPadParams);
+                AscendC::DataCopy(gInputUbTensor, gInputThisSubBlock, mActual);
             }
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + pingpongFlag);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + pingpongFlag);
