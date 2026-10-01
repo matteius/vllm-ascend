@@ -177,16 +177,33 @@ def _group_major_attention(
         raise ValueError("query heads must be divisible by KV heads")
 
     heads_per_kv_head = num_query_heads // num_kv_heads
-    query_rows = query.view(num_queries, num_kv_heads, heads_per_kv_head, head_dim)
+    # Make the shared union a real batch of two KV-head matrices. Flattening
+    # query rows within each KV head avoids broadcasting the same K/V tensor
+    # across the query-tile dimension, which selects a much slower 310P
+    # BatchMatMul schedule. Keeping logits head-major also lets PV consume the
+    # softmax result without a large transpose/copy.
+    query_rows = (
+        query.view(num_queries, num_kv_heads, heads_per_kv_head, head_dim)
+        .permute(1, 0, 2, 3)
+        .reshape(num_kv_heads, num_queries * heads_per_kv_head, head_dim)
+    )
     prescale_query = scale > 0 and math.frexp(scale)[0] == 0.5
     score_query = query_rows * scale if prescale_query else query_rows
-    logits = torch.matmul(score_query, selected_keys)
+    logits = torch.matmul(score_query, selected_keys[0]).view(
+        num_kv_heads,
+        num_queries,
+        heads_per_kv_head,
+        selected_tokens,
+    )
     logits = (logits.float() if prescale_query else logits.float() * scale).masked_fill(
-        ~token_mask[:, None, None, :], -torch.inf
+        ~token_mask[None, :, None, :], -torch.inf
     )
     probabilities = torch.softmax(logits, dim=-1).to(query.dtype)
-    output = torch.matmul(probabilities, selected_values)
-    return output.reshape(num_queries, num_query_heads, head_dim)
+    output = torch.matmul(
+        probabilities.view(num_kv_heads, num_queries * heads_per_kv_head, selected_tokens),
+        selected_values[0],
+    ).view(num_kv_heads, num_queries, heads_per_kv_head, head_dim)
+    return output.permute(1, 0, 2, 3).reshape(num_queries, num_query_heads, head_dim)
 
 
 def qsa_group_major_prefill_310(
