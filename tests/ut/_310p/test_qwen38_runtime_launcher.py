@@ -16,6 +16,12 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 LAUNCHER = REPO_ROOT / "examples" / "start_qwen38_flash_next_w4_310p.sh"
 
 
+def test_launcher_defaults_to_the_coherency_qualified_runtime_snapshot():
+    launcher = LAUNCHER.read_text()
+
+    assert "QWEN38_PLUGIN_ROOT:-/srv/ai/src/qwen38-head-unified-runtime-20261001" in launcher
+
+
 def test_custom_opp_order_survives_plugin_bootstrap():
     launcher = LAUNCHER.read_text()
 
@@ -87,6 +93,14 @@ def _write_qwen_runtime(runtime_root: Path, *, extended_formatter: bool) -> None
     (model_dir / "model.py").write_text(f"def _format_eager_linear_weights_npu({formatter_args}):\n    pass\n")
     (model_dir / "mtp.py").write_text("_format_eager_linear_weights_npu(model, (Predictor, MoE))\n")
     (model_dir / "w4_moe.py").write_text("class DeferredReduceStream:\n    pass\n")
+    (model_dir / "w4a8_int4.py").write_text(
+        "import torch\n"
+        "def pack_native_weight(tensor):\n"
+        "    try:\n"
+        "        torch.set_num_threads(6)\n"
+        "    finally:\n"
+        "        torch.set_num_threads(1)\n"
+    )
 
 
 def test_runtime_coherence_check_accepts_matching_formatter(tmp_path):
@@ -140,3 +154,22 @@ def test_runtime_coherence_check_rejects_missing_w4_symbol(tmp_path):
 
     assert result.returncode != 0
     assert "imports ['MissingStream'] missing" in result.stderr
+
+
+def test_runtime_coherence_check_rejects_serial_weight_packer(tmp_path):
+    _write_qwen_runtime(tmp_path, extended_formatter=True)
+    w4a8_path = tmp_path / "vllm_ascend" / "models" / "qwen4_exp" / "w4a8_int4.py"
+    w4a8_path.write_text("def pack_native_weight(tensor):\n    return tensor\n")
+    env = os.environ.copy()
+    env.update(QWEN38_PLUGIN_ROOT=str(tmp_path), QWEN38_PYTHON_BIN=sys.executable)
+
+    result = subprocess.run(
+        ["bash", str(LAUNCHER), "--check-runtime"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "lost the qualified parallel native-weight packer" in result.stderr

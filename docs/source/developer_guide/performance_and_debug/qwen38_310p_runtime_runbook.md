@@ -9,8 +9,9 @@ defaults.
 
 ## Sources of truth
 
-- Develop from the repository's current main branch and deploy that exact tree.
-  Confirm the runtime path printed by the server before interpreting a result.
+- Develop changes on the repository's current main branch, then deploy them as
+  one complete runtime snapshot. Confirm the runtime path printed by the server
+  before interpreting a result.
 - Keep `examples/start_qwen38_flash_next_w4_310p.sh` and
   `~/start_qwen38_flashnext_mtp_graph.sh` byte-for-byte equivalent after a
   launcher change.
@@ -38,6 +39,12 @@ expert bank. Auto-prefetch is intentionally disabled on this host: the
 169.19-GiB checkpoint is larger than 90% of the approximately 136-GiB available
 RAM, and EXT4 is not treated as a network filesystem. Forcing a full prefetch
 would add memory pressure rather than fix the dense-shard bottleneck.
+
+Native INT4 conversion temporarily raises PyTorch's host packing threads from
+the inference setting of one to at most six CPUs in that worker's affinity
+set, then restores the original setting. This accelerates the dense first 48
+files without changing shard iteration or numerical packing. The launcher's
+`--check-runtime` gate rejects a snapshot that has lost this packer.
 
 Measure startup by the slowest rank's `Model runner load_model total time`.
 Rank 0 finishing early does not make the service ready; the remaining ranks and
@@ -117,13 +124,19 @@ allocation. For the qualified compact-state layout:
 8,400 planner blocks x 10,556,416 logical bytes/block = 88,673,894,400 bytes
 ```
 
-Those blocks consume about 15.4 GiB of physical attention pages per rank. The
-310P worker sizes the resident recurrent-state tier from the remaining device
-headroom after preserving a 2-GiB graph/workspace reserve. Host spill starts
-only after that expanded tier fills. Startup logs report the slot count and
-bytes per checkpoint; the first NPU-to-CPU spill and CPU-to-NPU restore each
-emit an explicit warning. Cache transforms such as offload and KV parallelism
-must still run even when the maximum-token forward is skipped.
+Those blocks consume about 15.4 GiB of physical attention pages per rank plus
+an approximately 1.87-GB, 64-slot recurrent-state pool. The recurrent-state
+tensor shape is accuracy-qualified and must not be enlarged from apparent NPU
+headroom without a long-context coherency test. The first NPU-to-CPU spill and
+CPU-to-NPU restore each emit an explicit warning. Cache transforms such as
+offload and KV parallelism must still run even when the maximum-token forward
+is skipped.
+
+The retained launcher defaults to the complete
+`qwen38-head-unified-runtime-20261001` snapshot. Do not assemble a serving
+runtime by copying individual Qwen files from different source trees. The
+launcher's `--check-runtime` gate catches known API mismatches, while a
+thinking-enabled generation gate remains required for semantic coherency.
 
 The 4 x 256K claim means the engine reports at least 1,048,576 cache tokens and
 maximum concurrency of at least 4.00 for a 262,144-token request. Setting

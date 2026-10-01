@@ -32,33 +32,6 @@ def prefix_mamba_slot_count(max_num_reqs: int, num_speculative_tokens: int) -> i
     return max(PREFIX_MAMBA_MIN_SLOTS, 1 + max_num_reqs * 2 * (1 + num_speculative_tokens))
 
 
-def prefix_mamba_resident_slot_count(
-    minimum_slots: int,
-    maximum_slots: int,
-    state_bytes_per_slot: int,
-    physical_cache_bytes: int,
-    attention_cache_bytes: int,
-) -> int:
-    """Use cache headroom for recurrent checkpoints before host spill.
-
-    ``physical_cache_bytes`` is the device budget left after model and runtime
-    workspace accounting. Attention pages retain priority because they define
-    the advertised token capacity. Every remaining whole Mamba checkpoint is
-    kept resident, bounded by the scheduler's block pool.
-    """
-    if (
-        minimum_slots < 2
-        or maximum_slots < minimum_slots
-        or state_bytes_per_slot <= 0
-        or physical_cache_bytes < 0
-        or attention_cache_bytes < 0
-    ):
-        raise ValueError("Invalid prefix Mamba residency budget")
-    remaining_bytes = max(0, physical_cache_bytes - attention_cache_bytes)
-    slots_from_memory = remaining_bytes // state_bytes_per_slot
-    return min(maximum_slots, max(minimum_slots, slots_from_memory))
-
-
 class LiveMambaRequestSlots:
     """Stable per-request lanes when prefix caching is disabled.
 

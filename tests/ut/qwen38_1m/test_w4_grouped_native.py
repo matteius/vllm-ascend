@@ -217,6 +217,20 @@ def test_native_layout_roundtrip_and_weight_sum():
     torch.testing.assert_close(sums, pack_native_metadata(expected), rtol=0, atol=0)
 
 
+def test_native_weight_pack_uses_affinity_threads_and_restores(monkeypatch):
+    thread_changes = []
+    monkeypatch.setattr("os.sched_getaffinity", lambda _pid: set(range(8)))
+    monkeypatch.setattr(torch, "get_num_threads", lambda: 1)
+    monkeypatch.setattr(torch, "set_num_threads", thread_changes.append)
+    packed = torch.zeros((16, 64), dtype=torch.int8)
+
+    native, sums = pack_native_weight(packed)
+
+    assert native.shape == packed.shape
+    assert sums.shape == (16, 1)
+    assert thread_changes == [6, 1]
+
+
 def test_float_packing_exact_for_every_nibble_pair():
     low, high = torch.meshgrid(torch.arange(-8, 8), torch.arange(-8, 8), indexing="ij")
     values = torch.stack((low.flatten(), high.flatten()), -1)

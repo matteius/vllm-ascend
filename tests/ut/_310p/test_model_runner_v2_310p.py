@@ -1055,7 +1055,7 @@ def test_worker_uses_explicit_cache_budget_without_profile_forward() -> None:
     qualified_budget = 88_673_894_400
     worker = object.__new__(worker_module.NPUWorker310)
     worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=qualified_budget)
-    worker.model_runner = MagicMock()
+    worker.model_runner = MagicMock(num_compact_mamba_blocks=64)
 
     with (
         patch.object(
@@ -1071,6 +1071,7 @@ def test_worker_uses_explicit_cache_budget_without_profile_forward() -> None:
     ):
         assert worker.determine_available_memory() == qualified_budget
     assert worker.available_kv_cache_memory_bytes == qualified_budget
+    assert worker.model_runner.num_compact_mamba_blocks == 64
     apply_offload_limit.assert_called_once_with(qualified_budget)
     apply_kvpp_budget.assert_called_once_with(qualified_budget)
     worker.model_runner.profile_run.assert_not_called()

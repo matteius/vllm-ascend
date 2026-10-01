@@ -20,7 +20,10 @@
 #     'bash ~/start_qwen38_flashnext_mtp_graph.sh; exec sleep infinity'
 set -eo pipefail
 
-RUNTIME_ROOT=${QWEN38_PLUGIN_ROOT:-/srv/ai/src/vllm-ascend-main-0df11511c}
+# This snapshot is the full source set used by the retained coherency and GPQA
+# gates. Override it only with another runtime that passes --check-runtime and
+# an end-to-end thinking-enabled coherency probe.
+RUNTIME_ROOT=${QWEN38_PLUGIN_ROOT:-/srv/ai/src/qwen38-head-unified-runtime-20261001}
 MODEL=${QWEN38_MODEL_ROOT:-/srv/ai/models/Qwen3.8-Flash-Next-W4A16-G128-300i}
 PYTHON_BIN=${QWEN38_PYTHON_BIN:-/srv/ai/venvs/qwen38-w4-test-ce1862/bin/python}
 HARDWARE_ENV=${QWEN38_HARDWARE_ENV:-/srv/ai/src/qwen38-w4-hardware-20260927/qwen38-w4-hardware-env.sh}
@@ -30,10 +33,10 @@ PACKAGED_OPP=${RUNTIME_ROOT}/vllm_ascend/_cann_ops_custom/vendors/custom_transfo
 AFFINITY_HELPER=${QWEN38_AFFINITY_HELPER:-/srv/ai/src/qwen38-w4-hardware-20260927/qwen38-w4-kilo-affinity-r8.py}
 
 # 8,400 planner blocks from the qualified FP32-state layout.  This reserves
-# 82.58 GiB of logical cache (about 15.4 GiB of physical attention pages).
-# The runtime expands the compact recurrent-state pool into the remaining
-# qualified NPU headroom before allowing CPU spill, while preserving enough
-# attention blocks for four 262,144-token requests.
+# 82.58 GiB of logical cache (about 15.4 GiB of physical attention pages plus
+# the qualified 64-slot compact recurrent-state pool), enough for four
+# 262,144-token requests. Do not infer a larger recurrent-state tensor from
+# unallocated device memory: its production shape is part of the accuracy gate.
 QUALIFIED_KV_CACHE_MEMORY_BYTES=88673894400
 
 PORT=${PORT:-8001}
@@ -69,7 +72,8 @@ runtime_root = Path(sys.argv[1])
 model_path = runtime_root / "vllm_ascend/models/qwen4_exp/model.py"
 mtp_path = runtime_root / "vllm_ascend/models/qwen4_exp/mtp.py"
 w4_moe_path = runtime_root / "vllm_ascend/models/qwen4_exp/w4_moe.py"
-for path in (model_path, mtp_path, w4_moe_path):
+w4a8_path = runtime_root / "vllm_ascend/models/qwen4_exp/w4a8_int4.py"
+for path in (model_path, mtp_path, w4_moe_path, w4a8_path):
     if not path.is_file():
         raise SystemExit(f"Qwen runtime coherence check: missing {path}")
 
@@ -130,6 +134,30 @@ if missing_w4_names:
     raise SystemExit(
         "Qwen runtime coherence check: "
         f"{model_path} imports {missing_w4_names} missing from {w4_moe_path}"
+    )
+
+w4a8_tree = ast.parse(w4a8_path.read_text(), filename=str(w4a8_path))
+pack_function = next(
+    (
+        node
+        for node in w4a8_tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "pack_native_weight"
+    ),
+    None,
+)
+uses_parallel_pack = pack_function is not None and any(
+    isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and isinstance(node.func.value, ast.Name)
+    and node.func.value.id == "torch"
+    and node.func.attr == "set_num_threads"
+    for node in ast.walk(pack_function)
+)
+if not uses_parallel_pack:
+    raise SystemExit(
+        "Qwen runtime coherence check: "
+        f"{w4a8_path} lost the qualified parallel native-weight packer"
     )
 
 print(f"Qwen runtime coherence check passed: {runtime_root}")
