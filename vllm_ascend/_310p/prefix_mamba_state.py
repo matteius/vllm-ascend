@@ -15,6 +15,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from vllm.logger import logger
 
 PREFIX_MAMBA_MIN_SLOTS = 64
 
@@ -29,6 +30,33 @@ def prefix_mamba_slot_count(max_num_reqs: int, num_speculative_tokens: int) -> i
     if max_num_reqs < 1 or num_speculative_tokens < 0:
         raise ValueError("Invalid compact Mamba request or speculation limit")
     return max(PREFIX_MAMBA_MIN_SLOTS, 1 + max_num_reqs * 2 * (1 + num_speculative_tokens))
+
+
+def prefix_mamba_resident_slot_count(
+    minimum_slots: int,
+    maximum_slots: int,
+    state_bytes_per_slot: int,
+    physical_cache_bytes: int,
+    attention_cache_bytes: int,
+) -> int:
+    """Use cache headroom for recurrent checkpoints before host spill.
+
+    ``physical_cache_bytes`` is the device budget left after model and runtime
+    workspace accounting. Attention pages retain priority because they define
+    the advertised token capacity. Every remaining whole Mamba checkpoint is
+    kept resident, bounded by the scheduler's block pool.
+    """
+    if (
+        minimum_slots < 2
+        or maximum_slots < minimum_slots
+        or state_bytes_per_slot <= 0
+        or physical_cache_bytes < 0
+        or attention_cache_bytes < 0
+    ):
+        raise ValueError("Invalid prefix Mamba residency budget")
+    remaining_bytes = max(0, physical_cache_bytes - attention_cache_bytes)
+    slots_from_memory = remaining_bytes // state_bytes_per_slot
+    return min(maximum_slots, max(minimum_slots, slots_from_memory))
 
 
 class LiveMambaRequestSlots:
@@ -139,6 +167,11 @@ class PrefixMambaStateTier:
         self._resident: OrderedDict[int, int] = OrderedDict()
         self._host: dict[int, tuple[torch.Tensor, ...]] = {}
         self._unused_slots = list(range(num_slots - 1, 0, -1))
+        self._spill_count = 0
+        self._restore_count = 0
+        self._bytes_per_slot = sum(
+            state[0].numel() * state[0].element_size() for states in self.layer_states for state in states
+        )
         for states in self.layer_states:
             for state in states:
                 if state.shape[0] != num_slots:
@@ -191,11 +224,27 @@ class PrefixMambaStateTier:
                 raise RuntimeError(f"Mamba prefix step needs more than {self.num_slots - 1} live state blocks")
             slot = self._resident.pop(victim_id)
             self._host[victim_id] = self._snapshot(slot)
+            self._spill_count += 1
+            if self._spill_count == 1:
+                logger.warning(
+                    "Prefix Mamba NPU tier exhausted: resident_slots=%d, "
+                    "checkpoint_bytes=%d. Spilling checkpoints NPU->CPU; "
+                    "subsequent prefix hits may restore CPU->NPU.",
+                    self.num_slots - 1,
+                    self._bytes_per_slot,
+                )
         snapshot = self._host.pop(block_id, None)
         if snapshot is None:
             for tensor in self._slot_tensors(slot):
                 tensor.zero_()
         else:
+            self._restore_count += 1
+            if self._restore_count == 1:
+                logger.warning(
+                    "Restoring a spilled prefix Mamba checkpoint CPU->NPU: checkpoint_bytes=%d, spill_count=%d.",
+                    self._bytes_per_slot,
+                    self._spill_count,
+                )
             for target, source in zip(self._slot_tensors(slot), snapshot):
                 target.copy_(source)
         self._resident[block_id] = slot

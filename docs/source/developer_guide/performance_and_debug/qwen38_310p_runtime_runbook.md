@@ -117,10 +117,13 @@ allocation. For the qualified compact-state layout:
 8,400 planner blocks x 10,556,416 logical bytes/block = 88,673,894,400 bytes
 ```
 
-Those blocks consume about 15.4 GiB of physical attention pages per rank plus
-an approximately 1.87-GB fixed recurrent-state pool. Cache transforms such as
-offload and KV parallelism must still run even when the maximum-token forward
-is skipped.
+Those blocks consume about 15.4 GiB of physical attention pages per rank. The
+310P worker sizes the resident recurrent-state tier from the remaining device
+headroom after preserving a 2-GiB graph/workspace reserve. Host spill starts
+only after that expanded tier fills. Startup logs report the slot count and
+bytes per checkpoint; the first NPU-to-CPU spill and CPU-to-NPU restore each
+emit an explicit warning. Cache transforms such as offload and KV parallelism
+must still run even when the maximum-token forward is skipped.
 
 The 4 x 256K claim means the engine reports at least 1,048,576 cache tokens and
 maximum concurrency of at least 4.00 for a 262,144-token request. Setting
@@ -135,9 +138,23 @@ forward did not warm the cold-prefill route.
 ## Graph-capture constraints
 
 GDN supports decode-only full graph capture in this runtime. Use
-`FULL_DECODE_ONLY` with the qualified capture sizes `[1, 2, 3, 6]`. Mixed
-prefill/decode full capture generated requests whose token count exceeded the
-decode graph size and failed the GDN assertion.
+`FULL_DECODE_ONLY`. MTP verifies `K + 1` tokens for every live request, so each
+capture size must be a multiple of `K + 1`. TP graph capture on 310P has a
+two-size event-id budget: a third graph exhausted HCCL capture events in the
+qualified experiments. The general MTP2 service profile therefore uses
+`[3, 6]`, keeping the interactive C1 and C2 shapes exact. C3 and C4 use eager
+decode. A separate `[9, 12]` profile qualified full graphs for C3 and C4, but
+made C1 and C2 pad to the 9-token graph and is not the interactive service
+default. Mixed prefill/decode full capture generated requests whose token count
+exceeded the decode graph size and failed the GDN assertion.
+
+When a uniform decode batch cannot use any configured graph key, the model
+runner emits a one-time warning for that batch shape with its token count,
+request count, query length, and capture sizes. Treat that warning as a
+performance failure: the affected shape pays host dispatch cost on every step.
+The launcher also enables `VLLM_ASCEND_LOG_REQUEST_TIMINGS`; every completed
+request reports prompt tokens as computed plus cached, making lost hot-prefix
+reuse visible without inferring it from aggregate cache metrics.
 
 Decode graph capture must also exercise the FP32 recurrent state successfully.
 An error saying that `params.state` supports only FP16 indicates an incoherent

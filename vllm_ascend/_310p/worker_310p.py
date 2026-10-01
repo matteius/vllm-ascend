@@ -24,15 +24,83 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec, UniformTypeKVCacheSpecs
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
+from vllm_ascend._310p.prefix_mamba_state import prefix_mamba_resident_slot_count
 from vllm_ascend.utils import is_rc_device
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
+# Retained Qwen4Exp measurements put activation, non-torch, graph, and allocator
+# safety demand below 2 GiB per rank. Keep that margin in addition to the
+# gpu_memory_utilization reserve when expanding the device-resident state tier.
+_PREFIX_MAMBA_RUNTIME_RESERVE_BYTES = 2 * GiB_bytes
+
 
 class NPUWorker310(NPUWorker):
+    def _expand_prefix_mamba_residency(self, planner_memory_bytes: int) -> None:
+        model_runner = self.model_runner
+        if not getattr(model_runner, "supports_prefix_mamba_state_tier", False):
+            return
+
+        kv_cache_spec = self.get_kv_cache_spec()
+        if not isinstance(kv_cache_spec, dict):
+            return
+        groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+        planner_bytes_per_block = 0
+        attention_bytes_per_block = 0
+        state_bytes_per_slot = 0
+        for group in groups:
+            group_planner_bytes = 0
+            for layer_name in group.layer_names:
+                group_spec = group.kv_cache_spec
+                if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                    layer_spec = group_spec.kv_cache_specs[layer_name]
+                else:
+                    layer_spec = group_spec
+                group_planner_bytes += layer_spec.page_size_bytes
+                if isinstance(layer_spec, AttentionSpec):
+                    attention_bytes_per_block += layer_spec.real_page_size_bytes
+                elif isinstance(layer_spec, MambaSpec):
+                    state_bytes_per_slot += layer_spec.page_size_bytes
+            planner_bytes_per_block = max(planner_bytes_per_block, group_planner_bytes)
+
+        if planner_bytes_per_block <= 0 or state_bytes_per_slot <= 0:
+            return
+        planner_blocks = planner_memory_bytes // planner_bytes_per_block
+        if planner_blocks <= 0:
+            return
+
+        free_memory, total_memory = torch.npu.mem_get_info()
+        current_device_bytes = total_memory - free_memory
+        physical_cache_bytes = max(
+            0,
+            int(self.requested_memory) - current_device_bytes - _PREFIX_MAMBA_RUNTIME_RESERVE_BYTES,
+        )
+        attention_cache_bytes = planner_blocks * attention_bytes_per_block
+        minimum_slots = model_runner.num_compact_mamba_blocks
+        resident_slots = prefix_mamba_resident_slot_count(
+            minimum_slots=minimum_slots,
+            maximum_slots=planner_blocks + 1,
+            state_bytes_per_slot=state_bytes_per_slot,
+            physical_cache_bytes=physical_cache_bytes,
+            attention_cache_bytes=attention_cache_bytes,
+        )
+        model_runner.num_compact_mamba_blocks = resident_slots
+        logger.info_once(
+            "Prefix Mamba residency: %d slots (minimum=%d), %.2f MiB/checkpoint, "
+            "%.2f GiB attention, %.2f GiB physical cache budget, %.2f GiB runtime reserve.",
+            resident_slots,
+            minimum_slots,
+            state_bytes_per_slot / (1 << 20),
+            attention_cache_bytes / GiB_bytes,
+            physical_cache_bytes / GiB_bytes,
+            _PREFIX_MAMBA_RUNTIME_RESERVE_BYTES / GiB_bytes,
+            scope="local",
+        )
+
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
         # Qwen4Exp's compact-state runner materializes only a fixed number of
         # recurrent-state slots, while the scheduler still addresses virtual
@@ -154,6 +222,7 @@ class NPUWorker310(NPUWorker):
         # does not warm GDN attention because profile metadata omits it.
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             self.available_kv_cache_memory_bytes = int(kv_cache_memory_bytes)
+            self._expand_prefix_mamba_residency(self.available_kv_cache_memory_bytes)
             logger.info_once(
                 "Using explicitly qualified KV cache memory: %.2f GiB; skipping 310P memory profile forward.",
                 GiB(self.available_kv_cache_memory_bytes),

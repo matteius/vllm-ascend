@@ -30,9 +30,10 @@ PACKAGED_OPP=${RUNTIME_ROOT}/vllm_ascend/_cann_ops_custom/vendors/custom_transfo
 AFFINITY_HELPER=${QWEN38_AFFINITY_HELPER:-/srv/ai/src/qwen38-w4-hardware-20260927/qwen38-w4-kilo-affinity-r8.py}
 
 # 8,400 planner blocks from the qualified FP32-state layout.  This reserves
-# 82.58 GiB of logical cache (about 15.4 GiB of physical attention pages plus
-# the fixed compact recurrent-state pool), enough for four 262,144-token
-# requests while retaining more workspace margin than the measured 4.30x run.
+# 82.58 GiB of logical cache (about 15.4 GiB of physical attention pages).
+# The runtime expands the compact recurrent-state pool into the remaining
+# qualified NPU headroom before allowing CPU spill, while preserving enough
+# attention blocks for four 262,144-token requests.
 QUALIFIED_KV_CACHE_MEMORY_BYTES=88673894400
 
 PORT=${PORT:-8001}
@@ -50,13 +51,112 @@ WATCHDOG_LOG=${WATCHDOG_LOG:-$HOME/logs/watchdog_qwen38_native_int4_mtp_graph.lo
 AFFINITY_LOG=${AFFINITY_LOG:-$HOME/logs/affinity_qwen38_native_int4_mtp_graph.log}
 
 usage() {
-  echo "Usage: PORT=8001 $0 [--show|--capture-routes]" >&2
+  echo "Usage: PORT=8001 $0 [--show|--check-runtime|--capture-routes]" >&2
 }
 
-if (( $# > 1 )) || { (( $# == 1 )) && [[ "$1" != --show && "$1" != --capture-routes ]]; }; then
+if (( $# > 1 )) || { (( $# == 1 )) && [[ "$1" != --show && "$1" != --check-runtime && "$1" != --capture-routes ]]; }; then
   usage
   exit 2
 fi
+
+check_runtime_coherence() {
+  "$PYTHON_BIN" - "$RUNTIME_ROOT" <<'PY'
+import ast
+import sys
+from pathlib import Path
+
+runtime_root = Path(sys.argv[1])
+model_path = runtime_root / "vllm_ascend/models/qwen4_exp/model.py"
+mtp_path = runtime_root / "vllm_ascend/models/qwen4_exp/mtp.py"
+w4_moe_path = runtime_root / "vllm_ascend/models/qwen4_exp/w4_moe.py"
+for path in (model_path, mtp_path, w4_moe_path):
+    if not path.is_file():
+        raise SystemExit(f"Qwen runtime coherence check: missing {path}")
+
+model_tree = ast.parse(model_path.read_text(), filename=str(model_path))
+formatter = next(
+    (
+        node
+        for node in ast.walk(model_tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_format_eager_linear_weights_npu"
+    ),
+    None,
+)
+formatter_args = [] if formatter is None else [arg.arg for arg in formatter.args.args]
+if "extra_projection_types" not in formatter_args:
+    raise SystemExit(
+        "Qwen runtime coherence check: "
+        f"{model_path} has a stale _format_eager_linear_weights_npu signature; "
+        f"it is incompatible with {mtp_path}"
+    )
+
+mtp_tree = ast.parse(mtp_path.read_text(), filename=str(mtp_path))
+uses_extended_formatter = any(
+    isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Name)
+    and node.func.id == "_format_eager_linear_weights_npu"
+    and len(node.args) >= 2
+    for node in ast.walk(mtp_tree)
+)
+if not uses_extended_formatter:
+    raise SystemExit(
+        "Qwen runtime coherence check: "
+        f"{mtp_path} does not use the qualified eager projection formatter"
+    )
+
+w4_moe_tree = ast.parse(w4_moe_path.read_text(), filename=str(w4_moe_path))
+required_w4_names = {
+    alias.name
+    for node in ast.walk(model_tree)
+    if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "w4_moe"
+    for alias in node.names
+}
+available_w4_names = {
+    node.name
+    for node in w4_moe_tree.body
+    if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+}
+for node in w4_moe_tree.body:
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        available_w4_names.update(alias.asname or alias.name for alias in node.names)
+    elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        available_w4_names.update(
+            target.id for target in targets if isinstance(target, ast.Name)
+        )
+missing_w4_names = sorted(required_w4_names - available_w4_names)
+if missing_w4_names:
+    raise SystemExit(
+        "Qwen runtime coherence check: "
+        f"{model_path} imports {missing_w4_names} missing from {w4_moe_path}"
+    )
+
+print(f"Qwen runtime coherence check passed: {runtime_root}")
+PY
+}
+
+check_import_provenance() {
+  "$PYTHON_BIN" - "$RUNTIME_ROOT" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+runtime_root = Path(sys.argv[1]).resolve()
+spec = importlib.util.find_spec("vllm_ascend")
+if spec is None or spec.origin is None:
+    raise SystemExit("Qwen runtime provenance check: cannot resolve vllm_ascend")
+origin = Path(spec.origin).resolve()
+try:
+    origin.relative_to(runtime_root)
+except ValueError:
+    raise SystemExit(
+        "Qwen runtime provenance check: "
+        f"selected {origin}, expected a module under {runtime_root}"
+    ) from None
+print(f"Qwen runtime provenance check passed: {origin}")
+PY
+}
 if [[ ! "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
   echo "PORT must be an integer from 1 to 65535" >&2
   exit 2
@@ -99,7 +199,20 @@ JSON
 )
 
 speculative_config=$(printf '{"method":"mtp","num_speculative_tokens":%d}' "$NUM_SPEC_TOKENS")
-compilation_config='{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,3,6]}'
+decode_query_len=$((NUM_SPEC_TOKENS + 1))
+# TP graph capture on 310P has a two-size event-id budget. Keep the interactive
+# C1 and C2 shapes exact. Capturing a third shape exhausts HCCL capture events;
+# C3 and C4 therefore use eager decode and emit the model runner's explicit
+# fallback warning. MTP verifies K+1 tokens per request, so graph sizes must be
+# scaled by the speculative query length.
+if (( MAX_NUM_SEQS == 1 )); then
+  capture_sizes=$(printf '[%d]' "$decode_query_len")
+else
+  capture_sizes=$(printf '[%d,%d]' "$decode_query_len" "$((2 * decode_query_len))")
+fi
+compilation_config=$(printf \
+  '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":%s}' \
+  "$capture_sizes")
 
 # Keep the default safetensors iterator: --enable-ep-weight-filter passes local
 # expert IDs into it so each rank skips non-local expert tensors before disk I/O.
@@ -146,12 +259,19 @@ if [[ "${1:-}" == --show ]]; then
   exit 0
 fi
 
+if [[ "${1:-}" == --check-runtime ]]; then
+  check_runtime_coherence
+  exit 0
+fi
+
 for required_dir in "$MODEL" "$RUNTIME_ROOT" "$COHERENT_OPP" "$RETAINED_OPP" "$PACKAGED_OPP"; do
   [[ -d "$required_dir" ]] || { echo "Required directory is missing: $required_dir" >&2; exit 1; }
 done
 [[ -x "$PYTHON_BIN" ]] || { echo "Python is missing or not executable: $PYTHON_BIN" >&2; exit 1; }
 [[ -r "$HARDWARE_ENV" ]] || { echo "Hardware environment is missing: $HARDWARE_ENV" >&2; exit 1; }
 [[ -r "$AFFINITY_HELPER" ]] || { echo "Affinity helper is missing: $AFFINITY_HELPER" >&2; exit 1; }
+
+check_runtime_coherence
 
 # Source the isolated 310P environment, then put the retained runtime and
 # custom operators first. TASK_QUEUE_ENABLE=2 failed during graph capture.
@@ -174,12 +294,14 @@ export ASCEND_CUSTOM_OPP_PATH="${COHERENT_OPP}:${PACKAGED_OPP}:${RETAINED_OPP}${
 export LD_LIBRARY_PATH="${COHERENT_OPP}/op_api/lib:${PACKAGED_OPP}/op_api/lib:${RETAINED_OPP}/op_api/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export VLLM_ASCEND_KV_CACHE_FRACTION="$KV_CACHE_FRACTION"
+export VLLM_ASCEND_LOG_REQUEST_TIMINGS=1
 export VLLM_USE_BREAKABLE_CUDAGRAPH=1
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
 export TASK_QUEUE_ENABLE=1
 export OMP_NUM_THREADS=1
 
 cd "$RUNTIME_ROOT"
+check_import_provenance
 mkdir -p "$(dirname "$LOG")" "$(dirname "$WATCHDOG_LOG")"
 touch "$LOG"
 

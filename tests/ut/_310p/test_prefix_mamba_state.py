@@ -11,6 +11,7 @@ from vllm_ascend._310p.prefix_mamba_state import (
     PrefixMambaStateTier,
     get_mamba_postprocess_block_ids,
     prefix_mamba_active_columns,
+    prefix_mamba_resident_slot_count,
     prefix_mamba_slot_count,
 )
 
@@ -89,6 +90,65 @@ def test_shared_slot_count_covers_previous_and_current_candidate_windows(request
 def test_invalid_slot_count_fails(requests, drafts):
     with pytest.raises(ValueError):
         prefix_mamba_slot_count(requests, drafts)
+
+
+def test_resident_slots_consume_device_headroom_after_attention() -> None:
+    assert (
+        prefix_mamba_resident_slot_count(
+            minimum_slots=64,
+            maximum_slots=1000,
+            state_bytes_per_slot=100,
+            physical_cache_bytes=30_000,
+            attention_cache_bytes=5_000,
+        )
+        == 250
+    )
+    assert (
+        prefix_mamba_resident_slot_count(
+            minimum_slots=64,
+            maximum_slots=100,
+            state_bytes_per_slot=100,
+            physical_cache_bytes=30_000,
+            attention_cache_bytes=5_000,
+        )
+        == 100
+    )
+
+
+def test_resident_slots_preserve_minimum_when_headroom_is_small() -> None:
+    assert (
+        prefix_mamba_resident_slot_count(
+            minimum_slots=64,
+            maximum_slots=1000,
+            state_bytes_per_slot=100,
+            physical_cache_bytes=5_000,
+            attention_cache_bytes=5_000,
+        )
+        == 64
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"minimum_slots": 1},
+        {"maximum_slots": 63},
+        {"state_bytes_per_slot": 0},
+        {"physical_cache_bytes": -1},
+        {"attention_cache_bytes": -1},
+    ],
+)
+def test_resident_slot_budget_rejects_invalid_values(kwargs) -> None:
+    values = {
+        "minimum_slots": 64,
+        "maximum_slots": 1000,
+        "state_bytes_per_slot": 100,
+        "physical_cache_bytes": 30_000,
+        "attention_cache_bytes": 5_000,
+    }
+    values.update(kwargs)
+    with pytest.raises(ValueError, match="residency budget"):
+        prefix_mamba_resident_slot_count(**values)
 
 
 def test_active_windows_follow_each_requests_progress_and_speculation():

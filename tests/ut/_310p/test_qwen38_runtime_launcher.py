@@ -3,7 +3,14 @@
 
 from __future__ import annotations
 
+import json
+import os
+import shlex
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LAUNCHER = REPO_ROOT / "examples" / "start_qwen38_flash_next_w4_310p.sh"
@@ -41,3 +48,95 @@ def test_coherent_opp_supports_the_qualified_prefill_chunk():
     assert "qwen38-coherent-opp-20261001-r2" in launcher
     assert "20,480 rows" in launcher
     assert "MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-2048}" in launcher
+
+
+@pytest.mark.parametrize(
+    ("num_spec_tokens", "max_num_seqs", "expected_sizes"),
+    [
+        (2, 4, [3, 6]),
+        (1, 3, [2, 4]),
+        (3, 1, [4]),
+    ],
+)
+def test_graph_capture_sizes_keep_interactive_mtp_shapes_exact(num_spec_tokens, max_num_seqs, expected_sizes):
+    env = os.environ.copy()
+    env.update(NUM_SPEC_TOKENS=str(num_spec_tokens), MAX_NUM_SEQS=str(max_num_seqs))
+    result = subprocess.run(
+        ["bash", str(LAUNCHER), "--show"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    argv = shlex.split(result.stdout)
+    compilation_config = json.loads(argv[argv.index("--compilation-config") + 1])
+    assert compilation_config["cudagraph_capture_sizes"] == expected_sizes
+    assert compilation_config["cudagraph_capture_sizes"][-1] == min(max_num_seqs, 2) * (num_spec_tokens + 1)
+    assert "VLLM_ASCEND_LOG_REQUEST_TIMINGS=1" in LAUNCHER.read_text()
+
+
+def _write_qwen_runtime(runtime_root: Path, *, extended_formatter: bool) -> None:
+    model_dir = runtime_root / "vllm_ascend" / "models" / "qwen4_exp"
+    model_dir.mkdir(parents=True)
+    if extended_formatter:
+        formatter_args = "model, extra_projection_types=()"
+    else:
+        formatter_args = "model"
+    (model_dir / "model.py").write_text(f"def _format_eager_linear_weights_npu({formatter_args}):\n    pass\n")
+    (model_dir / "mtp.py").write_text("_format_eager_linear_weights_npu(model, (Predictor, MoE))\n")
+    (model_dir / "w4_moe.py").write_text("class DeferredReduceStream:\n    pass\n")
+
+
+def test_runtime_coherence_check_accepts_matching_formatter(tmp_path):
+    _write_qwen_runtime(tmp_path, extended_formatter=True)
+    env = os.environ.copy()
+    env.update(QWEN38_PLUGIN_ROOT=str(tmp_path), QWEN38_PYTHON_BIN=sys.executable)
+
+    result = subprocess.run(
+        ["bash", str(LAUNCHER), "--check-runtime"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "runtime coherence check passed" in result.stdout
+
+
+def test_runtime_coherence_check_rejects_stale_formatter(tmp_path):
+    _write_qwen_runtime(tmp_path, extended_formatter=False)
+    env = os.environ.copy()
+    env.update(QWEN38_PLUGIN_ROOT=str(tmp_path), QWEN38_PYTHON_BIN=sys.executable)
+
+    result = subprocess.run(
+        ["bash", str(LAUNCHER), "--check-runtime"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "stale _format_eager_linear_weights_npu signature" in result.stderr
+
+
+def test_runtime_coherence_check_rejects_missing_w4_symbol(tmp_path):
+    _write_qwen_runtime(tmp_path, extended_formatter=True)
+    model_path = tmp_path / "vllm_ascend" / "models" / "qwen4_exp" / "model.py"
+    model_path.write_text(model_path.read_text() + "from .w4_moe import MissingStream\n")
+    env = os.environ.copy()
+    env.update(QWEN38_PLUGIN_ROOT=str(tmp_path), QWEN38_PYTHON_BIN=sys.executable)
+
+    result = subprocess.run(
+        ["bash", str(LAUNCHER), "--check-runtime"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "imports ['MissingStream'] missing" in result.stderr

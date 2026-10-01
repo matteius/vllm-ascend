@@ -78,6 +78,9 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
             lora_id_to_lora_request={},
         )
         runner.model_config = SimpleNamespace(is_encoder_decoder=False, is_hybrid=False)
+        runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
+        runner.cudagraph_batch_sizes = []
+        runner._logged_cudagraph_eager_fallbacks = set()
         runner.cudagraph_dispatcher = MagicMock(
             dispatch=MagicMock(
                 return_value=(
@@ -142,6 +145,28 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
                         force_uniform_decode=forced,
                     )
                 self.assertEqual(runner.cudagraph_dispatcher.dispatch.call_args.kwargs["uniform_decode"], expected)
+
+    def test_uniform_decode_eager_fallback_logs_once(self):
+        runner = self._build_dispatch_runner(speculative=True)
+        runner.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        runner.cudagraph_batch_sizes = [3, 6]
+
+        with (
+            patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=False),
+            patch("vllm_ascend.worker.model_runner_v1.logger.warning") as warning,
+        ):
+            for _ in range(2):
+                runner._determine_batch_execution_and_padding(
+                    num_tokens=12,
+                    num_reqs=2,
+                    num_scheduled_tokens_np=np.array([6, 6], dtype=np.int32),
+                    max_num_scheduled_tokens=6,
+                    use_cascade_attn=False,
+                )
+
+        warning.assert_called_once()
+        self.assertIn("fell back to eager execution", warning.call_args.args[0])
+        self.assertEqual(warning.call_args.args[2:6], (12, 2, 6, [3, 6]))
 
     def test_mamba_non_spec_decode_graph_dispatch(self):
         for computed, expected in ((2048, False), (2049, True)):

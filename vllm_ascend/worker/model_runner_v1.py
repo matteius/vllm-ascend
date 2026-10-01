@@ -732,6 +732,7 @@ class NPUModelRunner(GPUModelRunner):
             self.cudagraph_batch_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
         else:
             self.cudagraph_batch_sizes = []
+        self._logged_cudagraph_eager_fallbacks: set[tuple[int, int, bool]] = set()
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: Any | None = None
         self._mamba_copy_bufs: Any | None = None
@@ -3476,6 +3477,15 @@ class NPUModelRunner(GPUModelRunner):
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
+
+        self._warn_on_cudagraph_eager_fallback(
+            cudagraph_mode=cudagraph_mode,
+            uniform_decode=uniform_decode,
+            force_eager=force_eager,
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            has_lora=has_lora,
+        )
         cudagraph_stats = None
         if self.vllm_config.observability_config.cudagraph_metrics:
             cudagraph_stats = CUDAGraphStat(
@@ -3491,6 +3501,49 @@ class NPUModelRunner(GPUModelRunner):
             should_ubatch,
             num_tokens_across_dp,
             cudagraph_stats,
+        )
+
+    def _warn_on_cudagraph_eager_fallback(
+        self,
+        *,
+        cudagraph_mode: CUDAGraphMode,
+        uniform_decode: bool,
+        force_eager: bool,
+        num_tokens: int,
+        num_reqs: int,
+        has_lora: bool,
+    ) -> None:
+        configured_decode_mode = self.compilation_config.cudagraph_mode.decode_mode()
+        if (
+            force_eager
+            or not uniform_decode
+            or cudagraph_mode != CUDAGraphMode.NONE
+            or configured_decode_mode == CUDAGraphMode.NONE
+        ):
+            return
+
+        fallback_key = (num_tokens, num_reqs, has_lora)
+        if fallback_key in self._logged_cudagraph_eager_fallbacks:
+            return
+        self._logged_cudagraph_eager_fallbacks.add(fallback_key)
+
+        max_capture_size = max(self.cudagraph_batch_sizes, default=0)
+        reason = (
+            "decode token count exceeds the largest capture size"
+            if num_tokens > max_capture_size
+            else "no compatible graph key was available"
+        )
+        logger.warning(
+            "ACL graph decode fell back to eager execution (%s): "
+            "decode_tokens=%d, requests=%d, query_len=%d, capture_sizes=%s, "
+            "configured_mode=%s, has_lora=%s. Host dispatch will run every decode step.",
+            reason,
+            num_tokens,
+            num_reqs,
+            self.uniform_decode_query_len,
+            self.cudagraph_batch_sizes,
+            self.compilation_config.cudagraph_mode,
+            has_lora,
         )
 
     def _maybe_eager_restore_copy_sfa_tails(self, attn_metadata: PerLayerAttnMetadata) -> None:
