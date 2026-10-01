@@ -24,10 +24,15 @@ RUNTIME_ROOT=${QWEN38_PLUGIN_ROOT:-/srv/ai/src/vllm-ascend-main-0df11511c}
 MODEL=${QWEN38_MODEL_ROOT:-/srv/ai/models/Qwen3.8-Flash-Next-W4A16-G128-300i}
 PYTHON_BIN=${QWEN38_PYTHON_BIN:-/srv/ai/venvs/qwen38-w4-test-ce1862/bin/python}
 HARDWARE_ENV=${QWEN38_HARDWARE_ENV:-/srv/ai/src/qwen38-w4-hardware-20260927/qwen38-w4-hardware-env.sh}
-STATE_OPP=${QWEN38_STATE_OPP:-/srv/ai/src/qwen38-fp32-state-opp-20261001/vendors/custom_transformer_transformer}
-UNIFIED_OPP=${QWEN38_UNIFIED_OPP:-/srv/ai/src/w4-weight-pipeline-c1-dispatch-20260929/vllm_ascend/_cann_ops_custom/vendors/custom_transformer}
+COHERENT_OPP=${QWEN38_COHERENT_OPP:-/srv/ai/src/qwen38-coherent-opp-20261001/vendors/qwen38_coherent_transformer}
 RETAINED_OPP=${QWEN38_RETAINED_OPP:-/srv/ai/src/native-int4-w4a8.KiuhBN/opp-retained-good-20260928}
 AFFINITY_HELPER=${QWEN38_AFFINITY_HELPER:-/srv/ai/src/qwen38-w4-hardware-20260927/qwen38-w4-kilo-affinity-r8.py}
+
+# 8,400 planner blocks from the qualified FP32-state layout.  This reserves
+# 82.58 GiB of logical cache (about 15.4 GiB of physical attention pages plus
+# the fixed compact recurrent-state pool), enough for four 262,144-token
+# requests while retaining more workspace margin than the measured 4.30x run.
+QUALIFIED_KV_CACHE_MEMORY_BYTES=88673894400
 
 PORT=${PORT:-8001}
 SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-qwen38-w4-pipeline-c1-dispatch}
@@ -112,6 +117,7 @@ serve_cmd=(
   --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS"
   --max-num-seqs "$MAX_NUM_SEQS"
   --gpu-memory-utilization "$GPU_MEM_UTIL"
+  --kv-cache-memory "$QUALIFIED_KV_CACHE_MEMORY_BYTES"
   --language-model-only
   --enable-expert-parallel
   --enable-ep-weight-filter
@@ -139,7 +145,7 @@ if [[ "${1:-}" == --show ]]; then
   exit 0
 fi
 
-for required_dir in "$MODEL" "$RUNTIME_ROOT" "$STATE_OPP" "$UNIFIED_OPP" "$RETAINED_OPP"; do
+for required_dir in "$MODEL" "$RUNTIME_ROOT" "$COHERENT_OPP" "$RETAINED_OPP"; do
   [[ -d "$required_dir" ]] || { echo "Required directory is missing: $required_dir" >&2; exit 1; }
 done
 [[ -x "$PYTHON_BIN" ]] || { echo "Python is missing or not executable: $PYTHON_BIN" >&2; exit 1; }
@@ -152,8 +158,11 @@ done
 # shellcheck disable=SC1090
 source "$HARDWARE_ENV"
 export PYTHONPATH="${RUNTIME_ROOT}:/srv/ai/src/vllm-opensensor:${PYTHONPATH:-}"
-export ASCEND_CUSTOM_OPP_PATH="${STATE_OPP}:${UNIFIED_OPP}:${RETAINED_OPP}:${ASCEND_CUSTOM_OPP_PATH:-}"
-export LD_LIBRARY_PATH="${UNIFIED_OPP}/op_api/lib:${LD_LIBRARY_PATH:-}"
+# Keep each critical W4 and recurrent operator's host API and kernels in one
+# package.  Mixing the FP32 recurrent kernels with the retained FP16 host API
+# made graph capture validate the state tensor against the wrong dtype.
+export ASCEND_CUSTOM_OPP_PATH="${COHERENT_OPP}:${RETAINED_OPP}:${ASCEND_CUSTOM_OPP_PATH:-}"
+export LD_LIBRARY_PATH="${COHERENT_OPP}/op_api/lib:${RETAINED_OPP}/op_api/lib:${LD_LIBRARY_PATH:-}"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export VLLM_ASCEND_KV_CACHE_FRACTION="$KV_CACHE_FRACTION"
 export VLLM_USE_BREAKABLE_CUDAGRAPH=1

@@ -1034,3 +1034,43 @@ def test_worker_delegates_compact_state_budget_before_shared_slot_shortcut() -> 
 
     parent_scale.assert_called_once_with(12345)
     shared_slots.assert_not_called()
+
+
+def test_worker_uses_explicit_cache_budget_without_profile_forward() -> None:
+    atb_ops = MagicMock()
+    atb_ops._register_atb_extensions = MagicMock()
+    profiler = MagicMock()
+    profiler.dynamic_profile = MagicMock()
+    with patch.dict(
+        sys.modules,
+        {
+            "torch_npu.op_plugin": MagicMock(),
+            "torch_npu.op_plugin.atb": MagicMock(),
+            "torch_npu.op_plugin.atb._atb_ops": atb_ops,
+            "torch_npu.profiler": profiler,
+        },
+    ):
+        import vllm_ascend._310p.worker_310p as worker_module
+
+    qualified_budget = 88_673_894_400
+    worker = object.__new__(worker_module.NPUWorker310)
+    worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=qualified_budget)
+    worker.model_runner = MagicMock()
+
+    with (
+        patch.object(
+            worker,
+            "_apply_kv_offload_decode_memory_constraints",
+            side_effect=lambda value: value,
+        ) as apply_offload_limit,
+        patch.object(
+            worker,
+            "_apply_kvpp_memory_budget",
+            side_effect=lambda value: value,
+        ) as apply_kvpp_budget,
+    ):
+        assert worker.determine_available_memory() == qualified_budget
+    assert worker.available_kv_cache_memory_bytes == qualified_budget
+    apply_offload_limit.assert_called_once_with(qualified_budget)
+    apply_kvpp_budget.assert_called_once_with(qualified_budget)
+    worker.model_runner.profile_run.assert_not_called()

@@ -144,6 +144,25 @@ class NPUWorker310(NPUWorker):
         bytes.
         """
         GiB = lambda b: b / GiB_bytes
+
+        # A manually qualified cache budget already accounts for weights,
+        # activations, recurrent-state pools, and operator workspaces.  The
+        # generic worker still executes a maximum-token profile pass for
+        # compilation in this case, but 310P runs these native operators with
+        # JIT compilation disabled and performs its decode warmup during graph
+        # capture.  Repeating the large prefill here adds startup latency and
+        # does not warm GDN attention because profile metadata omits it.
+        if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
+            self.available_kv_cache_memory_bytes = int(kv_cache_memory_bytes)
+            logger.info_once(
+                "Using explicitly qualified KV cache memory: %.2f GiB; skipping 310P memory profile forward.",
+                GiB(self.available_kv_cache_memory_bytes),
+                scope="local",
+            )
+            return self._apply_kvpp_memory_budget(
+                self._apply_kv_offload_decode_memory_constraints(self.available_kv_cache_memory_bytes)
+            )
+
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with memory_profiling(
